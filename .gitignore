@@ -21,6 +21,12 @@ dist/
 bin/
 obj/
 
+# Data directory
+data/
+
+# Documentation directory
+docs/
+
 # Dependency files
 *.d
 *.dep
