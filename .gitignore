@@ -1,0 +1,83 @@
+# Compiled and object files
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.lib
+*.exe
+
+# Executables
+*.out
+ngpb
+*.elf
+
+# Build directories
+build/
+Build/
+cmake_build/
+dist/
+bin/
+obj/
+
+# Dependency files
+*.d
+*.dep
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile.cmake
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.DS_Store
+.project
+.cproject
+.settings/
+*.vcxproj.user
+*.sln
+*.cbp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Local settings and sensitive files
+local_settings.mk
+local_setting/
+
+# Documentation generated files
+docs/html/
+docs/latex/
+docs/doxygen_sqlite3.db
+
+# OS-specific files
+Thumbs.db
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+
+# Test outputs and temporary files
+test/*.o
+test/*.out
+
+# Compiler-specific directories
+.gcc_flags
+.g++_flags
