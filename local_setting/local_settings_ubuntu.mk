@@ -19,16 +19,18 @@ LDFLAGS=-L/opt/octave_file_io/lib \
 -L/opt/lis/lib \
 -L/opt/nanoshaper/build_lib \
 -L/opt/bimpp/lib \
+-L/usr/local/cuda-13.1/lib64 \
 $(shell mkoctfile --link-stand-alone -p RDYNAMIC_FLAG) \
 $(shell mkoctfile --link-stand-alone -p LDFLAGS) \
 -Wl,-rpath,/opt/nanoshaper/build_lib \
 -Wl,-rpath,/opt/bimpp/lib  \
 -Wl,-rpath,/opt/octave_file_io/lib \
--Wl,-rpath,/opt/lis/lib 
+-Wl,-rpath,/opt/lis/lib \
+-Wl,-rpath,/usr/local/cuda-13.1/lib64 
 
 LIBS=-lNanoShaper -lbim -lbimmumps -lbimlis -lbimp4est \
      -lbimlinalg -loctave_file_io \
      $(shell mkoctfile --link-stand-alone -p OCTAVE_LIBS) \
      -llis -ldmumps -lmumps_common \
      -lscotcherr -lbz2 -lmpi_usempif08 \
-     -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lp4est -lsc
+     -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lp4est -lsc -lcudart

@@ -22,6 +22,7 @@
 #include "pb_class.h"
 #include "readpdb.h"
 #include "vtk_class.h"
+#include "test.h"
 
 // #include "wrapper_search.h"
 
@@ -58,6 +59,8 @@ save_ray_cache (nlohmann::json& j, const std::map<std::array<double, 2>, crossin
 int
 main (int argc, char **argv)
 {
+
+  run_kernel();
 
   MPI_Init (&argc, &argv);
 

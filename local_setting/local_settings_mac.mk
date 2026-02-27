@@ -13,9 +13,11 @@ LDFLAGS=-L/opt/octave_file_io/1.0.91/lib \
 -L/opt/local/lib \
 -L/opt/nanoshaper/build_lib\
 -L/opt/bimpp/lib \
+-L/usr/local/cuda-13.1/lib64 \
 -Wl,-rpath,/opt/nanoshaper/build_lib \
 -Wl,-rpath,/opt/bimpp_ngpb/lib  \
--Wl,-rpath,/opt/octave_file_io/1.0.91/lib
+-Wl,-rpath,/opt/octave_file_io/1.0.91/lib \
+-Wl,-rpath,/usr/local/cuda-13.1/lib64
 
 LIBS=-lNanoShaper -lbim -lbimmumps -lbimlis -lbimp4est -lbimlinalg -llis -ldmumps -lmumps_common \
--lscotcherr -lbz2 -lmpi_usempif08 -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lp4est -lsc
+-lscotcherr -lbz2 -lmpi_usempif08 -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lp4est -lsc -lcudart

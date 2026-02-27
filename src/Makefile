@@ -1,6 +1,10 @@
 CXX=mpicxx
 
+NVCC=nvcc
+
 CXXFLAGS= -std=c++17 -ggdb -O0
+
+NVCCFLAGS= -arch=native
 
 CPPFLAGS=-I/opt/octave_file_io/1.0.91/include/ \
 -I/opt/nanoshaper/src \
@@ -27,15 +31,19 @@ all : ngpb
 %.o : %.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $<
 
-ngpb : poisson_boltzmann.o $(patsubst %.cpp, %.o, $(wildcard *.cpp))
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $? -o $@ $(LIBS)
+fast:
+	$(NVCC) $(NVCCFLAGS) -c fast.cu -o fast.o
 
-.PHONY : clean distclean
+ngpb : $(patsubst %.cpp, %.o, $(wildcard *.cpp)) fast.o
+	$(NVCC) -dlink $(patsubst %.cpp, %.o, $(wildcard *.cpp)) fast.o -o device_link.o
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(patsubst %.cpp, %.o, $(wildcard *.cpp)) fast.o device_link.o -o $@ $(LIBS)
+
+.PHONY : clean distclean fast
 
 clean :
 	$(RM) *.o
 
 distclean : clean
-	$(RM) ngpb
+	$(RM) ngpb device_link.o
 
 

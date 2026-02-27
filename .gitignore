@@ -62,7 +62,6 @@ __pycache__/
 
 # Local settings and sensitive files
 local_settings.mk
-local_setting/
 
 # Documentation generated files
 docs/html/
