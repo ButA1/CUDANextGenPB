@@ -60,7 +60,7 @@ int
 main (int argc, char **argv)
 {
 
-  run_kernel();
+  cudss_run();
 
   MPI_Init (&argc, &argv);
 
