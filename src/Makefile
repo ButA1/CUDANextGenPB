@@ -6,6 +6,8 @@ CXXFLAGS= -std=c++17 -ggdb -O0
 
 NVCCFLAGS= -arch=native
 
+MPI_COMPILE_FLAGS=$(shell $(CXX) --showme:compile)
+
 CPPFLAGS=-I/opt/octave_file_io/1.0.91/include/ \
 -I/opt/nanoshaper/src \
 -I../include -I../addons \
@@ -34,9 +36,9 @@ all : ngpb
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $<
 
 %.o : %.cu
-	$(NVCC) $(NVCCFLAGS) -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) $(MPI_COMPILE_FLAGS) $(CPPFLAGS) -c $< -o $@
 
-CUDA_SOURCES = fast.cu simple.cu
+CUDA_SOURCES = assemble_matrix.cu simple.cu
 CUDA_OBJECTS = $(CUDA_SOURCES:.cu=.o)
 
 cuda: $(CUDA_OBJECTS)

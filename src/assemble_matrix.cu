@@ -1,6 +1,7 @@
 #include <random>
 #include <iostream>
 #include <chrono>
+#include "test.h"
 
 void init(int32_t size, int32_t *vec_a, int32_t *vec_b, int32_t *mat)
 {
@@ -16,21 +17,6 @@ void init(int32_t size, int32_t *vec_a, int32_t *vec_b, int32_t *mat)
 
     for (auto i = 0; i < size * size; i++)
         mat[i] = distrib(prng);
-}
-
-void compute(int32_t size, int32_t *vec_a, int32_t *vec_b, int32_t *mat, int32_t *out)
-{
-    auto tmp = (int32_t *)malloc(sizeof(int32_t) * size);
-    for (auto i = 0; i < size; i++)
-        tmp[i] = vec_a[i] + vec_b[i];
-
-    for (auto i = 0; i < size; i++)
-    {
-        out[i] = 0;
-        for (auto j = 0; j < size; j++)
-            out[i] += tmp[j] * mat[i * size + j];
-    }
-    free(tmp);
 }
 
 __global__ void computeVector(int32_t size, int32_t *vec_a, int32_t *vec_b, int32_t *tmp){
@@ -78,7 +64,7 @@ void pretty_print(int32_t size, int32_t *vec_a, int32_t *vec_b, int32_t *mat)
     }
 }
 
-int run_kernel()
+int assemble_matrix_kernel(ray_cache_t & ray_cache)
 {
     // int32_t size = 3;
     int32_t size = 32768;
@@ -89,11 +75,9 @@ int run_kernel()
     auto tmp = (int32_t *)malloc(sizeof(int32_t) * size);
     // Flat Buffer for matrix
     auto mat = (int32_t *)malloc(sizeof(int32_t *) * size * size);
-    auto out_cpu = (int32_t *)malloc(sizeof(int32_t) * size);
     auto out_gpu = (int32_t *)malloc(sizeof(int32_t) * size);
 
     for (int i = 0; i < size; i++){
-        out_cpu[i] = 0;
         out_gpu[i] = 0;
     }
 
@@ -150,18 +134,6 @@ int run_kernel()
     std::chrono::duration<double> elapsed_seconds = end - start;
     std::cout << "Elapsed time GPU: " << elapsed_seconds.count() << "s" << std::endl;
 
-    start = std::chrono::system_clock::now();
-    compute(size, vec_a, vec_b, mat, out_cpu);
-    end = std::chrono::system_clock::now();
-
-    for(int i = 0; i < size; i++){
-        if(out_cpu[i] != out_gpu[i]){
-            std::cout << "OUT Mismatch at index " << i << std::endl;
-            std::cout << "CPU: " << out_cpu[i] << std::endl;
-            std::cout << "GPU: " << out_gpu[i] << std::endl;
-            break;
-        }
-    }
 
     // std::cout << "First 3 entries of Out CPU Vec:" << std::endl;
     // for (int32_t i = 0; i < 3; i++)
@@ -178,7 +150,6 @@ int run_kernel()
     free(vec_a);
     free(vec_b);
     free(mat);
-    free(out_cpu);
 
     err = cudaFree(vec_a_cu);
     check(err, "Failed to free device memory for vec_a");
