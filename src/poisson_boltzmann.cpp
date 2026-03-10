@@ -235,7 +235,7 @@ main (int argc, char **argv)
       std::cout << "Neumann\n";
   }
 
-  pb.assemple_system_matrix (ray_cache);
+  pb.assemble_system_matrix (ray_cache);
 
   if (rank == 0)
     std::cout << "============================================\n";

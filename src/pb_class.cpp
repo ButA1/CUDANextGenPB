@@ -2050,7 +2050,7 @@ poisson_boltzmann::create_density_map (ray_cache_t & ray_cache)
 }
 
 void
-poisson_boltzmann::assemple_system_matrix (ray_cache_t & ray_cache)
+poisson_boltzmann::assemble_system_matrix (ray_cache_t & ray_cache)
 {
   int size, rank;
   MPI_Comm_size (mpicomm, &size);

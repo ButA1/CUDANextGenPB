@@ -729,7 +729,7 @@ struct
   export_p4est ();
 
   void
-  assemple_system_matrix (ray_cache_t & ray_cache);
+  assemble_system_matrix (ray_cache_t & ray_cache);
 
   void
   create_density_map (ray_cache_t & ray_cache);
