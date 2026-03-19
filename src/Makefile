@@ -38,7 +38,7 @@ all : ngpb
 %.o : %.cu
 	$(NVCC) $(NVCCFLAGS) $(MPI_COMPILE_FLAGS) $(CPPFLAGS) -c $< -o $@
 
-CUDA_SOURCES = assemble_matrix.cu simple.cu
+CUDA_SOURCES = assemble_matrix.cu cudss_solver.cu
 CUDA_OBJECTS = $(CUDA_SOURCES:.cu=.o)
 
 cuda: $(CUDA_OBJECTS)
