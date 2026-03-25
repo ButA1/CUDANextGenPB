@@ -34,4 +34,4 @@ LIBS=-lNanoShaper -lbim -lbimmumps -lbimlis -lbimp4est \
      -llis -ldmumps -lmumps_common \
      -lscotcherr -lbz2 -lmpi_usempif08 \
      -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lp4est -lsc \
-     -lcudart -lcudss -lcublas
+     -lcudart -lcudss -lcublas -lamgxsh

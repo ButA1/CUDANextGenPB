@@ -26,7 +26,7 @@ LDFLAGS=-L/opt/octave_file_io/1.0.91/lib \
 -Wl,-rpath,/lib/x86_64-linux-gnu
 
 LIBS=-lNanoShaper -lbim -lbimmumps -lbimlis -lbimp4est -lbimlinalg -llis -ldmumps -lmumps_common \
--lscotcherr -lbz2 -lmpi_usempif08 -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lp4est -lsc -lcudss
+-lscotcherr -lbz2 -lmpi_usempif08 -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lp4est -lsc -lcudss -lamgxsh
 
 include local_settings.mk
 
@@ -38,7 +38,7 @@ all : ngpb
 %.o : %.cu
 	$(NVCC) $(NVCCFLAGS) $(MPI_COMPILE_FLAGS) $(CPPFLAGS) -c $< -o $@
 
-CUDA_SOURCES = assemble_matrix.cu cudss_solver.cu
+CUDA_SOURCES = assemble_matrix.cu cudss_solver.cu amgx_solver.cu
 CUDA_OBJECTS = $(CUDA_SOURCES:.cu=.o)
 
 cuda: $(CUDA_OBJECTS)

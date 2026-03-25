@@ -743,6 +743,9 @@ struct
   void
   cudss_compute_electric_potential (ray_cache_t & ray_cache);
 
+  void
+  amgx_compute_electric_potential (ray_cache_t & ray_cache);
+
   int
   classifyCube (tmesh_3d::quadrant_iterator& quadrant,double isolevel);
 

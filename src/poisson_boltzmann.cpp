@@ -258,6 +258,11 @@ main (int argc, char **argv)
       std::cout << "\n== [ Starting numerical solution using cuDSS ] ==\n";
 
     pb.cudss_compute_electric_potential (ray_cache);
+  } else if (pb.linear_solver_name == "amgx") {
+    if (rank == 0)
+      std::cout << "\n== [ Starting numerical solution using AMGX ] ==\n";
+
+    pb.amgx_compute_electric_potential (ray_cache);
   } else {
     std::cerr << "Invalid linear solver selected" << std::endl;
     return 1;
