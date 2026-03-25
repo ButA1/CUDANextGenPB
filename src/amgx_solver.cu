@@ -33,26 +33,17 @@ poisson_boltzmann::amgx_compute_electric_potential (ray_cache_t & ray_cache)
   MPI_Comm_size (mpicomm, &size);
   MPI_Comm_rank (mpicomm, &rank);
 
-  if (size > 1)
-    {
-      if (rank == 0)
-        fprintf (stderr, "AMGX solver does not support distributed (MPI size > 1) runs.\n");
-      return;
-    }
-
-  // CSR
+  // CSR extraction (local rows, global column indices)
   std::vector<double> vals;
   std::vector<int> irow, jcol;
 
   (*A).csr (vals, jcol, irow);
 
-  int nnz = (*A).owned_nnz ();
-  int n   = tmsh.num_owned_nodes ();
+  int nnz      = (*A).owned_nnz ();
+  int n        = tmsh.num_owned_nodes ();
+  int n_global = tmsh.num_global_nodes ();
 
   A.reset ();
-
-  printf ("AMGX: n = %d, nnz = %d (matrix memory ~ %.1f MB)\n",
-          n, nnz, (nnz * (sizeof (double) + sizeof (int)) + (n + 1) * sizeof (int)) / (1024.0 * 1024.0));
 
   // Initialize AMGX
   AMGX_SAFE_CALL (AMGX_initialize ());
@@ -73,55 +64,78 @@ poisson_boltzmann::amgx_compute_electric_potential (ray_cache_t & ray_cache)
     "main:print_solve_stats=1, "
     "main:obtain_timings=1, "
     "main:preconditioner(amg)=AMG, "
-    "amg:algorithm=CLASSICAL, "
+    "amg:algorithm=AGGREGATION, "
+    "amg:selector=SIZE_2, "
     "amg:max_iters=1, "
     "amg:cycle=V, "
-    "amg:smoother=BLOCK_JACOBI, "
+    "amg:smoother=JACOBI_L1, "
     "amg:presweeps=1, "
     "amg:postsweeps=1, "
     "amg:max_levels=25"
   ));
 
-  // Create resources, matrix, and vectors
+  // Create resources with MPI communicator
   AMGX_resources_handle rsrc;
-  AMGX_matrix_handle    amgx_A;
-  AMGX_vector_handle    amgx_b;
-  AMGX_vector_handle    amgx_x;
-  AMGX_solver_handle    solver;
+  int device_id = 0;
+  AMGX_SAFE_CALL (AMGX_resources_create (&rsrc, cfg, &mpicomm, 1, &device_id));
 
-  AMGX_SAFE_CALL (AMGX_resources_create_simple (&rsrc, cfg));
+  // Create matrix, vectors, and solver
+  AMGX_matrix_handle amgx_A;
+  AMGX_vector_handle amgx_b;
+  AMGX_vector_handle amgx_x;
+  AMGX_solver_handle solver;
+
   AMGX_SAFE_CALL (AMGX_matrix_create (&amgx_A, rsrc, AMGX_mode_dDDI));
   AMGX_SAFE_CALL (AMGX_vector_create (&amgx_b, rsrc, AMGX_mode_dDDI));
   AMGX_SAFE_CALL (AMGX_vector_create (&amgx_x, rsrc, AMGX_mode_dDDI));
   AMGX_SAFE_CALL (AMGX_solver_create (&solver, rsrc, AMGX_mode_dDDI, cfg));
 
-  // Upload matrix (CSR format, zero-based indexing)
-  AMGX_SAFE_CALL (AMGX_matrix_upload_all (
-    amgx_A, n, nnz, 1, 1,
-    irow.data (), jcol.data (), vals.data (), NULL
-  ));
+  // Build partition vector (maps each global row to its owning rank)
+  std::vector<int> partition_offsets (size + 1);
+  std::vector<int> all_n (size);
+  MPI_Allgather (&n, 1, MPI_INT, all_n.data (), 1, MPI_INT, mpicomm);
+  partition_offsets[0] = 0;
+  for (int i = 0; i < size; ++i)
+    partition_offsets[i + 1] = partition_offsets[i] + all_n[i];
 
-  // Upload RHS vector
+  std::vector<int> partition_vector (n_global);
+  for (int r = 0; r < size; ++r)
+    for (int i = partition_offsets[r]; i < partition_offsets[r + 1]; ++i)
+      partition_vector[i] = r;
+
+  // Get number of import rings from config
+  int nrings;
+  AMGX_SAFE_CALL (AMGX_config_get_default_number_of_rings (cfg, &nrings));
+
+  // Upload distributed matrix (CSR with global column indices)
+  AMGX_SAFE_CALL (AMGX_matrix_upload_all_global_32 (
+    amgx_A, n_global, n, nnz, 1, 1,
+    irow.data (), jcol.data (), vals.data (), NULL,
+    0, nrings, partition_vector.data ()));
+
+  // Bind vectors to matrix so they inherit the distributed layout
+  AMGX_SAFE_CALL (AMGX_vector_bind (amgx_b, amgx_A));
+  AMGX_SAFE_CALL (AMGX_vector_bind (amgx_x, amgx_A));
+
+  // Upload RHS vector (local portion)
   AMGX_SAFE_CALL (AMGX_vector_upload (amgx_b, n, 1, rhs->get_owned_data ().data ()));
   rhs.reset ();
 
-  // Set initial guess to zero
+  // Upload zero initial guess
   std::vector<double> x0 (n, 0.0);
   AMGX_SAFE_CALL (AMGX_vector_upload (amgx_x, n, 1, x0.data ()));
 
-  // Setup solver with matrix
+  // Setup solver with matrix and solve
   AMGX_SAFE_CALL (AMGX_solver_setup (solver, amgx_A));
-
-  // Solve
   AMGX_SAFE_CALL (AMGX_solver_solve (solver, amgx_b, amgx_x));
 
   // Check convergence
   AMGX_SOLVE_STATUS solve_status;
   AMGX_SAFE_CALL (AMGX_solver_get_status (solver, &solve_status));
   if (solve_status != AMGX_SOLVE_SUCCESS)
-    printf ("AMGX: solver did not converge (status = %d)\n", solve_status);
+    printf ("AMGX [rank %d]: solver did not converge (status = %d)\n", rank, solve_status);
 
-  // Download solution to host
+  // Download solution (local portion)
   phi = std::make_unique<distributed_vector> (n, mpicomm);
   AMGX_SAFE_CALL (AMGX_vector_download (amgx_x, phi->get_owned_data ().data ()));
 
