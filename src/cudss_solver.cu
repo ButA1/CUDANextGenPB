@@ -52,6 +52,9 @@ poisson_boltzmann::cudss_compute_electric_potential (ray_cache_t & ray_cache)
 
   A.reset ();
 
+  printf ("cuDSS: n = %d, nnz = %d (matrix memory ~ %.1f MB)\n",
+          n, nnz, (nnz * (sizeof (double) + sizeof (int)) + (n + 1) * sizeof (int)) / (1024.0 * 1024.0));
+
   // Device pointers
   int    *csr_offsets_d = nullptr;
   int    *csr_columns_d = nullptr;
@@ -76,12 +79,22 @@ poisson_boltzmann::cudss_compute_electric_potential (ray_cache_t & ray_cache)
     }
 
   // Copy matrix to device
-  cudaMemcpy (csr_offsets_d, irow.data (), (n + 1) * sizeof (int),    cudaMemcpyHostToDevice);
-  cudaMemcpy (csr_columns_d, jcol.data (), nnz     * sizeof (int),    cudaMemcpyHostToDevice);
-  cudaMemcpy (csr_values_d,  vals.data (), nnz     * sizeof (double), cudaMemcpyHostToDevice);
+  cudaError_t cerr;
+  cudssStatus_t cstatus;
+  cerr = cudaMemcpy (csr_offsets_d, irow.data (), (n + 1) * sizeof (int),    cudaMemcpyHostToDevice);
+  if (cerr != cudaSuccess)
+    printf ("cuDSS: cudaMemcpy csr_offsets failed: %s\n", cudaGetErrorString (cerr));
+  cerr = cudaMemcpy (csr_columns_d, jcol.data (), nnz     * sizeof (int),    cudaMemcpyHostToDevice);
+  if (cerr != cudaSuccess)
+    printf ("cuDSS: cudaMemcpy csr_columns failed: %s\n", cudaGetErrorString (cerr));
+  cerr = cudaMemcpy (csr_values_d,  vals.data (), nnz     * sizeof (double), cudaMemcpyHostToDevice);
+  if (cerr != cudaSuccess)
+    printf ("cuDSS: cudaMemcpy csr_values failed: %s\n", cudaGetErrorString (cerr));
 
   // Copy RHS to device and free host-side storage
-  cudaMemcpy (b_values_d, rhs->get_owned_data ().data (), n * sizeof (double), cudaMemcpyHostToDevice);
+  cerr = cudaMemcpy (b_values_d, rhs->get_owned_data ().data (), n * sizeof (double), cudaMemcpyHostToDevice);
+  if (cerr != cudaSuccess)
+    printf ("cuDSS: cudaMemcpy rhs failed: %s\n", cudaGetErrorString (cerr));
   rhs.reset ();
 
   // Create CUDA stream
@@ -90,27 +103,45 @@ poisson_boltzmann::cudss_compute_electric_potential (ray_cache_t & ray_cache)
 
   // Create cuDSS handle
   cudssHandle_t handle;
-  cudssCreate (&handle);
-  cudssSetStream (handle, stream);
+  cstatus = cudssCreate (&handle);
+  if (cstatus != CUDSS_STATUS_SUCCESS)
+    printf ("cuDSS: cudssCreate failed with status %d\n", cstatus);
+  cstatus = cudssSetStream (handle, stream);
+  if (cstatus != CUDSS_STATUS_SUCCESS)
+    printf ("cuDSS: cudssSetStream failed with status %d\n", cstatus);
 
   // Create cuDSS config and data
   cudssConfig_t solverConfig;
   cudssData_t   solverData;
-  cudssConfigCreate (&solverConfig);
-  cudssDataCreate (handle, &solverData);
+  cstatus = cudssConfigCreate (&solverConfig);
+  if (cstatus != CUDSS_STATUS_SUCCESS)
+    printf ("cuDSS: cudssConfigCreate failed with status %d\n", cstatus);
+  cstatus = cudssDataCreate (handle, &solverData);
+  if (cstatus != CUDSS_STATUS_SUCCESS)
+    printf ("cuDSS: cudssDataCreate failed with status %d\n", cstatus);
 
   // Wrap matrix and vectors as cuDSS objects
   cudssMatrix_t matA, matB, matX;
   int64_t nrows = n, ncols = n;
 
-  cudssMatrixCreateDn (&matB, nrows, nrhs, nrows, b_values_d, CUDA_R_64F,
-                       CUDSS_LAYOUT_COL_MAJOR);
-  cudssMatrixCreateDn (&matX, nrows, nrhs, nrows, x_values_d, CUDA_R_64F,
-                       CUDSS_LAYOUT_COL_MAJOR);
-  cudssMatrixCreateCsr (&matA, nrows, ncols, nnz,
-                        csr_offsets_d, nullptr, csr_columns_d, csr_values_d,
-                        CUDA_R_32I, CUDA_R_64F,
-                        CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO);
+  cstatus = cudssMatrixCreateDn (&matB, nrows, nrhs, nrows, b_values_d, CUDA_R_64F,
+                                 CUDSS_LAYOUT_COL_MAJOR);
+  if (cstatus != CUDSS_STATUS_SUCCESS)
+    printf ("cuDSS: cudssMatrixCreateDn (matB) failed with status %d\n", cstatus);
+  cstatus = cudssMatrixCreateDn (&matX, nrows, nrhs, nrows, x_values_d, CUDA_R_64F,
+                                 CUDSS_LAYOUT_COL_MAJOR);
+  if (cstatus != CUDSS_STATUS_SUCCESS)
+    printf ("cuDSS: cudssMatrixCreateDn (matX) failed with status %d\n", cstatus);
+  cstatus = cudssMatrixCreateCsr (&matA, nrows, ncols, nnz,
+                                  csr_offsets_d, nullptr, csr_columns_d, csr_values_d,
+                                  CUDA_R_32I, CUDA_R_64F,
+                                  CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO);
+  if (cstatus != CUDSS_STATUS_SUCCESS)
+    printf ("cuDSS: cudssMatrixCreateCsr (matA) failed with status %d\n", cstatus);
+
+  size_t free_mem, total_mem;
+cudaMemGetInfo(&free_mem, &total_mem);
+printf("GPU memory: %zu MB free / %zu MB total\n", free_mem >> 20, total_mem >> 20);
 
   // Symbolic factorization
   cudssStatus_t status;
@@ -135,8 +166,10 @@ poisson_boltzmann::cudss_compute_electric_potential (ray_cache_t & ray_cache)
 
   // Copy solution back to host
   phi = std::make_unique<distributed_vector> (n, mpicomm);
-  cudaMemcpy (phi->get_owned_data ().data (), x_values_d, n * sizeof (double),
-              cudaMemcpyDeviceToHost);
+  cerr = cudaMemcpy (phi->get_owned_data ().data (), x_values_d, n * sizeof (double),
+                     cudaMemcpyDeviceToHost);
+  if (cerr != cudaSuccess)
+    printf ("cuDSS: cudaMemcpy solution D2H failed: %s\n", cudaGetErrorString (cerr));
 
   // Destroy cuDSS objects
   cudssMatrixDestroy (matA);

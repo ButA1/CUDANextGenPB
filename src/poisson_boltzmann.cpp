@@ -59,9 +59,6 @@ save_ray_cache (nlohmann::json& j, const std::map<std::array<double, 2>, crossin
 int
 main (int argc, char **argv)
 {
-
-  cudss_run();
-
   MPI_Init (&argc, &argv);
 
   // int recursive, partforcoarsen, balance;
