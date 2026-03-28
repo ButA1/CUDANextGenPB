@@ -62,15 +62,8 @@ poisson_boltzmann::amgx_compute_electric_potential (ray_cache_t & ray_cache)
     "main:monitor_residual=1, "
     "main:print_solve_stats=1, "
     "main:obtain_timings=1, "
-    "main:preconditioner(amg)=AMG, "
-    "amg:algorithm=AGGREGATION, "
-    "amg:selector=SIZE_2, "
-    "amg:max_iters=1, "
-    "amg:cycle=V, "
-    "amg:smoother=JACOBI_L1, "
-    "amg:presweeps=1, "
-    "amg:postsweeps=1, "
-    "amg:max_levels=25"
+    "main:preconditioner(amg)=BLOCK_JACOBI, "
+    "amg:max_iters=1"
   ));
 
   // Create resources with MPI communicator
@@ -89,32 +82,43 @@ poisson_boltzmann::amgx_compute_electric_potential (ray_cache_t & ray_cache)
   AMGX_SAFE_CALL (AMGX_vector_create (&amgx_x, rsrc, AMGX_mode_dDDI));
   AMGX_SAFE_CALL (AMGX_solver_create (&solver, rsrc, AMGX_mode_dDDI, cfg));
 
-  // Build partition vector (maps each global row to its owning rank)
-  std::vector<int> partition_offsets (size + 1);
-  std::vector<int> all_n (size);
-  MPI_Allgather (&n, 1, MPI_INT, all_n.data (), 1, MPI_INT, mpicomm);
-  partition_offsets[0] = 0;
-  for (int i = 0; i < size; ++i)
-    partition_offsets[i + 1] = partition_offsets[i] + all_n[i];
+  // Upload matrix: simple path for single rank, distributed path for multi-rank
+  if (size == 1)
+    {
+      // Local indices, no partition vector, no reordering overhead
+      AMGX_SAFE_CALL (AMGX_matrix_upload_all (
+        amgx_A, n, nnz, 1, 1,
+        irow.data (), jcol.data (), vals.data (), NULL));
+    }
+  else
+    {
+      std::vector<int> partition_offsets (size + 1);
+      std::vector<int> all_n (size);
+      MPI_Allgather (&n, 1, MPI_INT, all_n.data (), 1, MPI_INT, mpicomm);
+      partition_offsets[0] = 0;
+      for (int i = 0; i < size; ++i)
+        partition_offsets[i + 1] = partition_offsets[i] + all_n[i];
 
-  std::vector<int> partition_vector (n_global);
-  for (int r = 0; r < size; ++r)
-    for (int i = partition_offsets[r]; i < partition_offsets[r + 1]; ++i)
-      partition_vector[i] = r;
+      std::vector<int> partition_vector (n_global);
+      for (int r = 0; r < size; ++r)
+        for (int i = partition_offsets[r]; i < partition_offsets[r + 1]; ++i)
+          partition_vector[i] = r;
 
-  // Get number of import rings from config
-  int nrings;
-  AMGX_SAFE_CALL (AMGX_config_get_default_number_of_rings (cfg, &nrings));
+      int nrings;
+      AMGX_SAFE_CALL (AMGX_config_get_default_number_of_rings (cfg, &nrings));
 
-  // Upload distributed matrix (CSR with global column indices)
-  AMGX_SAFE_CALL (AMGX_matrix_upload_all_global_32 (
-    amgx_A, n_global, n, nnz, 1, 1,
-    irow.data (), jcol.data (), vals.data (), NULL,
-    0, nrings, partition_vector.data ()));
+      AMGX_SAFE_CALL (AMGX_matrix_upload_all_global_32 (
+        amgx_A, n_global, n, nnz, 1, 1,
+        irow.data (), jcol.data (), vals.data (), NULL,
+        0, nrings, partition_vector.data ()));
+    }
 
-  // Bind vectors to matrix so they inherit the distributed layout
-  AMGX_SAFE_CALL (AMGX_vector_bind (amgx_b, amgx_A));
-  AMGX_SAFE_CALL (AMGX_vector_bind (amgx_x, amgx_A));
+  // Bind vectors to matrix (needed for distributed halo layout)
+  if (size > 1)
+    {
+      AMGX_SAFE_CALL (AMGX_vector_bind (amgx_b, amgx_A));
+      AMGX_SAFE_CALL (AMGX_vector_bind (amgx_x, amgx_A));
+    }
 
   // Upload RHS vector (local portion)
   AMGX_SAFE_CALL (AMGX_vector_upload (amgx_b, n, 1, rhs->get_owned_data ().data ()));
