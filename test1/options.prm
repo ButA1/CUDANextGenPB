@@ -21,5 +21,5 @@ calc_coulombic = 1
 [../]
 
 [algorithm]
-linear_solver = cudss
+linear_solver = amgx
 [../]

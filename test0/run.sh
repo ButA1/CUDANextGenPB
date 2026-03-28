@@ -1,1 +1,1 @@
-mpirun ngpb --prmfile options.prm
+mpirun -n 8 ngpb --prmfile options.prm
