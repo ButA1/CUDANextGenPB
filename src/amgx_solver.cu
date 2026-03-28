@@ -62,8 +62,15 @@ poisson_boltzmann::amgx_compute_electric_potential (ray_cache_t & ray_cache)
     "main:monitor_residual=1, "
     "main:print_solve_stats=1, "
     "main:obtain_timings=1, "
-    "main:preconditioner(amg)=BLOCK_JACOBI, "
-    "amg:max_iters=1"
+    "main:preconditioner(amg)=AMG, "
+    "amg:algorithm=AGGREGATION, "
+    "amg:selector=SIZE_2, "
+    "amg:max_iters=1, "
+    "amg:cycle=V, "
+    "amg:smoother=JACOBI_L1, "
+    "amg:presweeps=1, "
+    "amg:postsweeps=1, "
+    "amg:max_levels=25"
   ));
 
   // Create resources with MPI communicator
