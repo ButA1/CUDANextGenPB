@@ -717,6 +717,9 @@ struct
   create_markers (ray_cache_t & ray_cache);
 
   void
+  create_markers_fast (ray_cache_t & ray_cache);
+
+  void
   export_tmesh (ray_cache_t & ray_cache);
 
   void

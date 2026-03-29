@@ -1940,6 +1940,155 @@ poisson_boltzmann::create_markers (ray_cache_t & ray_cache)
   }
 }
 
+
+void
+poisson_boltzmann::create_markers_fast (ray_cache_t & ray_cache)
+{
+
+  int size, rank;
+  MPI_Comm_size (mpicomm, &size);
+  MPI_Comm_rank (mpicomm, &rank);
+
+  double eps_in = 4.0*pi*e_0*e_in*kb*T*Angs/ (e*e); //adim e_in
+  double eps_out = 4.0*pi*e_0*e_out*kb*T*Angs/ (e*e); //adim e_out
+
+  /////////////////////////////////////////////////////////
+  //reactions
+  double C_0 = 1.0e3*N_av*ionic_strength; //Bulk concentration of monovalent species
+  double k2 = 2.0*C_0*Angs*Angs*e*e/ (e_0*e_out*kb*T);
+
+  this->marker.assign (this->tmsh.num_local_quadrants (), 0.0); //marker = 0 -> in
+
+  if (stern_layer_surf == 1) {
+    this->marker_k.assign (this->tmsh.num_local_quadrants (), 1.0); //marker = 1 -> out stern
+    this->reaction.assign (tmsh.num_local_quadrants (), eps_out*k2);
+  }
+
+  epsilon_nodes = std::make_unique<distributed_vector> (tmsh.num_owned_nodes (),mpicomm);
+  epsilon_nodes->get_owned_data ().assign (tmsh.num_owned_nodes (), eps_out);
+
+  reaction_nodes = std::make_unique<distributed_vector> (tmsh.num_owned_nodes (),mpicomm);
+  reaction_nodes->get_owned_data ().assign (tmsh.num_owned_nodes (), eps_out*k2);
+
+  // Perpendicular coordinate indices: for direction dir, the two perpendicular axes
+  static constexpr int perp_dirs[3][2] = {{1, 2}, {0, 2}, {0, 1}};
+
+  // ---- Pass 1: Collect all required rays without computing ----
+  ray_cache.num_req_rays[0] = 0;
+  ray_cache.num_req_rays[1] = 0;
+  ray_cache.num_req_rays[2] = 0;
+  ray_cache.rays_list[0].clear ();
+  ray_cache.rays_list[1].clear ();
+  ray_cache.rays_list[2].clear ();
+
+  for (auto quadrant = this->tmsh.begin_quadrant_sweep ();
+       quadrant != this->tmsh.end_quadrant_sweep ();
+       ++quadrant) {
+    for (int ii = 0; ii < 8; ++ii) {
+      double x = quadrant->p (0, ii);
+      double y = quadrant->p (1, ii);
+      double z = quadrant->p (2, ii);
+
+      if (! quadrant->is_hanging (ii)) {
+        // Collect rays in all 3 directions
+        std::array<double, 2> ray_x = {y, z};
+        std::array<double, 2> ray_y = {x, z};
+        std::array<double, 2> ray_z = {x, y};
+
+        if (rank == 0) {
+          ray_cache.ensure_ray (ray_x[0], ray_x[1], 0);
+          ray_cache.ensure_ray (ray_y[0], ray_y[1], 1);
+          ray_cache.ensure_ray (ray_z[0], ray_z[1], 2);
+        } else {
+          ray_cache.rays_list[0].insert (ray_x);
+          ray_cache.rays_list[1].insert (ray_y);
+          ray_cache.rays_list[2].insert (ray_z);
+        }
+      } else {
+        for (int idir = 0; idir < 3; ++idir) {
+          std::array<double, 2> ray = {
+            quadrant->p (perp_dirs[idir][0], ii),
+            quadrant->p (perp_dirs[idir][1], ii)
+          };
+
+          if (rank == 0)
+            ray_cache.ensure_ray (ray[0], ray[1], idir);
+          else
+            ray_cache.rays_list[idir].insert (ray);
+        }
+      }
+    }
+  }
+
+  // ---- Batch compute all pending rays on rank 0 ----
+  if (rank == 0)
+    ray_cache.compute_pending_rays ();
+
+  MPI_Barrier (mpicomm);
+  ray_cache.fill_cache ();
+
+  // ---- Pass 2: Classify quadrants using cached ray data ----
+  int local_num;
+
+  for (auto quadrant = this->tmsh.begin_quadrant_sweep ();
+       quadrant != this->tmsh.end_quadrant_sweep ();
+       ++quadrant) {
+    int num_int_nodes = 0;
+    int num_int_nodes_stern = 0;
+    int num_hanging[3] = {0, 0, 0};
+    double x, y, z;
+
+    for (int ii = 0; ii < 8; ++ii) {
+      local_num = quadrant->gt (ii);
+      x = quadrant->p (0, ii);
+      y = quadrant->p (1, ii);
+      z = quadrant->p (2, ii);
+
+      if (! quadrant->is_hanging (ii)) {
+        double in_z = this->is_in_ns_surf (ray_cache, x, y, z, 2);
+        if (in_z > 0.5) { //inside the molecule
+          ++num_int_nodes;
+          ++num_int_nodes_stern;
+          (*epsilon_nodes)[local_num] = eps_in;
+          (*reaction_nodes)[local_num] = 0.0;
+        }
+
+        if (stern_layer_surf == 1) {
+          if (this->is_in_ns_surf_stern (ray_cache, x, y, z, 2) > 0.5) { //inside the stern layer
+            ++num_int_nodes_stern;
+          }
+        }
+      } else {
+        for (int idir = 0; idir < 3; ++idir)
+          ++num_hanging[idir];
+      }
+    }
+
+    if (num_int_nodes == 0) { //if there's no node inside the molecule
+      this->marker[quadrant->get_forest_quad_idx ()] = 1.0; //quadrant is out
+    } else if (num_int_nodes < (8 - num_hanging[2])) { //if the non hanging nodes are not all inside
+      this->marker[quadrant->get_forest_quad_idx ()] = 1.0/2.0; //"border"
+      border_quad.push_back (quadrant->get_forest_quad_idx ());
+    }
+
+    //else: all the nodes are inside: the quadrant is inside and the marker value is 0
+    if (stern_layer_surf == 1) {
+      for (int idir = 0; idir < 3; ++idir)
+        if (num_int_nodes_stern != 0) { //if there is at least on node inside the stern layer along idir-axis
+          this->marker_k[quadrant->get_forest_quad_idx ()] = 0.0; //quadrant is in
+          this->reaction[quadrant->get_forest_quad_idx ()] = 0.0; //quadrant is in
+        }
+    }
+  }
+
+  if (size >1) {
+    bim3a_solution_with_ghosts (tmsh, *epsilon_nodes, replace_op);
+
+    if (stern_layer_surf == 0)
+      bim3a_solution_with_ghosts (tmsh, (*reaction_nodes), replace_op);
+  }
+}
+
 void
 poisson_boltzmann::create_density_map (ray_cache_t & ray_cache)
 {
