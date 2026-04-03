@@ -1,158 +1,196 @@
-#include <random>
-#include <iostream>
+/*
+ *  GPU-accelerated polarization and ionic energy kernels.
+ *
+ *  Polarization kernel:
+ *    For each surface point ip, compute
+ *      partial[ip] = sum_ia  charge[ia] * flux[ip] / |atom[ia] - V[ip]|
+ *
+ *  Ionic kernel:
+ *    For each triangle vertex (itv), compute
+ *      partial[itv] = sum_ia  charge[ia] * phi_sup[itv] * dot(dist, norm)
+ *                      * inv_r3 * inv_4pi * area[tri] / 3
+ */
+
 #include <cuda_runtime.h>
-#include "test.h"
+#include <vector>
+#include <cstdio>
 
-void init(int32_t size, int32_t *vec_a, int32_t *vec_b, int32_t *mat)
-{
-    // std::random_device dev;
-    std::mt19937 prng(2024);
-    std::uniform_int_distribution<int32_t> distrib(-16, 16);
-
-    for (auto i = 0; i < size; i++)
-    {
-        vec_a[i] = distrib(prng);
-        vec_b[i] = distrib(prng);
-    }
-
-    for (auto i = 0; i < size * size; i++)
-        mat[i] = distrib(prng);
-}
-
-__global__ void computeVector(int32_t size, int32_t *vec_a, int32_t *vec_b, int32_t *tmp){
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i < size){
-        tmp[i] = vec_a[i] + vec_b[i];
-    }
-}
-
-__global__ void computeMatrix(int32_t size, int32_t *mat, int32_t *tmp, int32_t *out){
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int32_t sum = 0;
-    if(i < size){
-        for(int j = 0; j < size; j++){
-            sum += tmp[j] * mat[i * size + j];
-        }
-        out[i] = sum;
-    }
-}
-
-void check(cudaError_t err, std::string msg) {
+static void check_cuda(cudaError_t err, const char *msg, int line) {
   if (err != cudaSuccess) {
-    std::cerr << (cudaGetErrorString(err)) << std::endl;
-    exit(EXIT_FAILURE);
+    fprintf(stderr, "CUDA error at line %d (%s): %s\n",
+            line, msg, cudaGetErrorString(err));
   }
 }
+#define CUDA_CHECK(call) check_cuda((call), #call, __LINE__)
 
-void pretty_print(int32_t size, int32_t *vec_a, int32_t *vec_b, int32_t *mat)
+// --------------- polarization kernel ---------------
+__global__ void
+polarization_kernel(int num_pts,
+                    const double * __restrict__ V,
+                    const double * __restrict__ flux,
+                    int num_atoms,
+                    const double * __restrict__ atoms,
+                    const double * __restrict__ charges,
+                    double * __restrict__ partial)
 {
-    std::cout << "Vec A:" << std::endl;
-    for (auto i = 0; i < size; i++)
-        std::cout << vec_a[i] << std::endl;
+  int ip = blockIdx.x * blockDim.x + threadIdx.x;
+  if (ip >= num_pts) return;
 
-    std::cout << "Vec B:" << std::endl;
-    for (auto i = 0; i < size; i++)
-        std::cout << vec_b[i] << std::endl;
+  double vx = V[3*ip], vy = V[3*ip+1], vz = V[3*ip+2];
+  double f  = flux[ip];
+  double sum = 0.0;
 
-    std::cout << "Matrix:" << std::endl;
-    for (auto i = 0; i < size; i++)
-    {
-        for (auto j = 0; j < size; j++)
-            std::cout << mat[i * size + j] << " ";
-
-        std::cout << std::endl;
-    }
+  for (int ia = 0; ia < num_atoms; ++ia) {
+    double dx = atoms[3*ia]   - vx;
+    double dy = atoms[3*ia+1] - vy;
+    double dz = atoms[3*ia+2] - vz;
+    double r  = sqrt(dx*dx + dy*dy + dz*dz);
+    sum += charges[ia] * f / r;
+  }
+  partial[ip] = sum;
 }
 
-// TODO
-int energy_cuda(ray_cache_t & ray_cache)
+// --------------- ionic kernel ---------------
+__global__ void
+ionic_kernel(int num_tri_verts,
+             const double * __restrict__ vert,
+             const double * __restrict__ norms,
+             const double * __restrict__ phi_sup,
+             const double * __restrict__ area,
+             int num_atoms,
+             const double * __restrict__ atoms,
+             const double * __restrict__ charges,
+             double inv_4pi,
+             double * __restrict__ partial)
 {
-    // int32_t size = 3;
-    int32_t size = 32768;
+  int itv = blockIdx.x * blockDim.x + threadIdx.x;
+  if (itv >= num_tri_verts) return;
 
-    auto vec_a = (int32_t *)malloc(sizeof(int32_t) * size);
-    auto vec_b = (int32_t *)malloc(sizeof(int32_t) * size);
+  double vx = vert[3*itv], vy = vert[3*itv+1], vz = vert[3*itv+2];
+  double nx = norms[3*itv], ny = norms[3*itv+1], nz = norms[3*itv+2];
+  double ps = phi_sup[itv];
+  double a  = area[itv / 3];
+  double factor = ps * inv_4pi * a / 3.0;
 
-    auto tmp = (int32_t *)malloc(sizeof(int32_t) * size);
-    // Flat Buffer for matrix
-    auto mat = (int32_t *)malloc(sizeof(int32_t *) * size * size);
-    auto out_gpu = (int32_t *)malloc(sizeof(int32_t) * size);
-
-    for (int i = 0; i < size; i++){
-        out_gpu[i] = 0;
-    }
-
-    // malloc cuda memory
-    cudaError_t err = cudaSuccess;
-    int32_t * vec_a_cu = NULL; 
-    int32_t * vec_b_cu = NULL;
-    int32_t * tmp_cu = NULL;
-    int32_t * mat_cu = NULL;
-    int32_t * out_cu = NULL;
-    err = cudaMalloc((void **)&vec_a_cu,sizeof(int32_t) * size);
-    check(err, "Failed to allocate device memory for vec_a");
-    err = cudaMalloc((void **)&vec_b_cu,sizeof(int32_t) * size);
-    check(err, "Failed to allocate device memory for vec_b");
-    err = cudaMalloc((void **)&tmp_cu,sizeof(int32_t) * size);
-    check(err, "Failed to allocate device memory for tmp");
-    err = cudaMalloc((void **)&mat_cu,sizeof(int32_t) * size * size);
-    check(err, "Failed to allocate device memory for mat");
-    err = cudaMalloc((void **)&out_cu,sizeof(int32_t) * size);
-    check(err, "Failed to allocate device memory for out");
-
-    init(size, vec_a, vec_b, mat);
-
-    // pretty_print(size, vec_a, vec_b, mat);
-
-    auto start = std::chrono::system_clock::now();
-    // copy data to device
-    err = cudaMemcpy(vec_a_cu, vec_a, sizeof(int32_t) * size, cudaMemcpyHostToDevice);
-    check(err, "Failed to copy vec_a from host to device");
-    err = cudaMemcpy(vec_b_cu, vec_b, sizeof(int32_t) * size, cudaMemcpyHostToDevice);
-    check(err, "Failed to copy vec_b from host to device");
-    err = cudaMemcpy(mat_cu, mat, sizeof(int32_t) * size * size, cudaMemcpyHostToDevice);
-    check(err, "Failed to copy mat from host to device");
-
-    // add kernel call
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
-    computeVector<<<blocksPerGrid, threadsPerBlock>>>(size, vec_a_cu, vec_b_cu, tmp_cu);
-    err = cudaGetLastError();
-    check(err, "Failed to launch computeVector kernel");
-    cudaDeviceSynchronize();
-
-    computeMatrix<<<blocksPerGrid, threadsPerBlock>>>(size, mat_cu, tmp_cu, out_cu);
-    err = cudaGetLastError();
-    check(err, "Failed to launch computeMatrix kernel");
-    cudaDeviceSynchronize();
-
-    // copy data back to host
-    err = cudaMemcpy(out_gpu, out_cu, sizeof(int32_t) * size, cudaMemcpyDeviceToHost);
-    check(err, "Failed to copy out from device to host");
-    auto end = std::chrono::system_clock::now();
-
-    // time taken for GPU
-    std::chrono::duration<double> elapsed_seconds = end - start;
-    std::cout << "Elapsed time GPU: " << elapsed_seconds.count() << "s" << std::endl;
-
-    // time taken for CPU
-    elapsed_seconds = end - start;
-    std::cout << "Elapsed time CPU: " << elapsed_seconds.count() << "s" << std::endl;
-
-    free(vec_a);
-    free(vec_b);
-    free(mat);
-
-    err = cudaFree(vec_a_cu);
-    check(err, "Failed to free device memory for vec_a");
-    err = cudaFree(vec_b_cu);
-    check(err, "Failed to free device memory for vec_b");
-    err = cudaFree(tmp_cu);
-    check(err, "Failed to free device memory for tmp");
-    err = cudaFree(mat_cu);
-    check(err, "Failed to free device memory for mat");
-    err = cudaFree(out_cu);
-    check(err, "Failed to free device memory for out");
-
-    return 0;
+  double sum = 0.0;
+  for (int ia = 0; ia < num_atoms; ++ia) {
+    double dx = vx - atoms[3*ia];
+    double dy = vy - atoms[3*ia+1];
+    double dz = vz - atoms[3*ia+2];
+    double r2 = dx*dx + dy*dy + dz*dz;
+    double r  = sqrt(r2);
+    double inv_r3 = 1.0 / (r2 * r);
+    double dot = dx*nx + dy*ny + dz*nz;
+    sum += charges[ia] * dot * inv_r3 * factor;
+  }
+  partial[itv] = sum;
 }
+
+// --------------- host-side reduction helper ---------------
+static double gpu_reduce_sum(const double *d_arr, int n) {
+  std::vector<double> h(n);
+  CUDA_CHECK(cudaMemcpy(h.data(), d_arr, n * sizeof(double),
+                         cudaMemcpyDeviceToHost));
+  double s = 0.0;
+  for (int i = 0; i < n; ++i) s += h[i];
+  return s;
+}
+
+// ========================== public C API ==========================
+
+extern "C" {
+
+double polarization_energy_cuda(
+    int    num_pts,
+    const double *h_V,
+    const double *h_flux,
+    int    num_atoms,
+    const double *h_atoms,
+    const double *h_charges)
+{
+  if (num_pts == 0 || num_atoms == 0) return 0.0;
+
+  double *d_V, *d_flux, *d_atoms, *d_charges, *d_partial;
+  CUDA_CHECK(cudaMalloc(&d_V,       num_pts   * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_flux,    num_pts       * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_atoms,   num_atoms * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_charges, num_atoms     * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_partial, num_pts       * sizeof(double)));
+
+  CUDA_CHECK(cudaMemcpy(d_V,       h_V,       num_pts   * 3 * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_flux,    h_flux,    num_pts       * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_atoms,   h_atoms,   num_atoms * 3 * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_charges, h_charges, num_atoms     * sizeof(double), cudaMemcpyHostToDevice));
+
+  int tpb = 256;
+  int blocks = (num_pts + tpb - 1) / tpb;
+  polarization_kernel<<<blocks, tpb>>>(num_pts, d_V, d_flux,
+                                       num_atoms, d_atoms, d_charges,
+                                       d_partial);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  double result = gpu_reduce_sum(d_partial, num_pts);
+
+  cudaFree(d_V);
+  cudaFree(d_flux);
+  cudaFree(d_atoms);
+  cudaFree(d_charges);
+  cudaFree(d_partial);
+
+  return result;
+}
+
+double ionic_energy_cuda(
+    int    num_tri_verts,
+    const double *h_vert,
+    const double *h_norms,
+    const double *h_phi_sup,
+    const double *h_area,
+    int    num_atoms,
+    const double *h_atoms,
+    const double *h_charges,
+    double inv_4pi)
+{
+  if (num_tri_verts == 0 || num_atoms == 0) return 0.0;
+
+  int num_tris = num_tri_verts / 3;
+
+  double *d_vert, *d_norms, *d_phi, *d_area, *d_atoms, *d_charges, *d_partial;
+  CUDA_CHECK(cudaMalloc(&d_vert,    num_tri_verts * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_norms,   num_tri_verts * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_phi,     num_tri_verts     * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_area,    num_tris          * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_atoms,   num_atoms     * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_charges, num_atoms         * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_partial, num_tri_verts     * sizeof(double)));
+
+  CUDA_CHECK(cudaMemcpy(d_vert,    h_vert,     num_tri_verts * 3 * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_norms,   h_norms,    num_tri_verts * 3 * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_phi,     h_phi_sup,  num_tri_verts     * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_area,    h_area,     num_tris          * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_atoms,   h_atoms,    num_atoms     * 3 * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_charges, h_charges,  num_atoms         * sizeof(double), cudaMemcpyHostToDevice));
+
+  int tpb = 256;
+  int blocks = (num_tri_verts + tpb - 1) / tpb;
+  ionic_kernel<<<blocks, tpb>>>(num_tri_verts, d_vert, d_norms, d_phi, d_area,
+                                num_atoms, d_atoms, d_charges,
+                                inv_4pi, d_partial);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  double result = gpu_reduce_sum(d_partial, num_tri_verts);
+
+  cudaFree(d_vert);
+  cudaFree(d_norms);
+  cudaFree(d_phi);
+  cudaFree(d_area);
+  cudaFree(d_atoms);
+  cudaFree(d_charges);
+  cudaFree(d_partial);
+
+  return result;
+}
+
+} // extern "C"

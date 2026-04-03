@@ -19,6 +19,7 @@
 
 #include "pb_class.h"
 #include "GetPot"
+#include "test.h"
 
 #include <bim_distributed_vector.h>
 #include <quad_operators_3d.h>
@@ -3464,6 +3465,249 @@ poisson_boltzmann::energy_fast (ray_cache_t & ray_cache)
     // << "    Error w.r.t. net charge [%]:"
     // << std::setprecision(6)
     // << ((charge_pol / (4.0 * pi) - net_charge) / net_charge * 100.0) << "\n";
+
+    std::cout << std::left << std::setw (label_width) << "  Polarization energy [kT]:"
+              << std::setprecision (precision) << energy_pol << "\n";
+
+    if (calc_energy == 2) {
+      std::cout << std::left << std::setw (label_width) << "  Direct ionic energy [kT]:"
+                << std::setprecision (precision) << energy_react << "\n";
+    }
+
+    if (calc_coulombic == 1) {
+      std::cout << std::left << std::setw (label_width) << "  Coulombic energy [kT]:"
+                << std::setprecision (precision) << coul_energy << "\n";
+    }
+
+    std::cout << std::left << std::setw (label_width) << "  Sum of electrostatic energy contributions [kT]:"
+              << std::setprecision (precision)
+              << (energy_pol + energy_react + coul_energy) << "\n";
+
+    std::cout << "===========================================================\n";
+  }
+}
+
+void
+poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
+{
+  int rank;
+  MPI_Comm_rank (mpicomm, &rank);
+
+  if (rank == 0)
+    std::cout << "\n================ [ Electrostatic Energy (CUDA) ] =================\n";
+
+  const double inv_4pi = 1.0 / (4.0 * pi);
+  const double eps0 = e_0;
+  const double eps_in = 4.0 * pi * eps0 * e_in * kb * T * Angs / (e * e);
+  const double eps_out = 4.0 * pi * eps0 * e_out * kb * T * Angs / (e * e);
+
+  const double C0 = 1.0e3 * N_av * ionic_strength;
+  const double k2 = 2.0 * C0 * Angs * Angs * e * e / (eps0 * e_out * kb * T);
+  const double k = std::sqrt (k2);
+
+  const double den_in = 1.0 / eps_in;
+  const double constant_pol = (1.0 / eps_out - 1.0 / eps_in) * inv_4pi;
+  const double constant_react = (1.0 / eps_out) * inv_4pi;
+
+  double charge_pol = 0.0;
+
+  // --- Filter charged atoms ---
+  std::vector<double> charge_atoms_tmp;
+  std::vector<std::array<double, 3>> pos_atoms_tmp;
+
+  for (size_t ii = 0; ii < charge_atoms.size(); ++ii) {
+    if (std::fabs (charge_atoms[ii]) > 1.e-5) {
+      charge_atoms_tmp.push_back (charge_atoms[ii]);
+      pos_atoms_tmp.push_back (pos_atoms[ii]);
+    }
+  }
+
+  const size_t num_atoms = charge_atoms_tmp.size();
+  std::vector<double>().swap (charge_atoms);
+  std::vector<std::array<double, 3>>().swap (pos_atoms);
+
+  // --- Pack atoms into flat arrays for GPU ---
+  std::vector<double> h_atoms(num_atoms * 3);
+  std::vector<double> h_charges(num_atoms);
+  for (size_t ia = 0; ia < num_atoms; ++ia) {
+    h_atoms[3*ia]     = pos_atoms_tmp[ia][0];
+    h_atoms[3*ia + 1] = pos_atoms_tmp[ia][1];
+    h_atoms[3*ia + 2] = pos_atoms_tmp[ia][2];
+    h_charges[ia]     = charge_atoms_tmp[ia];
+  }
+
+  // --- Coulombic energy (CPU, O(N^2) atom pairs) ---
+  if (calc_coulombic == 1) {
+    for (size_t i = 0; i < num_atoms; ++i) {
+      const double qi = charge_atoms_tmp[i];
+      const std::array<double,3>& ri = pos_atoms_tmp[i];
+      for (size_t j = i + 1; j < num_atoms; ++j) {
+        const std::array<double,3>& rj = pos_atoms_tmp[j];
+        const double dx = ri[0] - rj[0];
+        const double dy = ri[1] - rj[1];
+        const double dz = ri[2] - rj[2];
+        const double r = std::sqrt (dx * dx + dy * dy + dz * dz);
+        this->coul_energy += qi * charge_atoms_tmp[j] / r;
+      }
+    }
+    this->coul_energy *= den_in;
+  }
+
+  // ====================================================
+  // CPU side: collect surface points V, flux, normals
+  // ====================================================
+  std::array<double,3> h_cell{0}, area_h{0};
+  std::array<double,3> V, N;
+  std::array<double,8> tmp_eps, tmp_phi;
+  std::vector<int> edg, fl_dir;
+
+  auto quadrant = this->tmsh.begin_quadrant_sweep ();
+
+  if (!border_quad.empty()) {
+    quadrant[border_quad[0]];
+    for (int d = 0; d < 3; ++d)
+      h_cell[d] = quadrant->p (d, 7) - quadrant->p (d, 0);
+    area_h = {h_cell[1]*h_cell[2]/h_cell[0]*0.25,
+              h_cell[0]*h_cell[2]/h_cell[1]*0.25,
+              h_cell[0]*h_cell[1]/h_cell[2]*0.25};
+  }
+
+  // --- Collect flux surface points ---
+  std::vector<double> h_V_pol;
+  std::vector<double> h_flux_pol;
+
+  // --- Collect triangle vertex data (ionic) ---
+  std::vector<double> h_vert_ion;
+  std::vector<double> h_norms_ion;
+  std::vector<double> h_phi_ion;
+  std::vector<double> h_area_ion;
+
+  const bool do_ionic = (calc_energy == 2 && k > 1.e-5);
+
+  for (const int ii : border_quad) {
+    quadrant[ii];
+    std::tie (tmp_phi, tmp_eps, edg, fl_dir) = classifyCube_flux_fast (quadrant, tmp_phi, tmp_eps);
+
+    // --- Flux contribution (edges crossing interface) ---
+    for (int ip = 0; ip < (int)edg.size (); ++ip) {
+      const int edge = edg[ip];
+      const int axis = edge_axis[edge];
+      const int i1 = edge2nodes[2 * edge];
+      const int i2 = edge2nodes[2 * edge + 1];
+
+      double fract = 0.0;
+      normal_intersection (quadrant, ray_cache, edge, N, fract);
+
+      V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
+      V[axis] += fract * h_cell[axis];
+
+      const double tmp_flux =
+        - (tmp_phi[i2] - tmp_phi[i1]) * wha (tmp_eps[i1], tmp_eps[i2], fract)
+        * fl_dir[ip] * area_h[axis];
+
+      charge_pol += tmp_flux;
+
+      h_V_pol.push_back(V[0]);
+      h_V_pol.push_back(V[1]);
+      h_V_pol.push_back(V[2]);
+      h_flux_pol.push_back(tmp_flux);
+    }
+
+    // --- Triangle contribution (ionic) ---
+    if (do_ionic) {
+      int cubeindex = classifyCube_fast (quadrant, eps_out);
+      int ntriang = getTriangles (cubeindex, triangles);
+
+      for (int itri = 0; itri < ntriang; ++itri) {
+        std::array<std::array<double,3>,3> tv, nv;
+        std::array<double,3> ps;
+
+        for (int jj = 0; jj < 3; ++jj) {
+          const int tedge = triangles[itri][jj];
+          const int taxis = edge_axis[tedge];
+          const int ti1 = edge2nodes[2 * tedge];
+          const int ti2 = edge2nodes[2 * tedge + 1];
+
+          double tfract = 0.0;
+          normal_intersection (quadrant, ray_cache, tedge, N, tfract);
+
+          V = {quadrant->p (0, ti1), quadrant->p (1, ti1), quadrant->p (2, ti1)};
+          V[taxis] += tfract * h_cell[taxis];
+
+          tv[jj] = V;
+          nv[jj] = N;
+          ps[jj] = phi0 (tmp_eps[ti1], tmp_eps[ti2], tmp_phi[ti1], tmp_phi[ti2], tfract);
+        }
+
+        double a = areaTriangle (tv);
+        h_area_ion.push_back(a);
+
+        for (int jj = 0; jj < 3; ++jj) {
+          h_vert_ion.push_back(tv[jj][0]);
+          h_vert_ion.push_back(tv[jj][1]);
+          h_vert_ion.push_back(tv[jj][2]);
+          h_norms_ion.push_back(nv[jj][0]);
+          h_norms_ion.push_back(nv[jj][1]);
+          h_norms_ion.push_back(nv[jj][2]);
+          h_phi_ion.push_back(ps[jj]);
+        }
+      }
+    }
+  }
+
+  // ====================================================
+  // GPU: polarization first_int
+  // ====================================================
+  int num_pts = (int)h_flux_pol.size();
+  double first_int = polarization_energy_cuda(
+      num_pts,
+      h_V_pol.data(),
+      h_flux_pol.data(),
+      (int)num_atoms,
+      h_atoms.data(),
+      h_charges.data());
+
+  this->energy_pol = 0.5 * constant_pol * first_int;
+
+  // ====================================================
+  // GPU: ionic second_int (only if calc_energy==2 && k>eps)
+  // ====================================================
+  if (do_ionic) {
+    int num_tri_verts = (int)h_phi_ion.size();
+    double second_int = ionic_energy_cuda(
+        num_tri_verts,
+        h_vert_ion.data(),
+        h_norms_ion.data(),
+        h_phi_ion.data(),
+        h_area_ion.data(),
+        (int)num_atoms,
+        h_atoms.data(),
+        h_charges.data(),
+        inv_4pi);
+
+    this->energy_react = 0.5 * (second_int - first_int * constant_react);
+  }
+
+  // ====================================================
+  // MPI reduction
+  // ====================================================
+  auto reduce_double = [&] (double &x) {
+    MPI_Reduce (rank == 0 ? MPI_IN_PLACE : &x, &x, 1, MPI_DOUBLE, MPI_SUM, 0, mpicomm);
+  };
+
+  reduce_double (charge_pol);
+  reduce_double (energy_pol);
+  reduce_double (energy_react);
+
+  if (rank == 0) {
+    constexpr int label_width = 50;
+    constexpr int precision = 16;
+
+    std::cout << std::left << std::setw (label_width) << "  Net charge [e]:"
+              << std::setprecision (precision) << net_charge << "\n";
+
+    std::cout << std::left << std::setw (label_width) << "  Flux charge [e]:"
+              << std::setprecision (precision) << charge_pol / (4.0 * pi) << "\n";
 
     std::cout << std::left << std::setw (label_width) << "  Polarization energy [kT]:"
               << std::setprecision (precision) << energy_pol << "\n";

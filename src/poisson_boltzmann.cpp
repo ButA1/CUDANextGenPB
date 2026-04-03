@@ -294,14 +294,14 @@ main (int argc, char **argv)
         pb.pot_field_fast (ray_cache);
 
         if (pb.calc_energy > pb.calc_potential_term && pb.calc_energy > pb.calc_field_term)
-          pb.energy_fast (ray_cache);
+          pb.energy_cuda_fast (ray_cache);
       }
     } else {
       if (refined)
         pb.energy (ray_cache);
       else
         // pb.pot_field_fast (ray_cache);
-        pb.energy_fast (ray_cache);
+        pb.energy_cuda_fast (ray_cache);
     }
 
 
