@@ -86,6 +86,30 @@ ionic_kernel(int num_tri_verts,
   partial[itv] = sum;
 }
 
+// --------------- coulombic kernel ---------------
+__global__ void
+coulombic_kernel(int num_atoms,
+                 const double * __restrict__ atoms,
+                 const double * __restrict__ charges,
+                 double * __restrict__ partial)
+{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_atoms) return;
+
+  double qi = charges[i];
+  double xi = atoms[3*i], yi = atoms[3*i+1], zi = atoms[3*i+2];
+  double sum = 0.0;
+
+  for (int j = i + 1; j < num_atoms; ++j) {
+    double dx = xi - atoms[3*j];
+    double dy = yi - atoms[3*j+1];
+    double dz = zi - atoms[3*j+2];
+    double r  = sqrt(dx*dx + dy*dy + dz*dz);
+    sum += qi * charges[j] / r;
+  }
+  partial[i] = sum;
+}
+
 // --------------- host-side reduction helper ---------------
 static double gpu_reduce_sum(const double *d_arr, int n) {
   std::vector<double> h(n);
@@ -186,6 +210,36 @@ double ionic_energy_cuda(
   cudaFree(d_norms);
   cudaFree(d_phi);
   cudaFree(d_area);
+  cudaFree(d_atoms);
+  cudaFree(d_charges);
+  cudaFree(d_partial);
+
+  return result;
+}
+
+double coulombic_energy_cuda(
+    int    num_atoms,
+    const double *h_atoms,
+    const double *h_charges)
+{
+  if (num_atoms < 2) return 0.0;
+
+  double *d_atoms, *d_charges, *d_partial;
+  CUDA_CHECK(cudaMalloc(&d_atoms,   num_atoms * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_charges, num_atoms     * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_partial, num_atoms     * sizeof(double)));
+
+  CUDA_CHECK(cudaMemcpy(d_atoms,   h_atoms,   num_atoms * 3 * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_charges, h_charges, num_atoms     * sizeof(double), cudaMemcpyHostToDevice));
+
+  int tpb = 256;
+  int blocks = (num_atoms + tpb - 1) / tpb;
+  coulombic_kernel<<<blocks, tpb>>>(num_atoms, d_atoms, d_charges, d_partial);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  double result = gpu_reduce_sum(d_partial, num_atoms);
+
   cudaFree(d_atoms);
   cudaFree(d_charges);
   cudaFree(d_partial);

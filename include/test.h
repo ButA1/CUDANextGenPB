@@ -24,6 +24,11 @@ double ionic_energy_cuda(
     const double *h_atoms,
     const double *h_charges,
     double inv_4pi);
+
+double coulombic_energy_cuda(
+    int    num_atoms,
+    const double *h_atoms,
+    const double *h_charges);
 }
 
 #endif // TEST_H

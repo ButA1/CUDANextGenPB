@@ -3536,21 +3536,10 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
     h_charges[ia]     = charge_atoms_tmp[ia];
   }
 
-  // --- Coulombic energy (CPU, O(N^2) atom pairs) ---
+  // --- Coulombic energy (GPU, O(N^2) atom pairs) ---
   if (calc_coulombic == 1) {
-    for (size_t i = 0; i < num_atoms; ++i) {
-      const double qi = charge_atoms_tmp[i];
-      const std::array<double,3>& ri = pos_atoms_tmp[i];
-      for (size_t j = i + 1; j < num_atoms; ++j) {
-        const std::array<double,3>& rj = pos_atoms_tmp[j];
-        const double dx = ri[0] - rj[0];
-        const double dy = ri[1] - rj[1];
-        const double dz = ri[2] - rj[2];
-        const double r = std::sqrt (dx * dx + dy * dy + dz * dz);
-        this->coul_energy += qi * charge_atoms_tmp[j] / r;
-      }
-    }
-    this->coul_energy *= den_in;
+    this->coul_energy = coulombic_energy_cuda(
+        (int)num_atoms, h_atoms.data(), h_charges.data()) * den_in;
   }
 
   // ====================================================
