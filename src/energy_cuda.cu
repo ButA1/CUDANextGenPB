@@ -124,27 +124,44 @@ static double gpu_reduce_sum(const double *d_arr, int n) {
 
 extern "C" {
 
-double polarization_energy_cuda(
+// --- Upload atoms/charges once, get device pointers ---
+void atoms_to_device(
+    int num_atoms,
+    const double *h_atoms,
+    const double *h_charges,
+    double **d_atoms_out,
+    double **d_charges_out)
+{
+  CUDA_CHECK(cudaMalloc(d_atoms_out,   num_atoms * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(d_charges_out, num_atoms     * sizeof(double)));
+  CUDA_CHECK(cudaMemcpy(*d_atoms_out,   h_atoms,   num_atoms * 3 * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(*d_charges_out, h_charges, num_atoms     * sizeof(double), cudaMemcpyHostToDevice));
+}
+
+void atoms_free_device(double *d_atoms, double *d_charges)
+{
+  cudaFree(d_atoms);
+  cudaFree(d_charges);
+}
+
+// --- Polarization (device atom pointers) ---
+double polarization_energy_cuda_dev(
     int    num_pts,
     const double *h_V,
     const double *h_flux,
     int    num_atoms,
-    const double *h_atoms,
-    const double *h_charges)
+    const double *d_atoms,
+    const double *d_charges)
 {
   if (num_pts == 0 || num_atoms == 0) return 0.0;
 
-  double *d_V, *d_flux, *d_atoms, *d_charges, *d_partial;
-  CUDA_CHECK(cudaMalloc(&d_V,       num_pts   * 3 * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_flux,    num_pts       * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_atoms,   num_atoms * 3 * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_charges, num_atoms     * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_partial, num_pts       * sizeof(double)));
+  double *d_V, *d_flux, *d_partial;
+  CUDA_CHECK(cudaMalloc(&d_V,       num_pts * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_flux,    num_pts     * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_partial, num_pts     * sizeof(double)));
 
-  CUDA_CHECK(cudaMemcpy(d_V,       h_V,       num_pts   * 3 * sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_flux,    h_flux,    num_pts       * sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_atoms,   h_atoms,   num_atoms * 3 * sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_charges, h_charges, num_atoms     * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_V,    h_V,    num_pts * 3 * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_flux, h_flux, num_pts     * sizeof(double), cudaMemcpyHostToDevice));
 
   int tpb = 256;
   int blocks = (num_pts + tpb - 1) / tpb;
@@ -158,43 +175,38 @@ double polarization_energy_cuda(
 
   cudaFree(d_V);
   cudaFree(d_flux);
-  cudaFree(d_atoms);
-  cudaFree(d_charges);
   cudaFree(d_partial);
 
   return result;
 }
 
-double ionic_energy_cuda(
+// --- Ionic (device atom pointers) ---
+double ionic_energy_cuda_dev(
     int    num_tri_verts,
     const double *h_vert,
     const double *h_norms,
     const double *h_phi_sup,
     const double *h_area,
     int    num_atoms,
-    const double *h_atoms,
-    const double *h_charges,
+    const double *d_atoms,
+    const double *d_charges,
     double inv_4pi)
 {
   if (num_tri_verts == 0 || num_atoms == 0) return 0.0;
 
   int num_tris = num_tri_verts / 3;
 
-  double *d_vert, *d_norms, *d_phi, *d_area, *d_atoms, *d_charges, *d_partial;
+  double *d_vert, *d_norms, *d_phi, *d_area, *d_partial;
   CUDA_CHECK(cudaMalloc(&d_vert,    num_tri_verts * 3 * sizeof(double)));
   CUDA_CHECK(cudaMalloc(&d_norms,   num_tri_verts * 3 * sizeof(double)));
   CUDA_CHECK(cudaMalloc(&d_phi,     num_tri_verts     * sizeof(double)));
   CUDA_CHECK(cudaMalloc(&d_area,    num_tris          * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_atoms,   num_atoms     * 3 * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_charges, num_atoms         * sizeof(double)));
   CUDA_CHECK(cudaMalloc(&d_partial, num_tri_verts     * sizeof(double)));
 
-  CUDA_CHECK(cudaMemcpy(d_vert,    h_vert,     num_tri_verts * 3 * sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_norms,   h_norms,    num_tri_verts * 3 * sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_phi,     h_phi_sup,  num_tri_verts     * sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_area,    h_area,     num_tris          * sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_atoms,   h_atoms,    num_atoms     * 3 * sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_charges, h_charges,  num_atoms         * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_vert,  h_vert,     num_tri_verts * 3 * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_norms, h_norms,    num_tri_verts * 3 * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_phi,   h_phi_sup,  num_tri_verts     * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_area,  h_area,     num_tris          * sizeof(double), cudaMemcpyHostToDevice));
 
   int tpb = 256;
   int blocks = (num_tri_verts + tpb - 1) / tpb;
@@ -210,27 +222,21 @@ double ionic_energy_cuda(
   cudaFree(d_norms);
   cudaFree(d_phi);
   cudaFree(d_area);
-  cudaFree(d_atoms);
-  cudaFree(d_charges);
   cudaFree(d_partial);
 
   return result;
 }
 
-double coulombic_energy_cuda(
+// --- Coulombic (device atom pointers) ---
+double coulombic_energy_cuda_dev(
     int    num_atoms,
-    const double *h_atoms,
-    const double *h_charges)
+    const double *d_atoms,
+    const double *d_charges)
 {
   if (num_atoms < 2) return 0.0;
 
-  double *d_atoms, *d_charges, *d_partial;
-  CUDA_CHECK(cudaMalloc(&d_atoms,   num_atoms * 3 * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_charges, num_atoms     * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_partial, num_atoms     * sizeof(double)));
-
-  CUDA_CHECK(cudaMemcpy(d_atoms,   h_atoms,   num_atoms * 3 * sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_charges, h_charges, num_atoms     * sizeof(double), cudaMemcpyHostToDevice));
+  double *d_partial;
+  CUDA_CHECK(cudaMalloc(&d_partial, num_atoms * sizeof(double)));
 
   int tpb = 256;
   int blocks = (num_atoms + tpb - 1) / tpb;
@@ -240,11 +246,44 @@ double coulombic_energy_cuda(
 
   double result = gpu_reduce_sum(d_partial, num_atoms);
 
-  cudaFree(d_atoms);
-  cudaFree(d_charges);
   cudaFree(d_partial);
 
   return result;
+}
+
+// --- Standalone wrappers (upload atoms internally) ---
+double polarization_energy_cuda(
+    int num_pts, const double *h_V, const double *h_flux,
+    int num_atoms, const double *h_atoms, const double *h_charges)
+{
+  double *d_atoms, *d_charges;
+  atoms_to_device(num_atoms, h_atoms, h_charges, &d_atoms, &d_charges);
+  double r = polarization_energy_cuda_dev(num_pts, h_V, h_flux, num_atoms, d_atoms, d_charges);
+  atoms_free_device(d_atoms, d_charges);
+  return r;
+}
+
+double ionic_energy_cuda(
+    int num_tri_verts, const double *h_vert, const double *h_norms,
+    const double *h_phi_sup, const double *h_area,
+    int num_atoms, const double *h_atoms, const double *h_charges, double inv_4pi)
+{
+  double *d_atoms, *d_charges;
+  atoms_to_device(num_atoms, h_atoms, h_charges, &d_atoms, &d_charges);
+  double r = ionic_energy_cuda_dev(num_tri_verts, h_vert, h_norms, h_phi_sup, h_area,
+                                   num_atoms, d_atoms, d_charges, inv_4pi);
+  atoms_free_device(d_atoms, d_charges);
+  return r;
+}
+
+double coulombic_energy_cuda(
+    int num_atoms, const double *h_atoms, const double *h_charges)
+{
+  double *d_atoms, *d_charges;
+  atoms_to_device(num_atoms, h_atoms, h_charges, &d_atoms, &d_charges);
+  double r = coulombic_energy_cuda_dev(num_atoms, d_atoms, d_charges);
+  atoms_free_device(d_atoms, d_charges);
+  return r;
 }
 
 } // extern "C"

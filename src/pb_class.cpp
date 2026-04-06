@@ -3526,7 +3526,7 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   std::vector<double>().swap (charge_atoms);
   std::vector<std::array<double, 3>>().swap (pos_atoms);
 
-  // --- Pack atoms into flat arrays for GPU ---
+  // --- Pack atoms into flat arrays and upload to GPU once ---
   std::vector<double> h_atoms(num_atoms * 3);
   std::vector<double> h_charges(num_atoms);
   for (size_t ia = 0; ia < num_atoms; ++ia) {
@@ -3536,10 +3536,14 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
     h_charges[ia]     = charge_atoms_tmp[ia];
   }
 
+  double *d_atoms = nullptr, *d_charges = nullptr;
+  atoms_to_device((int)num_atoms, h_atoms.data(), h_charges.data(),
+                  &d_atoms, &d_charges);
+
   // --- Coulombic energy (GPU, O(N^2) atom pairs) ---
   if (calc_coulombic == 1) {
-    this->coul_energy = coulombic_energy_cuda(
-        (int)num_atoms, h_atoms.data(), h_charges.data()) * den_in;
+    this->coul_energy = coulombic_energy_cuda_dev(
+        (int)num_atoms, d_atoms, d_charges) * den_in;
   }
 
   // ====================================================
@@ -3648,13 +3652,13 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   // GPU: polarization first_int
   // ====================================================
   int num_pts = (int)h_flux_pol.size();
-  double first_int = polarization_energy_cuda(
+  double first_int = polarization_energy_cuda_dev(
       num_pts,
       h_V_pol.data(),
       h_flux_pol.data(),
       (int)num_atoms,
-      h_atoms.data(),
-      h_charges.data());
+      d_atoms,
+      d_charges);
 
   this->energy_pol = 0.5 * constant_pol * first_int;
 
@@ -3663,19 +3667,22 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   // ====================================================
   if (do_ionic) {
     int num_tri_verts = (int)h_phi_ion.size();
-    double second_int = ionic_energy_cuda(
+    double second_int = ionic_energy_cuda_dev(
         num_tri_verts,
         h_vert_ion.data(),
         h_norms_ion.data(),
         h_phi_ion.data(),
         h_area_ion.data(),
         (int)num_atoms,
-        h_atoms.data(),
-        h_charges.data(),
+        d_atoms,
+        d_charges,
         inv_4pi);
 
     this->energy_react = 0.5 * (second_int - first_int * constant_react);
   }
+
+  // --- Free shared device atoms ---
+  atoms_free_device(d_atoms, d_charges);
 
   // ====================================================
   // MPI reduction
