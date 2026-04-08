@@ -82,6 +82,7 @@ ehthumbs.db
 # Test outputs and temporary files
 test/*.o
 test/*.out
+*.ncu-rep
 
 # Compiler-specific directories
 .gcc_flags
