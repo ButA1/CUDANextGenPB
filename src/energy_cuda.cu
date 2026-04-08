@@ -44,8 +44,8 @@ polarization_kernel(int num_pts,
     double dx = atoms[3*ia]   - vx;
     double dy = atoms[3*ia+1] - vy;
     double dz = atoms[3*ia+2] - vz;
-    double r  = sqrt(dx*dx + dy*dy + dz*dz);
-    sum += charges[ia] * f / r;
+    double inv_r = rsqrt(dx*dx + dy*dy + dz*dz);
+    sum += charges[ia] * f * inv_r;
   }
   partial[ip] = sum;
 }
@@ -77,9 +77,8 @@ ionic_kernel(int num_tri_verts,
     double dx = vx - atoms[3*ia];
     double dy = vy - atoms[3*ia+1];
     double dz = vz - atoms[3*ia+2];
-    double r2 = dx*dx + dy*dy + dz*dz;
-    double r  = sqrt(r2);
-    double inv_r3 = 1.0 / (r2 * r);
+    double inv_r  = rsqrt(dx*dx + dy*dy + dz*dz);
+    double inv_r3 = inv_r * inv_r * inv_r;
     double dot = dx*nx + dy*ny + dz*nz;
     sum += charges[ia] * dot * inv_r3 * factor;
   }
@@ -104,8 +103,8 @@ coulombic_kernel(int num_atoms,
     double dx = xi - atoms[3*j];
     double dy = yi - atoms[3*j+1];
     double dz = zi - atoms[3*j+2];
-    double r  = sqrt(dx*dx + dy*dy + dz*dz);
-    sum += qi * charges[j] / r;
+    double inv_r  = rsqrt(dx*dx + dy*dy + dz*dz);
+    sum += qi * charges[j] * inv_r;
   }
   partial[i] = sum;
 }
