@@ -43,6 +43,10 @@ poisson_boltzmann::amgx_compute_electric_potential (ray_cache_t & ray_cache)
   int n        = tmsh.num_owned_nodes ();
   int n_global = tmsh.num_global_nodes ();
 
+  if (rank == 0)
+    std::cout << "Sparse matrix size: n = " << n_global
+              << ", nnz = " << nnz << std::endl;
+
   A.reset ();
 
   std::vector<double> rhs_local = rhs->get_owned_data ();

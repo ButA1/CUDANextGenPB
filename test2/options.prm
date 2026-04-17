@@ -1,0 +1,25 @@
+[input]
+filetype = pqr
+filename = 1vsz.pqr
+[../]
+
+[mesh]
+mesh_shape = 0
+perfil1 = 0.95
+perfil2 = 0.2
+scale   = 3.0
+[../]
+
+[model]
+bc_type = 1                                
+molecular_dielectric_constant = 2      # Dielectric constant inside the molecule
+solvent_dielectric_constant   = 80     # Dielectric constant of the solvent (e.g., water)
+ionic_strength                = 0.145  # Ionic strength (mol/L)
+T                             = 298.15 # Temperature in Kelvin
+calc_energy    = 2
+calc_coulombic = 1
+[../]
+
+[algorithm]
+linear_solver = amgx
+[../]
