@@ -3581,6 +3581,18 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
     quadrant[ii];
     std::tie (tmp_phi, tmp_eps, edg, fl_dir) = classifyCube_flux_fast (quadrant, tmp_phi, tmp_eps);
 
+    // --- Per-quadrant edge lookup table (avoids redundant normal_intersection calls) ---
+    std::array<std::array<double,3>, 12> edge_N{};
+    std::array<double, 12> edge_fract{};
+    std::array<bool, 12> edge_computed{};
+
+    for (const int e : edg) {
+      if (!edge_computed[e]) {
+        normal_intersection (quadrant, ray_cache, e, edge_N[e], edge_fract[e]);
+        edge_computed[e] = true;
+      }
+    }
+
     // --- Flux contribution (edges crossing interface) ---
     for (int ip = 0; ip < (int)edg.size (); ++ip) {
       const int edge = edg[ip];
@@ -3588,8 +3600,7 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
       const int i1 = edge2nodes[2 * edge];
       const int i2 = edge2nodes[2 * edge + 1];
 
-      double fract = 0.0;
-      normal_intersection (quadrant, ray_cache, edge, N, fract);
+      const double fract = edge_fract[edge];
 
       V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
       V[axis] += fract * h_cell[axis];
@@ -3621,14 +3632,17 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
           const int ti1 = edge2nodes[2 * tedge];
           const int ti2 = edge2nodes[2 * tedge + 1];
 
-          double tfract = 0.0;
-          normal_intersection (quadrant, ray_cache, tedge, N, tfract);
+          if (!edge_computed[tedge]) {
+            normal_intersection (quadrant, ray_cache, tedge, edge_N[tedge], edge_fract[tedge]);
+            edge_computed[tedge] = true;
+          }
+          const double tfract = edge_fract[tedge];
 
           V = {quadrant->p (0, ti1), quadrant->p (1, ti1), quadrant->p (2, ti1)};
           V[taxis] += tfract * h_cell[taxis];
 
           tv[jj] = V;
-          nv[jj] = N;
+          nv[jj] = edge_N[tedge];
           ps[jj] = phi0 (tmp_eps[ti1], tmp_eps[ti2], tmp_phi[ti1], tmp_phi[ti2], tfract);
         }
 
