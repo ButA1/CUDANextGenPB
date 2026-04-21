@@ -1982,6 +1982,8 @@ poisson_boltzmann::create_markers_fast (ray_cache_t & ray_cache)
   ray_cache.rays_list[1].clear ();
   ray_cache.rays_list[2].clear ();
 
+  TIC ();
+
   for (auto quadrant = this->tmsh.begin_quadrant_sweep ();
        quadrant != this->tmsh.end_quadrant_sweep ();
        ++quadrant) {
@@ -2021,13 +2023,21 @@ poisson_boltzmann::create_markers_fast (ray_cache_t & ray_cache)
     }
   }
 
+  TOC ("Collecting rays");
+
+  TIC ();
   // ---- Batch compute all pending rays on rank 0 ----
   if (rank == 0)
     ray_cache.compute_pending_rays ();
 
+  TOC ("Computing pending rays");
+
+  TIC ();
   MPI_Barrier (mpicomm);
   ray_cache.fill_cache ();
+  TOC ("Filling ray cache");
 
+  TIC ();
   // ---- Pass 2: Classify quadrants using cached ray data ----
   int local_num;
 
@@ -2081,6 +2091,7 @@ poisson_boltzmann::create_markers_fast (ray_cache_t & ray_cache)
         }
     }
   }
+  TOC ("Classifying quadrants");
 
   if (size >1) {
     bim3a_solution_with_ghosts (tmsh, *epsilon_nodes, replace_op);
