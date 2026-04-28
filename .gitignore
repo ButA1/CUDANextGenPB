@@ -83,6 +83,7 @@ ehthumbs.db
 test/*.o
 test/*.out
 *.ncu-rep
+*.zst
 
 # Compiler-specific directories
 .gcc_flags
