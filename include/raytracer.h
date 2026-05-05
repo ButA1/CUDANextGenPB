@@ -22,11 +22,8 @@
 
 #include <map>
 #include <set>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include <array>
-#include <cstring>
 #include <mpi.h>
 #include <nanoshaper.h>
 // #include <raytracer_datatype.h>
@@ -36,35 +33,11 @@
 
 using int_coord_t = unsigned long long int;
 
-// map_compare uses tol=1e-3, so quantise to that grid before hashing/comparing.
-// NanoShaper and p4est compute the same geometric point via different arithmetic;
-// they can differ by a small FP amount that is << tol but != 0.
-struct ray_hash {
-  size_t operator()(const std::array<double, 2>& a) const noexcept {
-    auto qx = static_cast<int64_t>(std::llround(a[0] * 1000.0));
-    auto qy = static_cast<int64_t>(std::llround(a[1] * 1000.0));
-    uint64_t ux = static_cast<uint64_t>(qx);
-    uint64_t uy = static_cast<uint64_t>(qy);
-    ux ^= uy * 0x9e3779b97f4a7c15ULL;
-    ux ^= ux >> 30; ux *= 0xbf58476d1ce4e5b9ULL;
-    ux ^= ux >> 27; ux *= 0x94d049bb133111ebULL;
-    return static_cast<size_t>(ux ^ (ux >> 31));
-  }
-};
-
-struct ray_equal {
-  bool operator()(const std::array<double,2>& a, const std::array<double,2>& b) const noexcept {
-    return std::llround(a[0] * 1000.0) == std::llround(b[0] * 1000.0) &&
-           std::llround(a[1] * 1000.0) == std::llround(b[1] * 1000.0);
-  }
-};
-
-using fast_rays_t = std::array<std::unordered_map<std::array<double,2>, crossings_t, ray_hash, ray_equal>, 3>;
 
 struct
   ray_cache_t {
 
-  fast_rays_t rays; //map that contains all the rays in the 3 direction
+  rays_t rays; //map that contains all the rays in the 3 direction
 
   static int_coord_t count_cache;
   static int_coord_t count_new;
@@ -78,7 +51,7 @@ struct
   double r_c[3] = {0, 0, 0};
   // int num_req_rays = 0;
   int num_req_rays[3] = {0, 0, 0};
-  std::array<std::unordered_set<std::array<double, 2>, ray_hash, ray_equal>, 3> rays_list; //list of req rays
+  std::array<std::set<std::array<double, 2>, map_compare>, 3> rays_list; //list of req rays
 
   crossings_t &
   operator () (double x0, double x1, unsigned dir = 1);
