@@ -144,6 +144,7 @@ struct
   //algorithm:
   std::string linear_solver_name;
   std::string linear_solver_options;
+  bool use_gpu;
 
   MPI_Comm mpicomm;
   tmesh_3d tmsh;
@@ -507,7 +508,7 @@ struct
                      int bc_ = 1, int linearized_ = 1,
                      double e_in_ = 2.0, double e_out_ = 80.0, double ionic_strength_ = 0.145,
                      std::string linear_solver_name_ = "mumps", std::string linear_solver_options_ = "",
-                     MPI_Comm mpicomm_ = MPI_COMM_WORLD)
+                     bool use_gpu_ = false, MPI_Comm mpicomm_ = MPI_COMM_WORLD)
     : maxlevel (maxlevel_),
       minlevel (minlevel_),
       unilevel (unilevel_),
@@ -519,6 +520,7 @@ struct
       ionic_strength (ionic_strength_),
       linear_solver_name (linear_solver_name_),
       linear_solver_options (linear_solver_options_),
+      use_gpu (use_gpu_),
       mpicomm (mpicomm_),
       tmsh (mpicomm)
   { };
