@@ -1,6 +1,6 @@
 [input]
 filetype = pqr
-filename = 6VYB.pqr
+filename = /usr/local/nextgenPB/data/6VYB.pqr
 [../]
 
 [mesh]

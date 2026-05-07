@@ -1,6 +1,6 @@
 [input]
 filetype = pqr
-filename = UNITSPHERE_DISC_2.pqr
+filename = /usr/local/nextgenPB/data/UNITSPHERE_DISC_2.pqr
 [../]
 
 [mesh]

@@ -1,6 +1,6 @@
 [input]
 filetype = pqr
-filename = 1CCM.pqr
+filename = /usr/local/nextgenPB/data/1CCM.pqr
 [../]
 
 [mesh]
