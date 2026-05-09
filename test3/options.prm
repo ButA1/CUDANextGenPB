@@ -4,8 +4,9 @@ filename = /usr/local/nextgenPB/data/UNITSPHERE_DISC_2.pqr
 [../]
 
 [mesh]
-mesh_shape = 1
+mesh_shape = 0
 perfil1 = 0.15
+perfil2 = 0.15
 scale   = 2.0
 [../]
 
@@ -20,5 +21,6 @@ calc_coulombic = 1
 [../]
 
 [algorithm]
-linear_solver = lis
+linear_solver  = AMGX
+use_gpu        = true
 [../]
