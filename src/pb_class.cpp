@@ -2693,7 +2693,7 @@ poisson_boltzmann::cube_fraction_intersection (tmesh_3d::quadrant_iterator& quad
   return fraction;
 }
 
-void
+bool
 poisson_boltzmann::normal_intersection (tmesh_3d::quadrant_iterator& quadrant,
                                         const ray_cache_t & ray_cache,
                                         int edge, std::array<double,3> &norm,
@@ -2719,14 +2719,19 @@ poisson_boltzmann::normal_intersection (tmesh_3d::quadrant_iterator& quadrant,
 
   frac = 0.5;
 
+  auto found = false;
+
   for (int ii =0; ii<inters.size (); ii++) {
     if (inters[ii]>= x1 && inters[ii] <=x2) {
       norm[0] = normali[0 + 3*ii];
       norm[1] = normali[1 + 3*ii];
       norm[2] = normali[2 + 3*ii];
       frac = (inters[ii] - x1)/ (x2 - x1);
+      found = true;
     }
   }
+
+  return found;
 }
 
 int
@@ -3593,6 +3598,15 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
     quadrant[ii];
     std::tie (tmp_phi, tmp_eps, edg, fl_dir) = classifyCube_flux_fast (quadrant, tmp_phi, tmp_eps);
 
+    // --- Per-quadrant edge lookup table (avoids redundant normal_intersection calls) ---
+    std::array<std::array<double,3>, 12> edge_N{};
+    std::array<double, 12> edge_fract{};
+    std::array<bool, 12> has_inters{};
+
+    for (const int e : edg) {
+      has_inters[e] = normal_intersection (quadrant, ray_cache, e, edge_N[e], edge_fract[e]);
+    }
+
     // --- Flux contribution (edges crossing interface) ---
     for (int ip = 0; ip < (int)edg.size (); ++ip) {
       const int edge = edg[ip];
@@ -3600,8 +3614,7 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
       const int i1 = edge2nodes[2 * edge];
       const int i2 = edge2nodes[2 * edge + 1];
 
-      double fract = 0.0;
-      normal_intersection (quadrant, ray_cache, edge, N, fract);
+      const double fract = edge_fract[edge];
 
       V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
       V[axis] += fract * h_cell[axis];
@@ -3626,6 +3639,7 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
       for (int itri = 0; itri < ntriang; ++itri) {
         std::array<std::array<double,3>,3> tv, nv;
         std::array<double,3> ps;
+        bool discard_triangle = false;
 
         for (int jj = 0; jj < 3; ++jj) {
           const int tedge = triangles[itri][jj];
@@ -3633,16 +3647,22 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
           const int ti1 = edge2nodes[2 * tedge];
           const int ti2 = edge2nodes[2 * tedge + 1];
 
-          double tfract = 0.0;
-          normal_intersection (quadrant, ray_cache, tedge, N, tfract);
+          if (!has_inters[tedge])
+            // nanoshaper and marching cubes disagree
+            // discard triangle
+            discard_triangle = true;
+          const double tfract = edge_fract[tedge];
 
           V = {quadrant->p (0, ti1), quadrant->p (1, ti1), quadrant->p (2, ti1)};
           V[taxis] += tfract * h_cell[taxis];
 
           tv[jj] = V;
-          nv[jj] = N;
+          nv[jj] = edge_N[tedge];
           ps[jj] = phi0 (tmp_eps[ti1], tmp_eps[ti2], tmp_phi[ti1], tmp_phi[ti2], tfract);
         }
+
+        if (discard_triangle)
+          continue;
 
         double a = areaTriangle (tv);
         h_area_ion.push_back(a);

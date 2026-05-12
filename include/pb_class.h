@@ -794,7 +794,7 @@ struct
   cube_fraction_intersection (tmesh_3d::quadrant_iterator& quadrant,
                               const ray_cache_t & ray_cache);
 
-  void
+  bool
   normal_intersection (tmesh_3d::quadrant_iterator& quadrant,
                        const ray_cache_t & ray_cache,
                        int edge, std::array<double,3> &norm,double &frac);
