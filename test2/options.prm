@@ -7,7 +7,7 @@ filename = /usr/local/nextgenPB/data/1vsz.pqr
 mesh_shape = 0
 perfil1 = 0.95
 perfil2 = 0.2
-scale   = 3.0
+scale   = 2.0
 [../]
 
 [model]
