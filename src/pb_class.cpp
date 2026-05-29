@@ -20,6 +20,7 @@
 #include "pb_class.h"
 #include "GetPot"
 #include "test.h"
+#include "barnes_hut.h"
 
 #include <bim_distributed_vector.h>
 #include <quad_operators_3d.h>
@@ -970,6 +971,8 @@ poisson_boltzmann::parse_options (int argc, char **argv)
   linear_solver_name = g2 ( (alg_options + "linear_solver").c_str (), "lis");
   linear_solver_options = g2 ( (alg_options + "solver_options").c_str (), "-p ssor -ssor_omega 0.51 -i cgs -tol 1.e-6 -print 2 -conv_cond 2 -tol_w 0");
   use_gpu = g2 ( (alg_options + "use_gpu").c_str (), 0);
+  energy_method = g2 ( (alg_options + "energy_method").c_str (), 1);
+  bh_theta = g2 ( (alg_options + "bh_theta").c_str (), 0.4);
 
   const std::string out_options = "output/";
   p4estfilename = g2 ( (out_options + "p4estfilename").c_str (), "poisson_boltzmann_p4est");
@@ -3557,10 +3560,17 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   atoms_to_device((int)num_atoms, h_atoms.data(), h_charges.data(),
                   &d_atoms, &d_charges);
 
-  // --- Coulombic energy (GPU, O(N^2) atom pairs) ---
+  // --- Build the Barnes-Hut atom-tree once (shared by all three terms) ---
+  bh_tree *bh = nullptr;
+  if (energy_method == 1)
+    bh_build_atom_tree((int)num_atoms, d_atoms, d_charges, bh_theta, &bh);
+
+  // --- Coulombic energy (tree O(N log N) or naive O(N^2) atom pairs) ---
   if (calc_coulombic == 1) {
-    this->coul_energy = coulombic_energy_cuda_dev(
-        (int)num_atoms, d_atoms, d_charges) * den_in;
+    double coul_raw = (energy_method == 1)
+        ? bh_coulombic_energy(bh)
+        : coulombic_energy_cuda_dev((int)num_atoms, d_atoms, d_charges);
+    this->coul_energy = coul_raw * den_in;
   }
 
   // ====================================================
@@ -3684,13 +3694,10 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   // GPU: polarization first_int
   // ====================================================
   int num_pts = (int)h_flux_pol.size();
-  double first_int = polarization_energy_cuda_dev(
-      num_pts,
-      h_V_pol.data(),
-      h_flux_pol.data(),
-      (int)num_atoms,
-      d_atoms,
-      d_charges);
+  double first_int = (energy_method == 1)
+      ? bh_polarization_energy(bh, num_pts, h_V_pol.data(), h_flux_pol.data())
+      : polarization_energy_cuda_dev(num_pts, h_V_pol.data(), h_flux_pol.data(),
+                                     (int)num_atoms, d_atoms, d_charges);
 
   this->energy_pol = 0.5 * constant_pol * first_int;
 
@@ -3699,21 +3706,18 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   // ====================================================
   if (do_ionic) {
     int num_tri_verts = (int)h_phi_ion.size();
-    double second_int = ionic_energy_cuda_dev(
-        num_tri_verts,
-        h_vert_ion.data(),
-        h_norms_ion.data(),
-        h_phi_ion.data(),
-        h_area_ion.data(),
-        (int)num_atoms,
-        d_atoms,
-        d_charges,
-        inv_4pi);
+    double second_int = (energy_method == 1)
+        ? bh_ionic_energy(bh, num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
+                          h_phi_ion.data(), h_area_ion.data(), inv_4pi)
+        : ionic_energy_cuda_dev(num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
+                                h_phi_ion.data(), h_area_ion.data(),
+                                (int)num_atoms, d_atoms, d_charges, inv_4pi);
 
     this->energy_react = 0.5 * (second_int - first_int * constant_react);
   }
 
-  // --- Free shared device atoms ---
+  // --- Free the tree and shared device atoms ---
+  if (bh) bh_free_tree(bh);
   atoms_free_device(d_atoms, d_charges);
 
   // ====================================================

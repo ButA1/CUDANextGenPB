@@ -21,6 +21,6 @@ calc_coulombic = 1
 [../]
 
 [algorithm]
-linear_solver  = AMGX
-use_gpu        = true
+linear_solver  = lis
+use_gpu        = 1
 [../]

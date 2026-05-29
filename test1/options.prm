@@ -22,4 +22,5 @@ calc_coulombic = 1
 
 [algorithm]
 linear_solver = lis
+use_gpu       = 1
 [../]
