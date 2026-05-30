@@ -84,6 +84,8 @@ test/*.o
 test/*.out
 *.ncu-rep
 *.zst
+exposed.xyz
+exposedIndices.txt
 
 # Compiler-specific directories
 .gcc_flags
