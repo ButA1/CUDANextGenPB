@@ -146,7 +146,7 @@ struct
   std::string linear_solver_options;
   bool use_gpu;
   int energy_method = 1;   // 0 = naive dense kernels, 1 = Barnes-Hut tree code
-  double bh_theta = 0.2;   // Barnes-Hut opening angle (MAC threshold)
+  double bh_theta = 0.4;   // Barnes-Hut opening angle (MAC threshold)
 
   MPI_Comm mpicomm;
   tmesh_3d tmsh;
