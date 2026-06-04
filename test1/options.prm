@@ -21,6 +21,8 @@ calc_coulombic = 1
 [../]
 
 [algorithm]
-linear_solver = lis
+linear_solver = amgx
 use_gpu       = 1
+bh_theta      = 0.2
+bh_order      = 6
 [../]

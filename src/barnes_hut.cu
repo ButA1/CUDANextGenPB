@@ -1,13 +1,19 @@
 /*
- *  Barnes-Hut tree-code for NGPB electrostatic energy kernels.
- *  See include/barnes_hut.h for the design overview.
+ *  Barnes-Hut Phase A: TABI-style high-order Cartesian Taylor treecode.
+ *  See /home/leirex/.claude/plans/ok-enough-math-time-fancy-lighthouse.md
  *
- *  Pipeline (all on device, FP64):
- *    1. bounding box of atoms                (custom reduction w/ double atomics)
- *    2. 63-bit Morton codes + radix sort     (cub::DeviceRadixSort)
- *    3. LBVH binary radix tree build         (Karras 2012)
- *    4. bottom-up multipole summarize (M,D,T) (atomic-flag upward walk)
- *    5. per-target traversal w/ MAC          (potential or field evaluator)
+ *  Differences from Phase 0:
+ *    - Per-node moments are stored as a flat array m^k indexed by multi-index
+ *      k=(kx,ky,kz) with |k| <= p. Count: COMP(p) = (p+1)(p+2)(p+3)/6.
+ *    - The multipole evaluator uses Cartesian Taylor coefficients
+ *          T^k(R) = d^k(1/r)
+ *      computed via the recurrence (Li-Johnston-Krasny 2009, kappa=0 case):
+ *          r^2 * T^(k+e_i) = -(2n+1) * R_i * T^k  -  n * T^(k-e_i),    n = |k|
+ *    - M2M shift is the generic multinomial expansion:
+ *          m_parent^k += sum_{l <= k} C(k,l) * delta^(k-l) * m_child^l.
+ *    - Field evaluator (E_ion) reuses T^k through order p+1.
+ *
+ *  LBVH topology (one leaf per atom) and the bbox/Morton/build kernels are unchanged.
  */
 
 #include <cuda_runtime.h>
@@ -27,14 +33,31 @@ static void check_cuda(cudaError_t err, const char *msg, int line) {
 #define CUDA_CHECK(call) check_cuda((call), #call, __LINE__)
 
 // ====================================================================
+//  Compile-time constants for the multi-index machinery.
+//  BH_MAX_P is the largest moment order supported; the field evaluator
+//  needs Taylor coefficients up to order p+1, hence BH_MAX_P_FIELD.
+// ====================================================================
+#define BH_MAX_P        6
+#define BH_MAX_P_FIELD  7
+__host__ __device__ constexpr int comp_of_h(int p) { return (p + 1) * (p + 2) * (p + 3) / 6; }
+#define BH_COMP_MAX        comp_of_h(BH_MAX_P)         // 84
+#define BH_COMP_MAX_FIELD  comp_of_h(BH_MAX_P_FIELD)   // 120
+
+__host__ __device__ __forceinline__ int comp_of(int p) {
+  return (p + 1) * (p + 2) * (p + 3) / 6;
+}
+
+// ====================================================================
 //  Tree handle (device-resident). Combined node array of size 2N-1:
 //    index 0 .. N-2     : internal nodes
-//    index N-1 .. 2N-2  : leaf nodes (leaf k at index (N-1)+k -> sorted atom k)
-//  "is leaf" test: idx >= N-1  (also correct for N==1, where everything is a leaf)
+//    index N-1 .. 2N-2  : leaf nodes  (leaf k at index (N-1)+k)
+//  "is leaf" test: idx >= N-1 (also correct for N==1).
 // ====================================================================
 struct bh_tree {
   int     N;          // number of atoms (leaves)
-  int     n_nodes;    // 2N-1
+  int     n_nodes;    // 2N - 1
+  int     p;          // multipole order in [1, BH_MAX_P]
+  int     comp;       // moments per node = COMP(p)
   double  theta;
 
   // sorted source atoms (Morton order)
@@ -44,18 +67,84 @@ struct bh_tree {
   // node geometry (AABB) and topology
   double *d_min;      // 3 * n_nodes
   double *d_max;      // 3 * n_nodes
-  int    *d_left;     // n_nodes (valid for internal nodes only)
+  int    *d_left;     // n_nodes
   int    *d_right;    // n_nodes
   int    *d_parent;   // n_nodes
 
-  // node multipole moments (about AABB center)
-  double *d_M;        // n_nodes
-  double *d_D;        // 3 * n_nodes
-  double *d_T;        // 6 * n_nodes : xx,yy,zz,xy,xz,yz
+  // per-node multi-index moments m^k, k indexed in c_mi_kx/ky/kz order
+  double *d_moments;  // n_nodes * comp
 };
 
 // ====================================================================
-//  double atomic min/max (compute capability has no native FP64 min/max atomic)
+//  Constant-memory tables (populated once on first build).
+//
+//    c_mi_kx/ky/kz[s]   -> Cartesian components of the multi-index at slot s
+//    c_mi_lookup[idx]   -> slot for the multi-index (kx,ky,kz),  idx = kx<<6 | ky<<3 | kz
+//    c_inv_fact[s]      -> 1/(kx! ky! kz!)  for slot s  (used in the evaluators)
+//    c_int_fact[i]      -> i!  for i in 0..7  (used in M2M binomial coefficients)
+//    c_comp_at_order[n] -> # slots with |k| < n  (i.e. first slot index with |k|=n)
+//
+//  Slots are enumerated in ascending |k|, then by lex ordering within each shell.
+// ====================================================================
+__constant__ char   c_mi_kx[BH_COMP_MAX_FIELD];
+__constant__ char   c_mi_ky[BH_COMP_MAX_FIELD];
+__constant__ char   c_mi_kz[BH_COMP_MAX_FIELD];
+__constant__ short  c_mi_lookup[8 * 8 * 8];
+__constant__ double c_inv_fact[BH_COMP_MAX_FIELD];
+__constant__ double c_int_fact[8];
+__constant__ int    c_comp_at_order[BH_MAX_P_FIELD + 2];
+
+#define MI_LOOKUP(kx, ky, kz) (c_mi_lookup[((kx) << 6) | ((ky) << 3) | (kz)])
+
+// Host-side one-shot initializer for the constant tables.
+static void init_constant_tables() {
+  static bool initialized = false;
+  if (initialized) return;
+
+  char   h_mi_kx[BH_COMP_MAX_FIELD];
+  char   h_mi_ky[BH_COMP_MAX_FIELD];
+  char   h_mi_kz[BH_COMP_MAX_FIELD];
+  short  h_mi_lookup[8 * 8 * 8];
+  double h_inv_fact[BH_COMP_MAX_FIELD];
+  double h_int_fact[8];
+  int    h_comp_at_order[BH_MAX_P_FIELD + 2];
+
+  h_int_fact[0] = 1.0;
+  for (int i = 1; i < 8; ++i) h_int_fact[i] = h_int_fact[i - 1] * i;
+
+  for (int i = 0; i < 8 * 8 * 8; ++i) h_mi_lookup[i] = -1;
+
+  int slot = 0;
+  h_comp_at_order[0] = 0;
+  for (int n = 0; n <= BH_MAX_P_FIELD; ++n) {
+    for (int kx = 0; kx <= n; ++kx) {
+      for (int ky = 0; ky <= n - kx; ++ky) {
+        int kz = n - kx - ky;
+        h_mi_kx[slot] = (char)kx;
+        h_mi_ky[slot] = (char)ky;
+        h_mi_kz[slot] = (char)kz;
+        h_mi_lookup[(kx << 6) | (ky << 3) | kz] = (short)slot;
+        h_inv_fact[slot] = 1.0 / (h_int_fact[kx] * h_int_fact[ky] * h_int_fact[kz]);
+        ++slot;
+      }
+    }
+    h_comp_at_order[n + 1] = slot;
+  }
+  // (slot now equals BH_COMP_MAX_FIELD)
+
+  CUDA_CHECK(cudaMemcpyToSymbol(c_mi_kx,         h_mi_kx,         sizeof(h_mi_kx)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_mi_ky,         h_mi_ky,         sizeof(h_mi_ky)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_mi_kz,         h_mi_kz,         sizeof(h_mi_kz)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_mi_lookup,     h_mi_lookup,     sizeof(h_mi_lookup)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_inv_fact,      h_inv_fact,      sizeof(h_inv_fact)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_int_fact,      h_int_fact,      sizeof(h_int_fact)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_comp_at_order, h_comp_at_order, sizeof(h_comp_at_order)));
+
+  initialized = true;
+}
+
+// ====================================================================
+//  double atomic min/max (no native FP64 min/max atomic on sm_86)
 // ====================================================================
 __device__ __forceinline__ double atomicMinDouble(double *addr, double val) {
   unsigned long long *a = (unsigned long long *)addr;
@@ -79,7 +168,7 @@ __device__ __forceinline__ double atomicMaxDouble(double *addr, double val) {
 }
 
 // ====================================================================
-//  Kernel 1: bounding box of atoms (per-block shared reduction -> global atomics)
+//  Kernel 1: bounding box (unchanged from Phase 0)
 // ====================================================================
 __global__ void bbox_kernel(int N, const double *__restrict__ pos,
                             double *__restrict__ gmin, double *__restrict__ gmax) {
@@ -111,7 +200,7 @@ __global__ void bbox_kernel(int N, const double *__restrict__ pos,
 }
 
 // ====================================================================
-//  Kernel 2: Morton codes (21 bits / axis -> 63-bit key)
+//  Kernel 2: Morton codes + reorder (unchanged except leaf moment init)
 // ====================================================================
 __device__ __forceinline__ uint64_t expandBits21(uint64_t v) {
   v &= 0x1fffffULL;
@@ -129,7 +218,7 @@ __global__ void morton_kernel(int N, const double *__restrict__ pos,
                               uint64_t *__restrict__ codes, int *__restrict__ idx) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= N) return;
-  const double scale = 2097151.0; // 2^21 - 1
+  const double scale = 2097151.0;
   double nx = (pos[3*i]   - bx0) * inv_sx;
   double ny = (pos[3*i+1] - by0) * inv_sy;
   double nz = (pos[3*i+2] - bz0) * inv_sz;
@@ -140,16 +229,18 @@ __global__ void morton_kernel(int N, const double *__restrict__ pos,
   idx[i]   = i;
 }
 
-// reorder atom positions/charges into Morton order, and init leaf nodes
-__global__ void reorder_kernel(int N, const int *__restrict__ order,
+// Reorder atoms into Morton order AND initialize per-leaf moments.
+// Leaf expansion center is the atom position itself, so m^0 = q and m^k = 0 for |k|>=1.
+__global__ void reorder_kernel(int N, int comp,
+                               const int *__restrict__ order,
                                const double *__restrict__ pos_in,
                                const double *__restrict__ q_in,
                                double *__restrict__ pos_out,
                                double *__restrict__ q_out,
-                               double *__restrict__ nmin, double *__restrict__ nmax,
-                               double *__restrict__ nM, double *__restrict__ nD,
-                               double *__restrict__ nT, int *__restrict__ parent,
-                               int n_nodes) {
+                               double *__restrict__ nmin,
+                               double *__restrict__ nmax,
+                               double *__restrict__ moments,
+                               int *__restrict__ parent) {
   int k = blockIdx.x * blockDim.x + threadIdx.x;
   if (k >= N) return;
   int src = order[k];
@@ -158,20 +249,20 @@ __global__ void reorder_kernel(int N, const int *__restrict__ order,
   pos_out[3*k] = x; pos_out[3*k+1] = y; pos_out[3*k+2] = z;
   q_out[k] = q;
 
-  int leaf = (N - 1) + k;               // combined-array index of this leaf
+  int leaf = (N - 1) + k;
   nmin[3*leaf] = x; nmin[3*leaf+1] = y; nmin[3*leaf+2] = z;
   nmax[3*leaf] = x; nmax[3*leaf+1] = y; nmax[3*leaf+2] = z;
-  nM[leaf] = q;                          // leaf center == atom pos => D=T=0
-  nD[3*leaf] = nD[3*leaf+1] = nD[3*leaf+2] = 0.0;
-  for (int t = 0; t < 6; ++t) nT[6*leaf + t] = 0.0;
 
-  if (k == 0) parent[0] = -1;            // root has no parent (N>1 case)
+  double *m = moments + (size_t)leaf * comp;
+  m[0] = q;
+  for (int s = 1; s < comp; ++s) m[s] = 0.0;
+
+  if (k == 0) parent[0] = -1;
 }
 
 // ====================================================================
-//  Kernel 3: LBVH binary radix tree build (Karras 2012)
+//  Kernel 3: LBVH binary radix tree build (Karras 2012) - unchanged
 // ====================================================================
-// common-prefix length of codes[i], codes[j] with index tie-break for duplicates
 __device__ __forceinline__ int delta(int i, int j, const uint64_t *codes, int n) {
   if (j < 0 || j >= n) return -1;
   uint64_t ci = codes[i], cj = codes[j];
@@ -183,29 +274,23 @@ __global__ void build_internal_kernel(int n, const uint64_t *__restrict__ codes,
                                       int *__restrict__ left, int *__restrict__ right,
                                       int *__restrict__ parent) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= n - 1) return;               // n-1 internal nodes
+  if (i >= n - 1) return;
 
-  // direction of the range owned by internal node i
   int dl = delta(i, i + 1, codes, n);
   int dr = delta(i, i - 1, codes, n);
   int d  = (dl - dr) >= 0 ? 1 : -1;
-
-  // lower bound on prefix length for this range
   int dmin = delta(i, i - d, codes, n);
 
-  // exponentially grow an upper bound on the range length
   int lmax = 2;
   while (delta(i, i + lmax * d, codes, n) > dmin) lmax <<= 1;
 
-  // binary search for the exact range length
   int l = 0;
   for (int t = lmax >> 1; t >= 1; t >>= 1) {
     if (delta(i, i + (l + t) * d, codes, n) > dmin) l += t;
   }
-  int j = i + l * d;                     // other end of the range
+  int j = i + l * d;
   int first = min(i, j), last = max(i, j);
 
-  // find the split position within [first, last]
   int dnode = delta(first, last, codes, n);
   int split = first, step = last - first;
   do {
@@ -215,7 +300,7 @@ __global__ void build_internal_kernel(int n, const uint64_t *__restrict__ codes,
   } while (step > 1);
 
   int lc = (split     == first) ? (n - 1) + split       : split;
-  int rc = (split + 1 == last)  ? (n - 1) + (split + 1)  : split + 1;
+  int rc = (split + 1 == last)  ? (n - 1) + (split + 1) : split + 1;
   left[i]  = lc;
   right[i] = rc;
   parent[lc] = i;
@@ -223,44 +308,63 @@ __global__ void build_internal_kernel(int n, const uint64_t *__restrict__ codes,
 }
 
 // ====================================================================
-//  Kernel 4: bottom-up multipole summarize (M, D, T about AABB center)
+//  Kernel 4: bottom-up multipole summarize (generic multinomial M2M)
 // ====================================================================
-__device__ __forceinline__ void m2m_accumulate(
-    double Mc, const double *Dc, const double *Tc,
-    double dx, double dy, double dz,          // child_center - parent_center
-    double &M, double *D, double *T) {
-  M += Mc;
-  D[0] += Dc[0] + Mc * dx;
-  D[1] += Dc[1] + Mc * dy;
-  D[2] += Dc[2] + Mc * dz;
-  T[0] += Tc[0] + 2.0 * Dc[0] * dx + Mc * dx * dx;          // xx
-  T[1] += Tc[1] + 2.0 * Dc[1] * dy + Mc * dy * dy;          // yy
-  T[2] += Tc[2] + 2.0 * Dc[2] * dz + Mc * dz * dz;          // zz
-  T[3] += Tc[3] + Dc[0] * dy + Dc[1] * dx + Mc * dx * dy;   // xy
-  T[4] += Tc[4] + Dc[0] * dz + Dc[2] * dx + Mc * dx * dz;   // xz
-  T[5] += Tc[5] + Dc[1] * dz + Dc[2] * dy + Mc * dy * dz;   // yz
+// Accumulate m_parent^k += sum_{l<=k} C(k,l) * delta^(k-l) * m_child^l
+// where delta = (dx,dy,dz) = c_child - c_parent.
+__device__ __forceinline__ void m2m_shift(int comp,
+                                          const double *__restrict__ m_child,
+                                          double dx, double dy, double dz,
+                                          double *__restrict__ m_parent) {
+  // Precompute powers of dx, dy, dz up to BH_MAX_P (highest exponent we can need
+  // for any l <= k with |k| <= p, since k_i - l_i <= k_i <= p).
+  double pwx[BH_MAX_P + 1], pwy[BH_MAX_P + 1], pwz[BH_MAX_P + 1];
+  pwx[0] = pwy[0] = pwz[0] = 1.0;
+  #pragma unroll
+  for (int i = 1; i <= BH_MAX_P; ++i) {
+    pwx[i] = pwx[i - 1] * dx;
+    pwy[i] = pwy[i - 1] * dy;
+    pwz[i] = pwz[i - 1] * dz;
+  }
+  for (int sk = 0; sk < comp; ++sk) {
+    int kx = c_mi_kx[sk], ky = c_mi_ky[sk], kz = c_mi_kz[sk];
+    int n_k = kx + ky + kz;
+    // l <= k component-wise implies |l| <= |k|; only walk slots up to the |l|=|k| shell.
+    int sl_end = c_comp_at_order[n_k + 1];
+    double k_fact = c_int_fact[kx] * c_int_fact[ky] * c_int_fact[kz];
+    double sum = 0.0;
+    for (int sl = 0; sl < sl_end; ++sl) {
+      int lx = c_mi_kx[sl], ly = c_mi_ky[sl], lz = c_mi_kz[sl];
+      int ex = kx - lx, ey = ky - ly, ez = kz - lz;
+      if (ex < 0 || ey < 0 || ez < 0) continue;
+      double l_fact = c_int_fact[lx] * c_int_fact[ly] * c_int_fact[lz];
+      double e_fact = c_int_fact[ex] * c_int_fact[ey] * c_int_fact[ez];
+      double C_kl  = k_fact / (l_fact * e_fact);   // C(k,l)
+      double dpow  = pwx[ex] * pwy[ey] * pwz[ez];  // delta^(k-l)
+      sum += C_kl * dpow * m_child[sl];
+    }
+    m_parent[sk] += sum;
+  }
 }
 
-__global__ void summarize_kernel(int N,
+__global__ void summarize_kernel(int N, int comp,
                                  const int *__restrict__ left,
                                  const int *__restrict__ right,
                                  const int *__restrict__ parent,
-                                 double *__restrict__ nmin, double *__restrict__ nmax,
-                                 double *__restrict__ nM, double *__restrict__ nD,
-                                 double *__restrict__ nT, int *__restrict__ flags) {
+                                 double *__restrict__ nmin,
+                                 double *__restrict__ nmax,
+                                 double *__restrict__ moments,
+                                 int *__restrict__ flags) {
   int k = blockIdx.x * blockDim.x + threadIdx.x;
   if (k >= N) return;
 
-  int node = parent[(N - 1) + k];        // start at this leaf's parent
+  int node = parent[(N - 1) + k];
   while (node != -1) {
-    __threadfence();                     // publish child writes before claiming parent
-    if (atomicAdd(&flags[node], 1) == 0)
-      return;                            // first child to arrive: sibling will finish node
+    __threadfence();
+    if (atomicAdd(&flags[node], 1) == 0) return;
 
-    // second child has arrived: both children's data are ready
     int lc = left[node], rc = right[node];
 
-    // merge AABB
     double mnx = fmin(nmin[3*lc],   nmin[3*rc]);
     double mny = fmin(nmin[3*lc+1], nmin[3*rc+1]);
     double mnz = fmin(nmin[3*lc+2], nmin[3*rc+2]);
@@ -270,71 +374,109 @@ __global__ void summarize_kernel(int N,
     nmin[3*node] = mnx; nmin[3*node+1] = mny; nmin[3*node+2] = mnz;
     nmax[3*node] = mxx; nmax[3*node+1] = mxy; nmax[3*node+2] = mxz;
 
-    double cx = 0.5 * (mnx + mxx), cy = 0.5 * (mny + mxy), cz = 0.5 * (mnz + mxz);
+    double cx = 0.5 * (mnx + mxx);
+    double cy = 0.5 * (mny + mxy);
+    double cz = 0.5 * (mnz + mxz);
 
-    double M = 0.0, D[3] = {0,0,0}, T[6] = {0,0,0,0,0,0};
+    double *mp = moments + (size_t)node * comp;
+    for (int s = 0; s < comp; ++s) mp[s] = 0.0;
+
     #pragma unroll
-    for (int s = 0; s < 2; ++s) {
-      int c = (s == 0) ? lc : rc;
+    for (int s_child = 0; s_child < 2; ++s_child) {
+      int c = (s_child == 0) ? lc : rc;
       double ccx = 0.5 * (nmin[3*c]   + nmax[3*c]);
       double ccy = 0.5 * (nmin[3*c+1] + nmax[3*c+1]);
       double ccz = 0.5 * (nmin[3*c+2] + nmax[3*c+2]);
-      m2m_accumulate(nM[c], &nD[3*c], &nT[6*c],
-                     ccx - cx, ccy - cy, ccz - cz, M, D, T);
+      const double *mc = moments + (size_t)c * comp;
+      m2m_shift(comp, mc, ccx - cx, ccy - cy, ccz - cz, mp);
     }
-    nM[node] = M;
-    nD[3*node] = D[0]; nD[3*node+1] = D[1]; nD[3*node+2] = D[2];
-    for (int t = 0; t < 6; ++t) nT[6*node + t] = T[t];
 
     node = parent[node];
   }
 }
 
 // ====================================================================
-//  Kernel 5: per-target traversal with MAC. Templated on field vs potential.
+//  Kernel 5: per-target traversal with MAC.  Multi-index Taylor.
 // ====================================================================
-// Accumulate the multipole potential of a node at offset R (= target - center).
-__device__ __forceinline__ double mp_potential(
-    double Rx, double Ry, double Rz, double dist2,
-    double M, const double *D, const double *T) {
-  double inv_r  = rsqrt(dist2);
-  double inv_r2 = inv_r * inv_r;
+//
+// Fill T_buf[0..comp_of(max_order)-1] with Cartesian Taylor coefficients
+//   T^k(R) = d^k(1/r),   r = sqrt(R.R)
+// using r^2 * T^(k+e_i) = -(2n+1) R_i T^k - n T^(k-e_i),   n = |k|.
+//
+// We pick the increment axis per slot (prefer x if kx>=1, else y, else z); this
+// gives a unique "previous-shell" predecessor for every multi-index of order n>=2.
+__device__ __forceinline__ void compute_T(double Rx, double Ry, double Rz,
+                                          double inv_r2, double inv_r,
+                                          int max_order, double *T_buf) {
+  T_buf[0] = inv_r;                                   // T^(0,0,0) = 1/r
+  if (max_order < 1) return;
+
   double inv_r3 = inv_r * inv_r2;
-  double inv_r5 = inv_r3 * inv_r2;
-  double DdotR  = D[0]*Rx + D[1]*Ry + D[2]*Rz;
-  double RTR = Rx*Rx*T[0] + Ry*Ry*T[1] + Rz*Rz*T[2]
-             + 2.0 * (Rx*Ry*T[3] + Rx*Rz*T[4] + Ry*Rz*T[5]);
-  double trT = T[0] + T[1] + T[2];
-  return M*inv_r + DdotR*inv_r3 + 0.5 * (3.0*RTR - dist2*trT) * inv_r5;
+  T_buf[MI_LOOKUP(1, 0, 0)] = -Rx * inv_r3;           // T^(1,0,0) = -Rx/r^3
+  T_buf[MI_LOOKUP(0, 1, 0)] = -Ry * inv_r3;
+  T_buf[MI_LOOKUP(0, 0, 1)] = -Rz * inv_r3;
+
+  // Lindsay-Krasny recurrence for T^k = d^k(1/r), summed over ALL axes:
+  //   r^2 |k| T^k = -(2|k|-1) sum_i k_i R_i T^{k-e_i}
+  //                -(|k|-1)   sum_i k_i(k_i-1) T^{k-2e_i}
+  // (A single-axis two-term form is only exact through order 2.)
+  for (int n = 2; n <= max_order; ++n) {
+    int slot_start = c_comp_at_order[n];
+    int slot_end   = c_comp_at_order[n + 1];
+    double c1    = -(2.0 * n - 1.0);   // -(2|k|-1)
+    double c2    = -(double)(n - 1);   // -(|k|-1)
+    double inv_n = 1.0 / (double)n;
+    for (int s = slot_start; s < slot_end; ++s) {
+      int kx = c_mi_kx[s], ky = c_mi_ky[s], kz = c_mi_kz[s];
+      double s1 = 0.0;   // sum_i k_i R_i T^{k-e_i}
+      double s2 = 0.0;   // sum_i k_i(k_i-1) T^{k-2e_i}
+      if (kx >= 1) {
+        s1 += kx * Rx * T_buf[MI_LOOKUP(kx - 1, ky, kz)];
+        if (kx >= 2) s2 += kx * (kx - 1) * T_buf[MI_LOOKUP(kx - 2, ky, kz)];
+      }
+      if (ky >= 1) {
+        s1 += ky * Ry * T_buf[MI_LOOKUP(kx, ky - 1, kz)];
+        if (ky >= 2) s2 += ky * (ky - 1) * T_buf[MI_LOOKUP(kx, ky - 2, kz)];
+      }
+      if (kz >= 1) {
+        s1 += kz * Rz * T_buf[MI_LOOKUP(kx, ky, kz - 1)];
+        if (kz >= 2) s2 += kz * (kz - 1) * T_buf[MI_LOOKUP(kx, ky, kz - 2)];
+      }
+      T_buf[s] = (c1 * s1 + c2 * s2) * inv_r2 * inv_n;
+    }
+  }
 }
 
-// Accumulate the multipole field g = -grad(phi) of a node at offset R.
-__device__ __forceinline__ void mp_field(
-    double Rx, double Ry, double Rz, double dist2,
-    double M, const double *D, const double *T,
-    double &gx, double &gy, double &gz) {
-  double inv_r  = rsqrt(dist2);
-  double inv_r2 = inv_r * inv_r;
-  double inv_r3 = inv_r * inv_r2;
-  double inv_r5 = inv_r3 * inv_r2;
-  double inv_r7 = inv_r5 * inv_r2;
+// Potential evaluator: phi += sum_{|k|<=p} (-1)^|k| / k! * T^k(R) * m^k
+__device__ __forceinline__ double mp_potential_eval(int comp,
+                                                    const double *__restrict__ m,
+                                                    const double *__restrict__ T_buf) {
+  double phi = 0.0;
+  for (int s = 0; s < comp; ++s) {
+    int n = c_mi_kx[s] + c_mi_ky[s] + c_mi_kz[s];
+    double sign = (n & 1) ? -1.0 : 1.0;
+    phi += sign * c_inv_fact[s] * T_buf[s] * m[s];
+  }
+  return phi;
+}
 
-  double DdotR = D[0]*Rx + D[1]*Ry + D[2]*Rz;
-  // T*R (symmetric matrix-vector)
-  double TRx = T[0]*Rx + T[3]*Ry + T[4]*Rz;
-  double TRy = T[3]*Rx + T[1]*Ry + T[5]*Rz;
-  double TRz = T[4]*Rx + T[5]*Ry + T[2]*Rz;
-  double A   = Rx*TRx + Ry*TRy + Rz*TRz;     // R.T.R
-  double trT = T[0] + T[1] + T[2];
-
-  // monopole + dipole-gradient + quadrupole-gradient
-  double cR = M*inv_r3                       // monopole coeff on R
-            + 3.0*DdotR*inv_r5               // dipole
-            + 7.5*A*inv_r7                   // quadrupole (15/2)
-            - 1.5*trT*inv_r5;                // quadrupole trace (3/2)
-  gx += cR*Rx - D[0]*inv_r3 - 3.0*TRx*inv_r5;
-  gy += cR*Ry - D[1]*inv_r3 - 3.0*TRy*inv_r5;
-  gz += cR*Rz - D[2]*inv_r3 - 3.0*TRz*inv_r5;
+// Field evaluator: g_i += -sum_{|k|<=p} (-1)^|k| / k! * T^(k+e_i)(R) * m^k
+__device__ __forceinline__ void mp_field_eval(int comp,
+                                              const double *__restrict__ m,
+                                              const double *__restrict__ T_buf,
+                                              double &gx, double &gy, double &gz) {
+  for (int sk = 0; sk < comp; ++sk) {
+    int kx = c_mi_kx[sk], ky = c_mi_ky[sk], kz = c_mi_kz[sk];
+    int n = kx + ky + kz;
+    double sign = (n & 1) ? -1.0 : 1.0;
+    double common = sign * c_inv_fact[sk] * m[sk];
+    int s_qx = MI_LOOKUP(kx + 1, ky, kz);
+    int s_qy = MI_LOOKUP(kx, ky + 1, kz);
+    int s_qz = MI_LOOKUP(kx, ky, kz + 1);
+    gx -= common * T_buf[s_qx];
+    gy -= common * T_buf[s_qy];
+    gz -= common * T_buf[s_qz];
+  }
 }
 
 template<bool FIELD>
@@ -343,14 +485,20 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
                          double &out_phi, double &gx, double &gy, double &gz) {
   out_phi = 0.0; gx = gy = gz = 0.0;
   const double theta2 = t.theta * t.theta;
-  const int leaf0 = t.N - 1;
+  const int leaf0     = t.N - 1;
+  const int p         = t.p;
+  const int comp      = t.comp;
+  const int max_T_ord = FIELD ? (p + 1) : p;
 
-  // A binary radix tree over 63-bit Morton codes can approach depth 63; the
-  // DFS stack grows by +1 per descended level, so 96 leaves comfortable margin
-  // (incl. the duplicate-code index tie-break that can extend prefixes).
+  // Per-thread Taylor-coefficient buffer; sized for the worst case.
+  // Compiler will spill to local memory beyond the register budget.
+  double T_buf[BH_COMP_MAX_FIELD];
+
+  // Binary radix tree over 63-bit Morton codes has depth ~< 63 plus duplicate
+  // index tie-break; 96 leaves comfortable margin on the DFS stack.
   int stack[96];
   int sp = 0;
-  stack[sp++] = 0;                         // root (leaf if N==1, internal otherwise)
+  stack[sp++] = 0;
 
   while (sp > 0) {
     int node = stack[--sp];
@@ -360,7 +508,7 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
     double Rx = tx - cx, Ry = ty - cy, Rz = tz - cz;
     double dist2 = Rx*Rx + Ry*Ry + Rz*Rz;
 
-    if (node >= leaf0) {                    // leaf: single source atom
+    if (node >= leaf0) {                          // leaf: single source atom
       int a = node - leaf0;
       if (a == self_atom) continue;
       if (dist2 <= 0.0) continue;
@@ -377,27 +525,31 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
       continue;
     }
 
-    // MAC: accept cell if (size/dist) < theta  <=>  size^2 < theta^2 * dist^2
+    // MAC: accept cell if (size / dist) < theta  <=>  size^2 < theta^2 * dist^2
     double ex = t.d_max[3*node]   - t.d_min[3*node];
     double ey = t.d_max[3*node+1] - t.d_min[3*node+1];
     double ez = t.d_max[3*node+2] - t.d_min[3*node+2];
     double size = fmax(ex, fmax(ey, ez));
     if (dist2 > 0.0 && size*size < theta2 * dist2) {
-      if (FIELD)
-        mp_field(Rx, Ry, Rz, dist2, t.d_M[node], &t.d_D[3*node], &t.d_T[6*node],
-                 gx, gy, gz);
-      else
-        out_phi += mp_potential(Rx, Ry, Rz, dist2, t.d_M[node],
-                                &t.d_D[3*node], &t.d_T[6*node]);
+      double inv_r2 = 1.0 / dist2;
+      double inv_r  = sqrt(inv_r2);
+      compute_T(Rx, Ry, Rz, inv_r2, inv_r, max_T_ord, T_buf);
+      const double *m = t.d_moments + (size_t)node * comp;
+      if (FIELD) {
+        mp_field_eval(comp, m, T_buf, gx, gy, gz);
+      } else {
+        out_phi += mp_potential_eval(comp, m, T_buf);
+      }
     } else {
-      // open the node: visit both children
       stack[sp++] = t.d_left[node];
       stack[sp++] = t.d_right[node];
     }
   }
 }
 
-// E_coul: each source atom is also a target; exclude its own leaf, halve.
+// ====================================================================
+//  Three target-side kernels (signatures unchanged from Phase 0)
+// ====================================================================
 __global__ void coulomb_kernel(bh_tree t, double *__restrict__ partial) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= t.N) return;
@@ -407,7 +559,6 @@ __global__ void coulomb_kernel(bh_tree t, double *__restrict__ partial) {
   partial[i] = 0.5 * t.d_q[i] * phi;
 }
 
-// E_pol: potential at flux points, weighted by flux.
 __global__ void potential_kernel(bh_tree t, int num_pts,
                                  const double *__restrict__ V,
                                  const double *__restrict__ flux,
@@ -419,7 +570,6 @@ __global__ void potential_kernel(bh_tree t, int num_pts,
   partial[p] = flux[p] * phi;
 }
 
-// E_ion: field at triangle vertices dotted with normal, weighted by factor.
 __global__ void field_kernel(bh_tree t, int num_tri_verts,
                              const double *__restrict__ vert,
                              const double *__restrict__ norms,
@@ -430,13 +580,13 @@ __global__ void field_kernel(bh_tree t, int num_tri_verts,
   if (v >= num_tri_verts) return;
   double phi, gx, gy, gz;
   traverse<true>(vert[3*v], vert[3*v+1], vert[3*v+2], -1, t, phi, gx, gy, gz);
-  double dot = gx*norms[3*v] + gy*norms[3*v+1] + gz*norms[3*v+2];
+  double dot    = gx*norms[3*v] + gy*norms[3*v+1] + gz*norms[3*v+2];
   double factor = phi_sup[v] * inv_4pi * area[v / 3] / 3.0;
   partial[v] = dot * factor;
 }
 
 // ====================================================================
-//  host-side reduction (matches energy_cuda.cu summation order for A/B parity)
+//  Host-side reduction (matches Phase 0 summation order for A/B parity)
 // ====================================================================
 static double reduce_sum_host(const double *d_arr, int n) {
   std::vector<double> h(n);
@@ -453,29 +603,45 @@ void bh_build_atom_tree(int num_atoms,
                         const double *d_atoms,
                         const double *d_charges,
                         double theta,
+                        int p,
                         bh_tree **out) {
+  // Clamp p to the supported range with a stderr warning.
+  if (p < 1) {
+    fprintf(stderr, "[barnes_hut] bh_order=%d clamped to 1\n", p);
+    p = 1;
+  } else if (p > BH_MAX_P) {
+    fprintf(stderr, "[barnes_hut] bh_order=%d clamped to %d (BH_MAX_P)\n", p, BH_MAX_P);
+    p = BH_MAX_P;
+  }
+
+  init_constant_tables();
+
   bh_tree *t = new bh_tree();
-  t->N = num_atoms;
+  t->N       = num_atoms;
   t->n_nodes = (num_atoms > 0) ? (2 * num_atoms - 1) : 0;
-  t->theta = theta;
+  t->p       = p;
+  t->comp    = comp_of(p);
+  t->theta   = theta;
   *out = t;
   if (num_atoms <= 0) {
-    t->d_pos = t->d_q = t->d_min = t->d_max = t->d_M = t->d_D = t->d_T = nullptr;
+    t->d_pos = t->d_q = t->d_min = t->d_max = t->d_moments = nullptr;
     t->d_left = t->d_right = t->d_parent = nullptr;
     return;
   }
 
-  const int N = num_atoms, nn = t->n_nodes;
-  CUDA_CHECK(cudaMalloc(&t->d_pos, 3 * N * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_q,       N * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_min, 3 * nn * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_max, 3 * nn * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_M,       nn * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_D,   3 * nn * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_T,   6 * nn * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_left,    nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&t->d_right,   nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&t->d_parent,  nn * sizeof(int)));
+  const int N    = num_atoms;
+  const int nn   = t->n_nodes;
+  const int comp = t->comp;
+
+  CUDA_CHECK(cudaMalloc(&t->d_pos,     3 * N  * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&t->d_q,           N  * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&t->d_min,     3 * nn * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&t->d_max,     3 * nn * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&t->d_left,        nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_right,       nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_parent,      nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_moments,
+                        (size_t)nn * comp * sizeof(double)));
 
   const int tpb = 256;
 
@@ -496,7 +662,6 @@ void bh_build_atom_tree(int num_atoms,
   CUDA_CHECK(cudaMemcpy(h_max, d_gmax, 3*sizeof(double), cudaMemcpyDeviceToHost));
   cudaFree(d_gmin); cudaFree(d_gmax);
 
-  // guard against degenerate (zero-extent) axes
   double sx = h_max[0] - h_min[0]; if (sx <= 0) sx = 1.0;
   double sy = h_max[1] - h_min[1]; if (sy <= 0) sy = 1.0;
   double sz = h_max[2] - h_min[2]; if (sz <= 0) sz = 1.0;
@@ -524,27 +689,29 @@ void bh_build_atom_tree(int num_atoms,
   cudaFree(d_codes);
   cudaFree(d_idx);
 
-  // reorder atoms into Morton order + initialize leaf nodes
-  reorder_kernel<<<mt_blocks, tpb>>>(N, d_idx_sorted, d_atoms, d_charges,
-                                     t->d_pos, t->d_q, t->d_min, t->d_max,
-                                     t->d_M, t->d_D, t->d_T, t->d_parent, nn);
+  // 3. Reorder atoms into Morton order + initialize leaf nodes (incl. moments)
+  reorder_kernel<<<mt_blocks, tpb>>>(N, comp, d_idx_sorted, d_atoms, d_charges,
+                                     t->d_pos, t->d_q,
+                                     t->d_min, t->d_max,
+                                     t->d_moments, t->d_parent);
   CUDA_CHECK(cudaGetLastError());
   cudaFree(d_idx_sorted);
 
   if (N > 1) {
-    // 3. build internal nodes
+    // 4. Build internal nodes (Karras)
     int in_blocks = (N - 1 + tpb - 1) / tpb;
     build_internal_kernel<<<in_blocks, tpb>>>(N, d_codes_sorted,
                                               t->d_left, t->d_right, t->d_parent);
     CUDA_CHECK(cudaGetLastError());
 
-    // 4. bottom-up summarize (zero the per-node arrival flags first)
+    // 5. Bottom-up multipole summarize
     int *d_flags;
     CUDA_CHECK(cudaMalloc(&d_flags, nn * sizeof(int)));
     CUDA_CHECK(cudaMemset(d_flags, 0, nn * sizeof(int)));
-    summarize_kernel<<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent,
-                                         t->d_min, t->d_max, t->d_M, t->d_D, t->d_T,
-                                         d_flags);
+    summarize_kernel<<<mt_blocks, tpb>>>(N, comp,
+                                         t->d_left, t->d_right, t->d_parent,
+                                         t->d_min, t->d_max,
+                                         t->d_moments, d_flags);
     CUDA_CHECK(cudaGetLastError());
     cudaFree(d_flags);
   }
@@ -554,10 +721,10 @@ void bh_build_atom_tree(int num_atoms,
 
 void bh_free_tree(bh_tree *t) {
   if (!t) return;
-  cudaFree(t->d_pos);  cudaFree(t->d_q);
-  cudaFree(t->d_min);  cudaFree(t->d_max);
-  cudaFree(t->d_M);    cudaFree(t->d_D);   cudaFree(t->d_T);
-  cudaFree(t->d_left); cudaFree(t->d_right); cudaFree(t->d_parent);
+  cudaFree(t->d_pos);     cudaFree(t->d_q);
+  cudaFree(t->d_min);     cudaFree(t->d_max);
+  cudaFree(t->d_left);    cudaFree(t->d_right);   cudaFree(t->d_parent);
+  cudaFree(t->d_moments);
   delete t;
 }
 

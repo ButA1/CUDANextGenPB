@@ -32,12 +32,15 @@ typedef struct bh_tree bh_tree;
  *   d_atoms   : device ptr, 3*num_atoms doubles, interleaved x,y,z
  *   d_charges : device ptr, num_atoms doubles
  *   theta     : Barnes-Hut opening angle (MAC: accept cell if size/dist < theta)
+ *   p         : multipole truncation order (1..BH_MAX_P, currently 6).
+ *               Out-of-range values are clamped with a stderr warning.
  *   out       : receives the built tree handle (owns its own sorted copies)
  */
 void bh_build_atom_tree(int num_atoms,
                         const double *d_atoms,
                         const double *d_charges,
                         double theta,
+                        int p,
                         bh_tree **out);
 
 void bh_free_tree(bh_tree *tree);
