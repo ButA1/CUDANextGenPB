@@ -168,7 +168,7 @@ __device__ __forceinline__ double atomicMaxDouble(double *addr, double val) {
 }
 
 // ====================================================================
-//  Kernel 1: bounding box (unchanged from Phase 0)
+//  Kernel 1: bounding box
 // ====================================================================
 __global__ void bbox_kernel(int N, const double *__restrict__ pos,
                             double *__restrict__ gmin, double *__restrict__ gmax) {
@@ -200,7 +200,7 @@ __global__ void bbox_kernel(int N, const double *__restrict__ pos,
 }
 
 // ====================================================================
-//  Kernel 2: Morton codes + reorder (unchanged except leaf moment init)
+//  Kernel 2: Morton codes
 // ====================================================================
 __device__ __forceinline__ uint64_t expandBits21(uint64_t v) {
   v &= 0x1fffffULL;
@@ -229,7 +229,9 @@ __global__ void morton_kernel(int N, const double *__restrict__ pos,
   idx[i]   = i;
 }
 
-// Reorder atoms into Morton order AND initialize per-leaf moments.
+// ====================================================================
+//  Kernel 3: reorder atoms into Morton order + per-leaf moment init
+// ====================================================================
 // Leaf expansion center is the atom position itself, so m^0 = q and m^k = 0 for |k|>=1.
 __global__ void reorder_kernel(int N, int comp,
                                const int *__restrict__ order,
@@ -241,15 +243,15 @@ __global__ void reorder_kernel(int N, int comp,
                                double *__restrict__ nmax,
                                double *__restrict__ moments,
                                int *__restrict__ parent) {
-  int k = blockIdx.x * blockDim.x + threadIdx.x;
-  if (k >= N) return;
-  int src = order[k];
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) return;
+  int src = order[i];
   double x = pos_in[3*src], y = pos_in[3*src+1], z = pos_in[3*src+2];
   double q = q_in[src];
-  pos_out[3*k] = x; pos_out[3*k+1] = y; pos_out[3*k+2] = z;
-  q_out[k] = q;
+  pos_out[3*i] = x; pos_out[3*i+1] = y; pos_out[3*i+2] = z;
+  q_out[i] = q;
 
-  int leaf = (N - 1) + k;
+  int leaf = (N - 1) + i;
   nmin[3*leaf] = x; nmin[3*leaf+1] = y; nmin[3*leaf+2] = z;
   nmax[3*leaf] = x; nmax[3*leaf+1] = y; nmax[3*leaf+2] = z;
 
@@ -257,11 +259,11 @@ __global__ void reorder_kernel(int N, int comp,
   m[0] = q;
   for (int s = 1; s < comp; ++s) m[s] = 0.0;
 
-  if (k == 0) parent[0] = -1;
+  if (i == 0) parent[0] = -1;
 }
 
 // ====================================================================
-//  Kernel 3: LBVH binary radix tree build (Karras 2012) - unchanged
+//  Kernel 4: LBVH binary radix tree build (Karras 2012)
 // ====================================================================
 __device__ __forceinline__ int delta(int i, int j, const uint64_t *codes, int n) {
   if (j < 0 || j >= n) return -1;
@@ -308,7 +310,7 @@ __global__ void build_internal_kernel(int n, const uint64_t *__restrict__ codes,
 }
 
 // ====================================================================
-//  Kernel 4: bottom-up multipole summarize (generic multinomial M2M)
+//  Kernel 5: bottom-up multipole summarize (M2M upward pass)
 // ====================================================================
 // Accumulate m_parent^k += sum_{l<=k} C(k,l) * delta^(k-l) * m_child^l
 // where delta = (dx,dy,dz) = c_child - c_parent.
@@ -355,10 +357,10 @@ __global__ void summarize_kernel(int N, int comp,
                                  double *__restrict__ nmax,
                                  double *__restrict__ moments,
                                  int *__restrict__ flags) {
-  int k = blockIdx.x * blockDim.x + threadIdx.x;
-  if (k >= N) return;
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) return;
 
-  int node = parent[(N - 1) + k];
+  int node = parent[(N - 1) + i];
   while (node != -1) {
     __threadfence();
     if (atomicAdd(&flags[node], 1) == 0) return;
@@ -396,7 +398,8 @@ __global__ void summarize_kernel(int N, int comp,
 }
 
 // ====================================================================
-//  Kernel 5: per-target traversal with MAC.  Multi-index Taylor.
+//  Tree traversal + multipole evaluation (device helpers, called by the
+//  target-side kernels below).  Multi-index Cartesian Taylor.
 // ====================================================================
 //
 // Fill T_buf[0..comp_of(max_order)-1] with Cartesian Taylor coefficients
@@ -548,7 +551,7 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
 }
 
 // ====================================================================
-//  Three target-side kernels (signatures unchanged from Phase 0)
+//  Target-side evaluation kernels (launched from the public C API)
 // ====================================================================
 __global__ void coulomb_kernel(bh_tree t, double *__restrict__ partial) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -563,11 +566,11 @@ __global__ void potential_kernel(bh_tree t, int num_pts,
                                  const double *__restrict__ V,
                                  const double *__restrict__ flux,
                                  double *__restrict__ partial) {
-  int p = blockIdx.x * blockDim.x + threadIdx.x;
-  if (p >= num_pts) return;
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_pts) return;
   double phi, gx, gy, gz;
-  traverse<false>(V[3*p], V[3*p+1], V[3*p+2], -1, t, phi, gx, gy, gz);
-  partial[p] = flux[p] * phi;
+  traverse<false>(V[3*i], V[3*i+1], V[3*i+2], -1, t, phi, gx, gy, gz);
+  partial[i] = flux[i] * phi;
 }
 
 __global__ void field_kernel(bh_tree t, int num_tri_verts,
@@ -576,13 +579,13 @@ __global__ void field_kernel(bh_tree t, int num_tri_verts,
                              const double *__restrict__ phi_sup,
                              const double *__restrict__ area,
                              double inv_4pi, double *__restrict__ partial) {
-  int v = blockIdx.x * blockDim.x + threadIdx.x;
-  if (v >= num_tri_verts) return;
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_tri_verts) return;
   double phi, gx, gy, gz;
-  traverse<true>(vert[3*v], vert[3*v+1], vert[3*v+2], -1, t, phi, gx, gy, gz);
-  double dot    = gx*norms[3*v] + gy*norms[3*v+1] + gz*norms[3*v+2];
-  double factor = phi_sup[v] * inv_4pi * area[v / 3] / 3.0;
-  partial[v] = dot * factor;
+  traverse<true>(vert[3*i], vert[3*i+1], vert[3*i+2], -1, t, phi, gx, gy, gz);
+  double dot    = gx*norms[3*i] + gy*norms[3*i+1] + gz*norms[3*i+2];
+  double factor = phi_sup[i] * inv_4pi * area[i / 3] / 3.0;
+  partial[i] = dot * factor;
 }
 
 // ====================================================================
