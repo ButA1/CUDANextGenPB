@@ -58,6 +58,7 @@ struct bh_tree {
   int     n_nodes;    // 2N - 1
   int     p;          // multipole order in [1, BH_MAX_P]
   int     comp;       // moments per node = COMP(p)
+  int     leaf_size;  // max atoms per terminal cluster (P2P cutoff)
   double  theta;
 
   // sorted source atoms (Morton order)
@@ -70,6 +71,10 @@ struct bh_tree {
   int    *d_left;     // n_nodes
   int    *d_right;    // n_nodes
   int    *d_parent;   // n_nodes
+
+  // contiguous Morton-sorted atom range [d_first, d_last] covered by each node
+  int    *d_first;    // n_nodes
+  int    *d_last;     // n_nodes
 
   // per-node multi-index moments m^k, k indexed in c_mi_kx/ky/kz order
   double *d_moments;  // n_nodes * comp
@@ -242,7 +247,9 @@ __global__ void reorder_kernel(int N, int comp,
                                double *__restrict__ nmin,
                                double *__restrict__ nmax,
                                double *__restrict__ moments,
-                               int *__restrict__ parent) {
+                               int *__restrict__ parent,
+                               int *__restrict__ first,
+                               int *__restrict__ last) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= N) return;
   int src = order[i];
@@ -254,6 +261,10 @@ __global__ void reorder_kernel(int N, int comp,
   int leaf = (N - 1) + i;
   nmin[3*leaf] = x; nmin[3*leaf+1] = y; nmin[3*leaf+2] = z;
   nmax[3*leaf] = x; nmax[3*leaf+1] = y; nmax[3*leaf+2] = z;
+
+  // leaf covers the single atom i (in Morton-sorted order)
+  first[leaf] = i;
+  last[leaf]  = i;
 
   double *m = moments + (size_t)leaf * comp;
   m[0] = q;
@@ -274,7 +285,9 @@ __device__ __forceinline__ int delta(int i, int j, const uint64_t *codes, int n)
 
 __global__ void build_internal_kernel(int n, const uint64_t *__restrict__ codes,
                                       int *__restrict__ left, int *__restrict__ right,
-                                      int *__restrict__ parent) {
+                                      int *__restrict__ parent,
+                                      int *__restrict__ first_out,
+                                      int *__restrict__ last_out) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n - 1) return;
 
@@ -307,6 +320,10 @@ __global__ void build_internal_kernel(int n, const uint64_t *__restrict__ codes,
   right[i] = rc;
   parent[lc] = i;
   parent[rc] = i;
+
+  // this internal node covers the contiguous leaf/atom range [first, last]
+  first_out[i] = first;
+  last_out[i]  = last;
 }
 
 // ====================================================================
@@ -488,10 +505,10 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
                          double &out_phi, double &gx, double &gy, double &gz) {
   out_phi = 0.0; gx = gy = gz = 0.0;
   const double theta2 = t.theta * t.theta;
-  const int leaf0     = t.N - 1;
   const int p         = t.p;
   const int comp      = t.comp;
   const int max_T_ord = FIELD ? (p + 1) : p;
+  const int leaf_size = t.leaf_size;
 
   // Per-thread Taylor-coefficient buffer; sized for the worst case.
   // Compiler will spill to local memory beyond the register budget.
@@ -511,29 +528,14 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
     double Rx = tx - cx, Ry = ty - cy, Rz = tz - cz;
     double dist2 = Rx*Rx + Ry*Ry + Rz*Rz;
 
-    if (node >= leaf0) {                          // leaf: single source atom
-      int a = node - leaf0;
-      if (a == self_atom) continue;
-      if (dist2 <= 0.0) continue;
-      double q = t.d_q[a];
-      double inv_r = rsqrt(dist2);
-      if (FIELD) {
-        double inv_r3 = inv_r * inv_r * inv_r;
-        gx += q * Rx * inv_r3;
-        gy += q * Ry * inv_r3;
-        gz += q * Rz * inv_r3;
-      } else {
-        out_phi += q * inv_r;
-      }
-      continue;
-    }
-
     // MAC: accept cell if (size / dist) < theta  <=>  size^2 < theta^2 * dist^2
     double ex = t.d_max[3*node]   - t.d_min[3*node];
     double ey = t.d_max[3*node+1] - t.d_min[3*node+1];
     double ez = t.d_max[3*node+2] - t.d_min[3*node+2];
     double size = fmax(ex, fmax(ey, ez));
+
     if (dist2 > 0.0 && size*size < theta2 * dist2) {
+      // far enough: particle-cluster multipole interaction
       double inv_r2 = 1.0 / dist2;
       double inv_r  = sqrt(inv_r2);
       compute_T(Rx, Ry, Rz, inv_r2, inv_r, max_T_ord, T_buf);
@@ -542,6 +544,29 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
         mp_field_eval(comp, m, T_buf, gx, gy, gz);
       } else {
         out_phi += mp_potential_eval(comp, m, T_buf);
+      }
+      continue;
+    }
+
+    int cnt = t.d_last[node] - t.d_first[node] + 1;
+    if (cnt <= leaf_size) {
+      // terminal cluster: resolve its atoms by direct particle-particle sums
+      int a0 = t.d_first[node], a1 = t.d_last[node];
+      for (int a = a0; a <= a1; ++a) {
+        if (a == self_atom) continue;
+        double rx = tx - t.d_pos[3*a], ry = ty - t.d_pos[3*a+1], rz = tz - t.d_pos[3*a+2];
+        double d2 = rx*rx + ry*ry + rz*rz;
+        if (d2 <= 0.0) continue;
+        double q = t.d_q[a];
+        double inv_r = rsqrt(d2);
+        if (FIELD) {
+          double inv_r3 = inv_r * inv_r * inv_r;
+          gx += q * rx * inv_r3;
+          gy += q * ry * inv_r3;
+          gz += q * rz * inv_r3;
+        } else {
+          out_phi += q * inv_r;
+        }
       }
     } else {
       stack[sp++] = t.d_left[node];
@@ -607,6 +632,7 @@ void bh_build_atom_tree(int num_atoms,
                         const double *d_charges,
                         double theta,
                         int p,
+                        int leaf_size,
                         bh_tree **out) {
   // Clamp p to the supported range with a stderr warning.
   if (p < 1) {
@@ -624,11 +650,13 @@ void bh_build_atom_tree(int num_atoms,
   t->n_nodes = (num_atoms > 0) ? (2 * num_atoms - 1) : 0;
   t->p       = p;
   t->comp    = comp_of(p);
+  t->leaf_size = (leaf_size < 1) ? 1 : leaf_size;
   t->theta   = theta;
   *out = t;
   if (num_atoms <= 0) {
     t->d_pos = t->d_q = t->d_min = t->d_max = t->d_moments = nullptr;
     t->d_left = t->d_right = t->d_parent = nullptr;
+    t->d_first = t->d_last = nullptr;
     return;
   }
 
@@ -643,6 +671,8 @@ void bh_build_atom_tree(int num_atoms,
   CUDA_CHECK(cudaMalloc(&t->d_left,        nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&t->d_right,       nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&t->d_parent,      nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_first,       nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_last,        nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&t->d_moments,
                         (size_t)nn * comp * sizeof(double)));
 
@@ -696,7 +726,8 @@ void bh_build_atom_tree(int num_atoms,
   reorder_kernel<<<mt_blocks, tpb>>>(N, comp, d_idx_sorted, d_atoms, d_charges,
                                      t->d_pos, t->d_q,
                                      t->d_min, t->d_max,
-                                     t->d_moments, t->d_parent);
+                                     t->d_moments, t->d_parent,
+                                     t->d_first, t->d_last);
   CUDA_CHECK(cudaGetLastError());
   cudaFree(d_idx_sorted);
 
@@ -704,7 +735,8 @@ void bh_build_atom_tree(int num_atoms,
     // 4. Build internal nodes (Karras)
     int in_blocks = (N - 1 + tpb - 1) / tpb;
     build_internal_kernel<<<in_blocks, tpb>>>(N, d_codes_sorted,
-                                              t->d_left, t->d_right, t->d_parent);
+                                              t->d_left, t->d_right, t->d_parent,
+                                              t->d_first, t->d_last);
     CUDA_CHECK(cudaGetLastError());
 
     // 5. Bottom-up multipole summarize
@@ -727,6 +759,7 @@ void bh_free_tree(bh_tree *t) {
   cudaFree(t->d_pos);     cudaFree(t->d_q);
   cudaFree(t->d_min);     cudaFree(t->d_max);
   cudaFree(t->d_left);    cudaFree(t->d_right);   cudaFree(t->d_parent);
+  cudaFree(t->d_first);   cudaFree(t->d_last);
   cudaFree(t->d_moments);
   delete t;
 }

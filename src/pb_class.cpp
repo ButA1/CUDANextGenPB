@@ -974,6 +974,7 @@ poisson_boltzmann::parse_options (int argc, char **argv)
   energy_method = g2 ( (alg_options + "energy_method").c_str (), 1);
   bh_theta = g2 ( (alg_options + "bh_theta").c_str (), 0.4);
   bh_order = g2 ( (alg_options + "bh_order").c_str (), 6);
+  bh_leaf_size = g2 ( (alg_options + "bh_leaf_size").c_str (), 32);
 
   const std::string out_options = "output/";
   p4estfilename = g2 ( (out_options + "p4estfilename").c_str (), "poisson_boltzmann_p4est");
@@ -3564,7 +3565,7 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   // --- Build the Barnes-Hut atom-tree once (shared by all three terms) ---
   bh_tree *bh = nullptr;
   if (energy_method == 1)
-    bh_build_atom_tree((int)num_atoms, d_atoms, d_charges, bh_theta, bh_order, &bh);
+    bh_build_atom_tree((int)num_atoms, d_atoms, d_charges, bh_theta, bh_order, bh_leaf_size, &bh);
 
   // --- Coulombic energy (tree O(N log N) or naive O(N^2) atom pairs) ---
   if (calc_coulombic == 1) {

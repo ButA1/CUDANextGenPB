@@ -148,6 +148,7 @@ struct
   int energy_method = 1;   // 0 = naive dense kernels, 1 = Barnes-Hut tree code
   double bh_theta = 0.4;   // Barnes-Hut opening angle (MAC threshold)
   int bh_order = 6;        // Barnes-Hut multipole truncation order (1..BH_MAX_P)
+  int bh_leaf_size = 32;   // Barnes-Hut max atoms per terminal cluster (P2P cutoff)
 
   MPI_Comm mpicomm;
   tmesh_3d tmsh;

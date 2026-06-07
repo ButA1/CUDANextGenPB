@@ -34,6 +34,8 @@ typedef struct bh_tree bh_tree;
  *   theta     : Barnes-Hut opening angle (MAC: accept cell if size/dist < theta)
  *   p         : multipole truncation order (1..BH_MAX_P, currently 6).
  *               Out-of-range values are clamped with a stderr warning.
+ *   leaf_size : max atoms per terminal cluster; traversal stops descending at
+ *               subtrees of <= leaf_size atoms and resolves them as direct P2P.
  *   out       : receives the built tree handle (owns its own sorted copies)
  */
 void bh_build_atom_tree(int num_atoms,
@@ -41,6 +43,7 @@ void bh_build_atom_tree(int num_atoms,
                         const double *d_charges,
                         double theta,
                         int p,
+                        int leaf_size,
                         bh_tree **out);
 
 void bh_free_tree(bh_tree *tree);
