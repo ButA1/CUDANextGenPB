@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cfloat>
 #include <algorithm>
+#include <utility>
 
 static void check_cuda(cudaError_t err, const char *msg, int line) {
   if (err != cudaSuccess) {
@@ -45,6 +46,50 @@ __host__ __device__ constexpr int comp_of_h(int p) { return (p + 1) * (p + 2) * 
 
 __host__ __device__ __forceinline__ int comp_of(int p) {
   return (p + 1) * (p + 2) * (p + 3) / 6;
+}
+
+// ====================================================================
+//  Compile-time multi-index machinery (constexpr twins of the runtime
+//  __constant__ tables).  Used only by the templated traversal/evaluator
+//  hot path: because every index folds to a literal after unrolling, the
+//  per-thread Taylor buffer can be scalar-replaced into registers instead
+//  of spilling to local memory.  Enumeration order matches
+//  init_constant_tables(): ascending |k|, then lex (kx, ky) within a shell.
+// ====================================================================
+// # multi-indices with |k| < n  (== comp_of_h(n-1), with comp_of_h(-1)=0)
+__host__ __device__ constexpr int mi_base(int n) { return n * (n + 1) * (n + 2) / 6; }
+// smallest n with comp_of_h(n) > s  ==> the order |k| of slot s
+__host__ __device__ constexpr int mi_order(int s) {
+  int n = 0;
+  while (comp_of_h(n) <= s) ++n;
+  return n;
+}
+__host__ __device__ constexpr int mi_kx_of(int s) {
+  int n = mi_order(s), w = s - mi_base(n), kx = 0;
+  while (w >= (n - kx + 1)) { w -= (n - kx + 1); ++kx; }
+  return kx;
+}
+__host__ __device__ constexpr int mi_ky_of(int s) {
+  int n = mi_order(s), w = s - mi_base(n), kx = 0;
+  while (w >= (n - kx + 1)) { w -= (n - kx + 1); ++kx; }
+  return w;                                   // leftover within the shell == ky
+}
+__host__ __device__ constexpr int mi_kz_of(int s) {
+  return mi_order(s) - mi_kx_of(s) - mi_ky_of(s);
+}
+// slot index of multi-index (kx, ky, kz)
+__host__ __device__ constexpr int mi_slot(int kx, int ky, int kz) {
+  int n = kx + ky + kz;
+  return mi_base(n) + kx * (n + 1) - (kx * (kx - 1)) / 2 + ky;
+}
+__host__ __device__ constexpr double mi_cfact(int i) {
+  double f = 1.0;
+  for (int j = 2; j <= i; ++j) f *= (double)j;
+  return f;
+}
+// 1 / (kx! ky! kz!) for slot s
+__host__ __device__ constexpr double mi_inv_fact(int s) {
+  return 1.0 / (mi_cfact(mi_kx_of(s)) * mi_cfact(mi_ky_of(s)) * mi_cfact(mi_kz_of(s)));
 }
 
 // ====================================================================
@@ -419,100 +464,118 @@ __global__ void summarize_kernel(int N, int comp,
 //  target-side kernels below).  Multi-index Cartesian Taylor.
 // ====================================================================
 //
-// Fill T_buf[0..comp_of(max_order)-1] with Cartesian Taylor coefficients
+// Fill T[0 .. comp_of_h(MAXO)-1] with Cartesian Taylor coefficients
 //   T^k(R) = d^k(1/r),   r = sqrt(R.R)
-// using r^2 * T^(k+e_i) = -(2n+1) R_i T^k - n T^(k-e_i),   n = |k|.
-//
-// We pick the increment axis per slot (prefer x if kx>=1, else y, else z); this
-// gives a unique "previous-shell" predecessor for every multi-index of order n>=2.
-__device__ __forceinline__ void compute_T(double Rx, double Ry, double Rz,
-                                          double inv_r2, double inv_r,
-                                          int max_order, double *T_buf) {
-  T_buf[0] = inv_r;                                   // T^(0,0,0) = 1/r
-  if (max_order < 1) return;
-
-  double inv_r3 = inv_r * inv_r2;
-  T_buf[MI_LOOKUP(1, 0, 0)] = -Rx * inv_r3;           // T^(1,0,0) = -Rx/r^3
-  T_buf[MI_LOOKUP(0, 1, 0)] = -Ry * inv_r3;
-  T_buf[MI_LOOKUP(0, 0, 1)] = -Rz * inv_r3;
-
-  // Lindsay-Krasny recurrence for T^k = d^k(1/r), summed over ALL axes:
-  //   r^2 |k| T^k = -(2|k|-1) sum_i k_i R_i T^{k-e_i}
-  //                -(|k|-1)   sum_i k_i(k_i-1) T^{k-2e_i}
-  // (A single-axis two-term form is only exact through order 2.)
-  for (int n = 2; n <= max_order; ++n) {
-    int slot_start = c_comp_at_order[n];
-    int slot_end   = c_comp_at_order[n + 1];
-    double c1    = -(2.0 * n - 1.0);   // -(2|k|-1)
-    double c2    = -(double)(n - 1);   // -(|k|-1)
-    double inv_n = 1.0 / (double)n;
-    for (int s = slot_start; s < slot_end; ++s) {
-      int kx = c_mi_kx[s], ky = c_mi_ky[s], kz = c_mi_kz[s];
-      double s1 = 0.0;   // sum_i k_i R_i T^{k-e_i}
-      double s2 = 0.0;   // sum_i k_i(k_i-1) T^{k-2e_i}
-      if (kx >= 1) {
-        s1 += kx * Rx * T_buf[MI_LOOKUP(kx - 1, ky, kz)];
-        if (kx >= 2) s2 += kx * (kx - 1) * T_buf[MI_LOOKUP(kx - 2, ky, kz)];
-      }
-      if (ky >= 1) {
-        s1 += ky * Ry * T_buf[MI_LOOKUP(kx, ky - 1, kz)];
-        if (ky >= 2) s2 += ky * (ky - 1) * T_buf[MI_LOOKUP(kx, ky - 2, kz)];
-      }
-      if (kz >= 1) {
-        s1 += kz * Rz * T_buf[MI_LOOKUP(kx, ky, kz - 1)];
-        if (kz >= 2) s2 += kz * (kz - 1) * T_buf[MI_LOOKUP(kx, ky, kz - 2)];
-      }
-      T_buf[s] = (c1 * s1 + c2 * s2) * inv_r2 * inv_n;
+// via the all-axis Lindsay-Krasny recurrence
+//   r^2 |k| T^k = -(2|k|-1) sum_i k_i R_i T^{k-e_i} - (|k|-1) sum_i k_i(k_i-1) T^{k-2e_i}.
+// Slot S and all predecessor slots are compile-time constants (constexpr mi_*),
+// so T[] can be scalar-replaced into registers instead of spilling.
+template<int S>
+__device__ __forceinline__ void fill_T_slot(double Rx, double Ry, double Rz,
+                                            double inv_r, double inv_r2, double inv_r3,
+                                            double *T) {
+  constexpr int kx = mi_kx_of(S), ky = mi_ky_of(S), kz = mi_kz_of(S);
+  constexpr int n  = kx + ky + kz;
+  if constexpr (n == 0) {
+    T[S] = inv_r;                                       // T^(0,0,0) = 1/r
+  } else if constexpr (n == 1) {
+    T[S] = (kx ? -Rx : (ky ? -Ry : -Rz)) * inv_r3;      // T^(e_i) = -R_i / r^3
+  } else {
+    constexpr double c1    = -(2.0 * n - 1.0);          // -(2|k|-1)
+    constexpr double c2    = -(double)(n - 1);          // -(|k|-1)
+    constexpr double inv_n = 1.0 / (double)n;
+    double s1 = 0.0, s2 = 0.0;
+    if constexpr (kx >= 1) {
+      s1 += kx * Rx * T[mi_slot(kx - 1, ky, kz)];
+      if constexpr (kx >= 2) s2 += kx * (kx - 1) * T[mi_slot(kx - 2, ky, kz)];
     }
+    if constexpr (ky >= 1) {
+      s1 += ky * Ry * T[mi_slot(kx, ky - 1, kz)];
+      if constexpr (ky >= 2) s2 += ky * (ky - 1) * T[mi_slot(kx, ky - 2, kz)];
+    }
+    if constexpr (kz >= 1) {
+      s1 += kz * Rz * T[mi_slot(kx, ky, kz - 1)];
+      if constexpr (kz >= 2) s2 += kz * (kz - 1) * T[mi_slot(kx, ky, kz - 2)];
+    }
+    T[S] = (c1 * s1 + c2 * s2) * inv_r2 * inv_n;
   }
 }
 
-// Potential evaluator: phi += sum_{|k|<=p} (-1)^|k| / k! * T^k(R) * m^k
-__device__ __forceinline__ double mp_potential_eval(int comp,
-                                                    const double *__restrict__ m,
-                                                    const double *__restrict__ T_buf) {
-  double phi = 0.0;
-  for (int s = 0; s < comp; ++s) {
-    int n = c_mi_kx[s] + c_mi_ky[s] + c_mi_kz[s];
-    double sign = (n & 1) ? -1.0 : 1.0;
-    phi += sign * c_inv_fact[s] * T_buf[s] * m[s];
-  }
-  return phi;
+template<int... S>
+__device__ __forceinline__ void compute_T_impl(double Rx, double Ry, double Rz,
+                                               double inv_r, double inv_r2, double inv_r3,
+                                               double *T, std::integer_sequence<int, S...>) {
+  // comma fold over ascending slot S: the comma operator sequences left-to-right,
+  // so every predecessor T^{k-e_i} is written before it is read.
+  (fill_T_slot<S>(Rx, Ry, Rz, inv_r, inv_r2, inv_r3, T), ...);
 }
 
-// Field evaluator: g_i += -sum_{|k|<=p} (-1)^|k| / k! * T^(k+e_i)(R) * m^k
-__device__ __forceinline__ void mp_field_eval(int comp,
-                                              const double *__restrict__ m,
-                                              const double *__restrict__ T_buf,
-                                              double &gx, double &gy, double &gz) {
-  for (int sk = 0; sk < comp; ++sk) {
-    int kx = c_mi_kx[sk], ky = c_mi_ky[sk], kz = c_mi_kz[sk];
-    int n = kx + ky + kz;
-    double sign = (n & 1) ? -1.0 : 1.0;
-    double common = sign * c_inv_fact[sk] * m[sk];
-    int s_qx = MI_LOOKUP(kx + 1, ky, kz);
-    int s_qy = MI_LOOKUP(kx, ky + 1, kz);
-    int s_qz = MI_LOOKUP(kx, ky, kz + 1);
-    gx -= common * T_buf[s_qx];
-    gy -= common * T_buf[s_qy];
-    gz -= common * T_buf[s_qz];
-  }
+template<int MAXO>
+__device__ __forceinline__ void compute_T_t(double Rx, double Ry, double Rz,
+                                            double inv_r2, double inv_r, double *T) {
+  double inv_r3 = inv_r * inv_r2;
+  compute_T_impl(Rx, Ry, Rz, inv_r, inv_r2, inv_r3, T,
+                 std::make_integer_sequence<int, comp_of_h(MAXO)>{});
 }
 
-template<bool FIELD>
+// Potential: phi += sum_{|k|<=p} (-1)^|k| / k! * T^k * m^k
+template<int S>
+__device__ __forceinline__ double pot_term(const double *m, const double *T) {
+  constexpr int n = mi_kx_of(S) + mi_ky_of(S) + mi_kz_of(S);
+  constexpr double sign  = (n & 1) ? -1.0 : 1.0;
+  constexpr double inv_f = mi_inv_fact(S);
+  return sign * inv_f * T[S] * m[S];
+}
+template<int... S>
+__device__ __forceinline__ double mp_potential_eval_impl(const double *m, const double *T,
+                                                         std::integer_sequence<int, S...>) {
+  return (... + pot_term<S>(m, T));            // left fold: matches s=0..comp-1 order
+}
+template<int COMP>
+__device__ __forceinline__ double mp_potential_eval_t(const double *m, const double *T) {
+  return mp_potential_eval_impl(m, T, std::make_integer_sequence<int, COMP>{});
+}
+
+// Field: g_i += -sum_{|k|<=p} (-1)^|k| / k! * T^(k+e_i) * m^k
+template<int S>
+__device__ __forceinline__ void field_term(const double *m, const double *T,
+                                           double &gx, double &gy, double &gz) {
+  constexpr int kx = mi_kx_of(S), ky = mi_ky_of(S), kz = mi_kz_of(S);
+  constexpr int n  = kx + ky + kz;
+  constexpr double sign  = (n & 1) ? -1.0 : 1.0;
+  constexpr double inv_f = mi_inv_fact(S);
+  double common = sign * inv_f * m[S];
+  gx -= common * T[mi_slot(kx + 1, ky, kz)];
+  gy -= common * T[mi_slot(kx, ky + 1, kz)];
+  gz -= common * T[mi_slot(kx, ky, kz + 1)];
+}
+template<int... S>
+__device__ __forceinline__ void mp_field_eval_impl(const double *m, const double *T,
+                                                   double &gx, double &gy, double &gz,
+                                                   std::integer_sequence<int, S...>) {
+  (field_term<S>(m, T, gx, gy, gz), ...);
+}
+template<int COMP>
+__device__ __forceinline__ void mp_field_eval_t(const double *m, const double *T,
+                                               double &gx, double &gy, double &gz) {
+  mp_field_eval_impl(m, T, gx, gy, gz, std::make_integer_sequence<int, COMP>{});
+}
+
+template<bool FIELD, int P>
 __device__ void traverse(double tx, double ty, double tz, int self_atom,
                          const bh_tree t,
                          double &out_phi, double &gx, double &gy, double &gz) {
   out_phi = 0.0; gx = gy = gz = 0.0;
   const double theta2 = t.theta * t.theta;
-  const int p         = t.p;
-  const int comp      = t.comp;
-  const int max_T_ord = FIELD ? (p + 1) : p;
   const int leaf_size = t.leaf_size;
 
-  // Per-thread Taylor-coefficient buffer; sized for the worst case.
-  // Compiler will spill to local memory beyond the register budget.
-  double T_buf[BH_COMP_MAX_FIELD];
+  constexpr int MAX_T = FIELD ? (P + 1) : P;   // Taylor order needed
+  constexpr int COMP  = comp_of_h(P);          // moments per node
+
+  // Per-thread Taylor buffer; compile-time sized so it can be register-resident
+  // (fully for low P; at P=6 the order-7 buffer still exceeds the register
+  // budget and partially spills).
+  double T_buf[comp_of_h(MAX_T)];
 
   // Binary radix tree over 63-bit Morton codes has depth ~< 63 plus duplicate
   // index tie-break; 96 leaves comfortable margin on the DFS stack.
@@ -538,12 +601,12 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
       // far enough: particle-cluster multipole interaction
       double inv_r2 = 1.0 / dist2;
       double inv_r  = sqrt(inv_r2);
-      compute_T(Rx, Ry, Rz, inv_r2, inv_r, max_T_ord, T_buf);
-      const double *m = t.d_moments + (size_t)node * comp;
-      if (FIELD) {
-        mp_field_eval(comp, m, T_buf, gx, gy, gz);
+      compute_T_t<MAX_T>(Rx, Ry, Rz, inv_r2, inv_r, T_buf);
+      const double *m = t.d_moments + (size_t)node * COMP;
+      if constexpr (FIELD) {
+        mp_field_eval_t<COMP>(m, T_buf, gx, gy, gz);
       } else {
-        out_phi += mp_potential_eval(comp, m, T_buf);
+        out_phi += mp_potential_eval_t<COMP>(m, T_buf);
       }
       continue;
     }
@@ -559,7 +622,7 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
         if (d2 <= 0.0) continue;
         double q = t.d_q[a];
         double inv_r = rsqrt(d2);
-        if (FIELD) {
+        if constexpr (FIELD) {
           double inv_r3 = inv_r * inv_r * inv_r;
           gx += q * rx * inv_r3;
           gy += q * ry * inv_r3;
@@ -578,15 +641,17 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
 // ====================================================================
 //  Target-side evaluation kernels (launched from the public C API)
 // ====================================================================
+template<int P>
 __global__ void coulomb_kernel(bh_tree t, double *__restrict__ partial) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= t.N) return;
   double phi, gx, gy, gz;
-  traverse<false>(t.d_pos[3*i], t.d_pos[3*i+1], t.d_pos[3*i+2], i, t,
-                  phi, gx, gy, gz);
+  traverse<false, P>(t.d_pos[3*i], t.d_pos[3*i+1], t.d_pos[3*i+2], i, t,
+                     phi, gx, gy, gz);
   partial[i] = 0.5 * t.d_q[i] * phi;
 }
 
+template<int P>
 __global__ void potential_kernel(bh_tree t, int num_pts,
                                  const double *__restrict__ V,
                                  const double *__restrict__ flux,
@@ -594,10 +659,11 @@ __global__ void potential_kernel(bh_tree t, int num_pts,
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= num_pts) return;
   double phi, gx, gy, gz;
-  traverse<false>(V[3*i], V[3*i+1], V[3*i+2], -1, t, phi, gx, gy, gz);
+  traverse<false, P>(V[3*i], V[3*i+1], V[3*i+2], -1, t, phi, gx, gy, gz);
   partial[i] = flux[i] * phi;
 }
 
+template<int P>
 __global__ void field_kernel(bh_tree t, int num_tri_verts,
                              const double *__restrict__ vert,
                              const double *__restrict__ norms,
@@ -607,11 +673,25 @@ __global__ void field_kernel(bh_tree t, int num_tri_verts,
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= num_tri_verts) return;
   double phi, gx, gy, gz;
-  traverse<true>(vert[3*i], vert[3*i+1], vert[3*i+2], -1, t, phi, gx, gy, gz);
+  traverse<true, P>(vert[3*i], vert[3*i+1], vert[3*i+2], -1, t, phi, gx, gy, gz);
   double dot    = gx*norms[3*i] + gy*norms[3*i+1] + gz*norms[3*i+2];
   double factor = phi_sup[i] * inv_4pi * area[i / 3] / 3.0;
   partial[i] = dot * factor;
 }
+
+// Dispatch a P-templated kernel on the runtime multipole order t->p (clamped to
+// [1, BH_MAX_P] at build time, so the default arm covers BH_MAX_P).
+#define BH_LAUNCH_BY_ORDER(KERNEL, GRID, BLOCK, ...)                      \
+  do {                                                                    \
+    switch (t->p) {                                                       \
+      case 1: KERNEL<1><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
+      case 2: KERNEL<2><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
+      case 3: KERNEL<3><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
+      case 4: KERNEL<4><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
+      case 5: KERNEL<5><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
+      default: KERNEL<6><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;        \
+    }                                                                     \
+  } while (0)
 
 // ====================================================================
 //  Host-side reduction (matches Phase 0 summation order for A/B parity)
@@ -769,7 +849,7 @@ double bh_coulombic_energy(bh_tree *t) {
   double *d_partial;
   CUDA_CHECK(cudaMalloc(&d_partial, t->N * sizeof(double)));
   int tpb = 256, blocks = (t->N + tpb - 1) / tpb;
-  coulomb_kernel<<<blocks, tpb>>>(*t, d_partial);
+  BH_LAUNCH_BY_ORDER(coulomb_kernel, blocks, tpb, *t, d_partial);
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   double r = reduce_sum_host(d_partial, t->N);
@@ -788,7 +868,7 @@ double bh_polarization_energy(bh_tree *t, int num_pts,
   CUDA_CHECK(cudaMemcpy(d_flux, h_flux, num_pts  *sizeof(double), cudaMemcpyHostToDevice));
 
   int tpb = 256, blocks = (num_pts + tpb - 1) / tpb;
-  potential_kernel<<<blocks, tpb>>>(*t, num_pts, d_V, d_flux, d_partial);
+  BH_LAUNCH_BY_ORDER(potential_kernel, blocks, tpb, *t, num_pts, d_V, d_flux, d_partial);
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   double r = reduce_sum_host(d_partial, num_pts);
@@ -814,8 +894,8 @@ double bh_ionic_energy(bh_tree *t, int num_tri_verts,
   CUDA_CHECK(cudaMemcpy(d_area,  h_area,    num_tris       *sizeof(double), cudaMemcpyHostToDevice));
 
   int tpb = 256, blocks = (num_tri_verts + tpb - 1) / tpb;
-  field_kernel<<<blocks, tpb>>>(*t, num_tri_verts, d_vert, d_norms, d_phi, d_area,
-                                inv_4pi, d_partial);
+  BH_LAUNCH_BY_ORDER(field_kernel, blocks, tpb, *t, num_tri_verts, d_vert, d_norms, d_phi,
+                     d_area, inv_4pi, d_partial);
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   double r = reduce_sum_host(d_partial, num_tri_verts);
