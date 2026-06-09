@@ -481,9 +481,11 @@ __device__ __forceinline__ void fill_T_slot(double Rx, double Ry, double Rz,
   } else if constexpr (n == 1) {
     T[S] = (kx ? -Rx : (ky ? -Ry : -Rz)) * inv_r3;      // T^(e_i) = -R_i / r^3
   } else {
-    constexpr double c1    = -(2.0 * n - 1.0);          // -(2|k|-1)
-    constexpr double c2    = -(double)(n - 1);          // -(|k|-1)
+    // fold the 1/|k| normalization into the constants at compile time, so the
+    // per-slot result is just (c1*s1 + c2*s2)*inv_r2 -- one fewer FP64 multiply.
     constexpr double inv_n = 1.0 / (double)n;
+    constexpr double c1    = -(2.0 * n - 1.0) * inv_n;  // -(2|k|-1)/|k|
+    constexpr double c2    = -(double)(n - 1) * inv_n;  // -(|k|-1)/|k|
     double s1 = 0.0, s2 = 0.0;
     if constexpr (kx >= 1) {
       s1 += kx * Rx * T[mi_slot(kx - 1, ky, kz)];
@@ -497,7 +499,7 @@ __device__ __forceinline__ void fill_T_slot(double Rx, double Ry, double Rz,
       s1 += kz * Rz * T[mi_slot(kx, ky, kz - 1)];
       if constexpr (kz >= 2) s2 += kz * (kz - 1) * T[mi_slot(kx, ky, kz - 2)];
     }
-    T[S] = (c1 * s1 + c2 * s2) * inv_r2 * inv_n;
+    T[S] = (c1 * s1 + c2 * s2) * inv_r2;
   }
 }
 
@@ -585,22 +587,25 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
 
   while (sp > 0) {
     int node = stack[--sp];
-    double cx = 0.5 * (t.d_min[3*node]   + t.d_max[3*node]);
-    double cy = 0.5 * (t.d_min[3*node+1] + t.d_max[3*node+1]);
-    double cz = 0.5 * (t.d_min[3*node+2] + t.d_max[3*node+2]);
+    // load each AABB bound once; reused for both the center and the extent
+    double mnx = t.d_min[3*node],   mxx = t.d_max[3*node];
+    double mny = t.d_min[3*node+1], mxy = t.d_max[3*node+1];
+    double mnz = t.d_min[3*node+2], mxz = t.d_max[3*node+2];
+    double cx = 0.5 * (mnx + mxx);
+    double cy = 0.5 * (mny + mxy);
+    double cz = 0.5 * (mnz + mxz);
     double Rx = tx - cx, Ry = ty - cy, Rz = tz - cz;
     double dist2 = Rx*Rx + Ry*Ry + Rz*Rz;
 
     // MAC: accept cell if (size / dist) < theta  <=>  size^2 < theta^2 * dist^2
-    double ex = t.d_max[3*node]   - t.d_min[3*node];
-    double ey = t.d_max[3*node+1] - t.d_min[3*node+1];
-    double ez = t.d_max[3*node+2] - t.d_min[3*node+2];
+    double ex = mxx - mnx, ey = mxy - mny, ez = mxz - mnz;
     double size = fmax(ex, fmax(ey, ez));
 
     if (dist2 > 0.0 && size*size < theta2 * dist2) {
-      // far enough: particle-cluster multipole interaction
-      double inv_r2 = 1.0 / dist2;
-      double inv_r  = sqrt(inv_r2);
+      // far enough: particle-cluster multipole interaction.
+      // rsqrt(dist2) is ~17 FP64 ops vs ~45 for 1.0/dist2 then sqrt().
+      double inv_r  = rsqrt(dist2);
+      double inv_r2 = inv_r * inv_r;
       compute_T_t<MAX_T>(Rx, Ry, Rz, inv_r2, inv_r, T_buf);
       const double *m = t.d_moments + (size_t)node * COMP;
       if constexpr (FIELD) {
@@ -623,10 +628,11 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
         double q = t.d_q[a];
         double inv_r = rsqrt(d2);
         if constexpr (FIELD) {
-          double inv_r3 = inv_r * inv_r * inv_r;
-          gx += q * rx * inv_r3;
-          gy += q * ry * inv_r3;
-          gz += q * rz * inv_r3;
+          // hoist q/r^3 so each component update is a single FMA
+          double qir3 = q * inv_r * inv_r * inv_r;
+          gx += qir3 * rx;
+          gy += qir3 * ry;
+          gz += qir3 * rz;
         } else {
           out_phi += q * inv_r;
         }
