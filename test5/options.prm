@@ -1,6 +1,6 @@
 [input]
 filetype = pqr
-filename = /usr/local/nextgenPB/data/6VYB.pqr
+filename = 6VYB.pqr
 [../]
 
 [mesh]
@@ -11,7 +11,7 @@ scale   = 2.0
 [../]
 
 [model]
-bc_type = 1                                
+bc_type = 1
 molecular_dielectric_constant = 2      # Dielectric constant inside the molecule
 solvent_dielectric_constant   = 80     # Dielectric constant of the solvent (e.g., water)
 ionic_strength                = 0.145  # Ionic strength (mol/L)

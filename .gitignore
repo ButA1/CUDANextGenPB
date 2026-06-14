@@ -12,6 +12,7 @@
 *.out
 ngpb
 *.elf
+*.sif
 
 # Build directories
 build/
