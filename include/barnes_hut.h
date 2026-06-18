@@ -84,6 +84,31 @@ double bh_ionic_energy(bh_tree *tree,
                        const double *h_area,
                        double inv_4pi);
 
+/*
+ * DTT (dual-tree-traversal) variants of the polarization / ionic energy.
+ * Same semantics and signatures as the two functions above, but instead of one
+ * thread per target streaming the atom tree, the targets are grouped into leaf
+ * cells (a geometry-only target tree built internally over the supplied points)
+ * and one CUDA block per target leaf traverses the atom (source) tree, sharing
+ * the descent + MAC test across all targets in the leaf. The far field is still
+ * resolved by M2P at admissible cell pairs (no M2L yet); this validates the
+ * pair-traversal machinery FMM will reuse. Selected at runtime via
+ * energy_method=2. Re-tunes against bh_theta (the two-sided MAC differs from the
+ * single-sided one used by the per-target path).
+ */
+double bh_polarization_energy_dtt(bh_tree *tree,
+                                  int num_pts,
+                                  const double *h_V,
+                                  const double *h_flux);
+
+double bh_ionic_energy_dtt(bh_tree *tree,
+                           int num_tri_verts,
+                           const double *h_vert,
+                           const double *h_norms,
+                           const double *h_phi_sup,
+                           const double *h_area,
+                           double inv_4pi);
+
 #ifdef __cplusplus
 }
 #endif

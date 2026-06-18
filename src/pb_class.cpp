@@ -3563,8 +3563,10 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
                   &d_atoms, &d_charges);
 
   // --- Build the Barnes-Hut atom-tree once (shared by all three terms) ---
+  // Used as the source tree by both the per-target path (energy_method==1) and
+  // the dual-tree-traversal path (energy_method==2).
   bh_tree *bh = nullptr;
-  if (energy_method == 1)
+  if (energy_method == 1 || energy_method == 2)
     bh_build_atom_tree((int)num_atoms, d_atoms, d_charges, bh_theta, bh_order, bh_leaf_size, &bh);
 
   // --- Coulombic energy (tree O(N log N) or naive O(N^2) atom pairs) ---
@@ -3696,10 +3698,14 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   // GPU: polarization first_int
   // ====================================================
   int num_pts = (int)h_flux_pol.size();
-  double first_int = (energy_method == 1)
-      ? bh_polarization_energy(bh, num_pts, h_V_pol.data(), h_flux_pol.data())
-      : polarization_energy_cuda_dev(num_pts, h_V_pol.data(), h_flux_pol.data(),
-                                     (int)num_atoms, d_atoms, d_charges);
+  double first_int;
+  if (energy_method == 2)
+    first_int = bh_polarization_energy_dtt(bh, num_pts, h_V_pol.data(), h_flux_pol.data());
+  else if (energy_method == 1)
+    first_int = bh_polarization_energy(bh, num_pts, h_V_pol.data(), h_flux_pol.data());
+  else
+    first_int = polarization_energy_cuda_dev(num_pts, h_V_pol.data(), h_flux_pol.data(),
+                                             (int)num_atoms, d_atoms, d_charges);
 
   this->energy_pol = 0.5 * constant_pol * first_int;
 
@@ -3708,12 +3714,17 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   // ====================================================
   if (do_ionic) {
     int num_tri_verts = (int)h_phi_ion.size();
-    double second_int = (energy_method == 1)
-        ? bh_ionic_energy(bh, num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
-                          h_phi_ion.data(), h_area_ion.data(), inv_4pi)
-        : ionic_energy_cuda_dev(num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
-                                h_phi_ion.data(), h_area_ion.data(),
-                                (int)num_atoms, d_atoms, d_charges, inv_4pi);
+    double second_int;
+    if (energy_method == 2)
+      second_int = bh_ionic_energy_dtt(bh, num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
+                                       h_phi_ion.data(), h_area_ion.data(), inv_4pi);
+    else if (energy_method == 1)
+      second_int = bh_ionic_energy(bh, num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
+                                   h_phi_ion.data(), h_area_ion.data(), inv_4pi);
+    else
+      second_int = ionic_energy_cuda_dev(num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
+                                         h_phi_ion.data(), h_area_ion.data(),
+                                         (int)num_atoms, d_atoms, d_charges, inv_4pi);
 
     this->energy_react = 0.5 * (second_int - first_int * constant_react);
   }

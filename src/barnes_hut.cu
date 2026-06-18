@@ -126,6 +126,34 @@ struct bh_tree {
 };
 
 // ====================================================================
+//  Target tree (geometry only) for the DTT energy path. Same 2N-1 LBVH
+//  layout as bh_tree but carries no charges or multipole moments -- targets
+//  are only grouped into cells so one CUDA block can serve a whole leaf.
+//  d_orig[sorted] -> original (caller) point index, so per-target weights
+//  (flux / norms / phi_sup / area[i/3]) are read in the caller's order and
+//  results scatter back to the original layout.
+// ====================================================================
+struct bh_target_tree {
+  int     N;          // number of target points (leaves)
+  int     n_nodes;    // 2N - 1
+  int     leaf_size;  // max points per terminal cluster
+  int     n_leaves;   // # frontier (block-assigned) leaf cells
+
+  double *d_pos;      // 3N, Morton-sorted target positions
+  int    *d_orig;     // N,  original index of each sorted point
+
+  double *d_min;      // 3 * n_nodes
+  double *d_max;      // 3 * n_nodes
+  int    *d_left;     // n_nodes
+  int    *d_right;    // n_nodes
+  int    *d_parent;   // n_nodes
+  int    *d_first;    // n_nodes
+  int    *d_last;     // n_nodes
+
+  int    *d_leaf_nodes; // n_leaves, node indices of the leaf-size frontier
+};
+
+// ====================================================================
 //  Constant-memory tables (populated once on first build).
 //
 //    c_mi_kx/ky/kz[s]   -> Cartesian components of the multi-index at slot s
@@ -460,6 +488,90 @@ __global__ void summarize_kernel(int N, int comp,
 }
 
 // ====================================================================
+//  Target-tree build kernels (geometry only; clones of the atom-tree
+//  reorder/summarize stripped of charges and multipole moments).
+// ====================================================================
+
+// Reorder target points into Morton order, init single-point leaves, and keep
+// the sort permutation so results can be scattered back to caller order.
+__global__ void reorder_geom_kernel(int N,
+                                    const int *__restrict__ order,
+                                    const double *__restrict__ pos_in,
+                                    double *__restrict__ pos_out,
+                                    int *__restrict__ orig,
+                                    double *__restrict__ nmin,
+                                    double *__restrict__ nmax,
+                                    int *__restrict__ parent,
+                                    int *__restrict__ first,
+                                    int *__restrict__ last) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) return;
+  int src = order[i];
+  double x = pos_in[3*src], y = pos_in[3*src+1], z = pos_in[3*src+2];
+  pos_out[3*i] = x; pos_out[3*i+1] = y; pos_out[3*i+2] = z;
+  orig[i] = src;
+
+  int leaf = (N - 1) + i;
+  nmin[3*leaf] = x; nmin[3*leaf+1] = y; nmin[3*leaf+2] = z;
+  nmax[3*leaf] = x; nmax[3*leaf+1] = y; nmax[3*leaf+2] = z;
+  first[leaf] = i;
+  last[leaf]  = i;
+
+  if (i == 0) parent[0] = -1;
+}
+
+// Bottom-up AABB propagation only (no M2M). Same flag handshake as
+// summarize_kernel: the second child to arrive proceeds into the parent.
+__global__ void summarize_aabb_kernel(int N,
+                                      const int *__restrict__ left,
+                                      const int *__restrict__ right,
+                                      const int *__restrict__ parent,
+                                      double *__restrict__ nmin,
+                                      double *__restrict__ nmax,
+                                      int *__restrict__ flags) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) return;
+
+  int node = parent[(N - 1) + i];
+  while (node != -1) {
+    __threadfence();
+    if (atomicAdd(&flags[node], 1) == 0) return;
+
+    int lc = left[node], rc = right[node];
+    nmin[3*node]   = fmin(nmin[3*lc],   nmin[3*rc]);
+    nmin[3*node+1] = fmin(nmin[3*lc+1], nmin[3*rc+1]);
+    nmin[3*node+2] = fmin(nmin[3*lc+2], nmin[3*rc+2]);
+    nmax[3*node]   = fmax(nmax[3*lc],   nmax[3*rc]);
+    nmax[3*node+1] = fmax(nmax[3*lc+1], nmax[3*rc+1]);
+    nmax[3*node+2] = fmax(nmax[3*lc+2], nmax[3*rc+2]);
+
+    node = parent[node];
+  }
+}
+
+// Mark the leaf-size frontier: topmost nodes whose covered point count is
+// <= leaf_size (the root counts as having an infinite-size parent). These
+// nodes partition all target points and become the per-block leaf cells.
+__global__ void mark_frontier_kernel(int n_nodes, int N, int leaf_size,
+                                     const int *__restrict__ first,
+                                     const int *__restrict__ last,
+                                     const int *__restrict__ parent,
+                                     int *__restrict__ flag) {
+  int v = blockIdx.x * blockDim.x + threadIdx.x;
+  if (v >= n_nodes) return;
+  int cnt = last[v] - first[v] + 1;
+  int par = parent[v];
+  int pcnt = (par >= 0) ? (last[par] - first[par] + 1) : (N + 1);
+  flag[v] = (cnt <= leaf_size && (par < 0 || pcnt > leaf_size)) ? 1 : 0;
+}
+
+// Fill out[i] = i (node-id source for the frontier compaction).
+__global__ void iota_kernel(int n, int *__restrict__ out) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = i;
+}
+
+// ====================================================================
 //  Tree traversal + multipole evaluation (device helpers, called by the
 //  target-side kernels below).  Multi-index Cartesian Taylor.
 // ====================================================================
@@ -685,6 +797,137 @@ __global__ void field_kernel(bh_tree t, int num_tri_verts,
   partial[i] = dot * factor;
 }
 
+// ====================================================================
+//  DTT evaluation kernel: one CUDA block per target leaf cell. Every thread
+//  descends the source (atom) tree with its own private stack (the descent is
+//  control-flow identical across the block), testing a two-sided
+//  MAC once per source node (source cell vs the whole target leaf). Admissible
+//  source cells are resolved by M2P into each target point in the leaf;
+//  terminal source clusters by direct P2P. Far field is still M2P (no M2L yet).
+//  Targets != sources, so no self-exclusion. Weights and the final scatter use
+//  the original (caller) point order via tgt.d_orig.
+// ====================================================================
+template<bool FIELD, int P>
+__global__ void dtt_eval_kernel(bh_tree src, bh_target_tree tgt,
+                                double theta,
+                                const double *__restrict__ flux,    // pol   (FIELD=false)
+                                const double *__restrict__ norms,   // ionic (FIELD=true)
+                                const double *__restrict__ phi_sup,
+                                const double *__restrict__ area,
+                                double inv_4pi,
+                                double *__restrict__ partial) {
+  constexpr int MAX_T = FIELD ? (P + 1) : P;   // Taylor order needed
+  constexpr int COMP  = comp_of_h(P);          // moments per source node
+
+  // ---- this block's target leaf cell ----
+  int A   = tgt.d_leaf_nodes[blockIdx.x];
+  int a0  = tgt.d_first[A];
+  int cnt = tgt.d_last[A] - a0 + 1;
+
+  // target cell center + radius (half max-extent), same metric as the source side
+  double Tmnx = tgt.d_min[3*A],   Tmxx = tgt.d_max[3*A];
+  double Tmny = tgt.d_min[3*A+1], Tmxy = tgt.d_max[3*A+1];
+  double Tmnz = tgt.d_min[3*A+2], Tmxz = tgt.d_max[3*A+2];
+  double Tcx = 0.5*(Tmnx+Tmxx), Tcy = 0.5*(Tmny+Tmxy), Tcz = 0.5*(Tmnz+Tmxz);
+  // enclosing-sphere radius = half the AABB diagonal (NOT half the max-extent:
+  // that under-bounds anisotropic cells and lets corner targets fall inside the
+  // expansion's inaccurate region).
+  double Tex = Tmxx-Tmnx, Tey = Tmxy-Tmny, Tez = Tmxz-Tmnz;
+  double rT  = 0.5 * sqrt(Tex*Tex + Tey*Tey + Tez*Tez);
+  double theta2 = theta * theta;
+
+  // ---- this thread's target point (one per thread; cnt <= leaf_size <= blockDim) ----
+  bool active = (threadIdx.x < cnt);
+  int  my = active ? (a0 + threadIdx.x) : -1;
+  double px = 0.0, py = 0.0, pz = 0.0;
+  if (active) { px = tgt.d_pos[3*my]; py = tgt.d_pos[3*my+1]; pz = tgt.d_pos[3*my+2]; }
+  double phi = 0.0, gx = 0.0, gy = 0.0, gz = 0.0;
+
+  // ---- per-thread DFS over the source tree ----
+  // The descent is control-flow identical on every thread in the block: which
+  // node is popped, the MAC/leaf tests, and the push/pop all depend only on the
+  // target cell + source node, never on threadIdx. Only the M2P/P2P payload is
+  // per-point. So instead of one thread owning the stack and broadcasting the
+  // popped node through shared memory (which needs a barrier each side), every
+  // thread keeps its own stack and walks the same descent independently: no
+  // shared state, no __syncthreads. The duplicated control is a few int/FP ops
+  // per node, far cheaper than the two block barriers it replaces.
+  // STACK_CAP matches the old shared cap (binary DFS, push-2/pop-1 => depth-bounded).
+  constexpr int STACK_CAP = 96;
+  int stack[STACK_CAP];               // dynamic index => local memory, L1-cached
+  int sp = 0;
+  stack[sp++] = 0;                    // root
+
+  for (;;) {
+    if (sp == 0) break;               // stack empty: uniform across the block
+    int B = stack[--sp];
+
+    double Bmnx = src.d_min[3*B],   Bmxx = src.d_max[3*B];
+    double Bmny = src.d_min[3*B+1], Bmxy = src.d_max[3*B+1];
+    double Bmnz = src.d_min[3*B+2], Bmxz = src.d_max[3*B+2];
+    double Bcx = 0.5*(Bmnx+Bmxx), Bcy = 0.5*(Bmny+Bmxy), Bcz = 0.5*(Bmnz+Bmxz);
+    double Bex = Bmxx-Bmnx, Bey = Bmxy-Bmny, Bez = Bmxz-Bmnz;
+    double rB  = 0.5 * sqrt(Bex*Bex + Bey*Bey + Bez*Bez);   // half-diagonal (see rT)
+
+    double Rx = Tcx - Bcx, Ry = Tcy - Bcy, Rz = Tcz - Bcz;
+    double R2 = Rx*Rx + Ry*Ry + Rz*Rz;
+    double sumr = rT + rB;
+
+    // two-sided MAC: (rT + rB)/R < theta  <=>  (rT+rB)^2 < theta^2 * R^2
+    if (R2 > 0.0 && sumr*sumr < theta2 * R2) {
+      if (active) {
+        double Rxp = px - Bcx, Ryp = py - Bcy, Rzp = pz - Bcz;
+        double d2  = Rxp*Rxp + Ryp*Ryp + Rzp*Rzp;
+        double inv_r  = rsqrt(d2);
+        double inv_r2 = inv_r * inv_r;
+        double T_buf[comp_of_h(MAX_T)];
+        compute_T_t<MAX_T>(Rxp, Ryp, Rzp, inv_r2, inv_r, T_buf);
+        const double *m = src.d_moments + (size_t)B * COMP;
+        if constexpr (FIELD) mp_field_eval_t<COMP>(m, T_buf, gx, gy, gz);
+        else                 phi += mp_potential_eval_t<COMP>(m, T_buf);
+      }
+      continue;
+    }
+
+    int  bcnt  = src.d_last[B] - src.d_first[B] + 1;
+    bool bleaf = (B >= src.N - 1) || (bcnt <= src.leaf_size);
+    if (bleaf) {
+      if (active) {
+        int b0 = src.d_first[B], b1 = src.d_last[B];
+        for (int b = b0; b <= b1; ++b) {
+          double rx = px - src.d_pos[3*b], ry = py - src.d_pos[3*b+1], rz = pz - src.d_pos[3*b+2];
+          double dd = rx*rx + ry*ry + rz*rz;
+          if (dd <= 0.0) continue;
+          double q  = src.d_q[b];
+          double ir = rsqrt(dd);
+          if constexpr (FIELD) {
+            double qir3 = q * ir * ir * ir;
+            gx += qir3 * rx; gy += qir3 * ry; gz += qir3 * rz;
+          } else {
+            phi += q * ir;
+          }
+        }
+      }
+      continue;
+    }
+
+    stack[sp++] = src.d_left[B];
+    stack[sp++] = src.d_right[B];
+  }
+
+  // ---- apply the term weight and scatter back to original point order ----
+  if (active) {
+    int orig = tgt.d_orig[my];
+    if constexpr (FIELD) {
+      double dot    = gx*norms[3*orig] + gy*norms[3*orig+1] + gz*norms[3*orig+2];
+      double factor = phi_sup[orig] * inv_4pi * area[orig / 3] / 3.0;
+      partial[orig] = dot * factor;
+    } else {
+      partial[orig] = flux[orig] * phi;
+    }
+  }
+}
+
 // Dispatch a P-templated kernel on the runtime multipole order t->p (clamped to
 // [1, BH_MAX_P] at build time, so the default arm covers BH_MAX_P).
 #define BH_LAUNCH_BY_ORDER(KERNEL, GRID, BLOCK, ...)                      \
@@ -699,6 +942,21 @@ __global__ void field_kernel(bh_tree t, int num_tri_verts,
     }                                                                     \
   } while (0)
 
+// Dispatch the DTT kernel on (compile-time FIELD, runtime src->p). One block per
+// target leaf; BLOCK must be >= the target leaf_size so every leaf point maps to
+// a distinct thread.
+#define BH_LAUNCH_DTT(FIELD, GRID, BLOCK, ...)                                     \
+  do {                                                                             \
+    switch (src->p) {                                                              \
+      case 1: dtt_eval_kernel<FIELD,1><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
+      case 2: dtt_eval_kernel<FIELD,2><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
+      case 3: dtt_eval_kernel<FIELD,3><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
+      case 4: dtt_eval_kernel<FIELD,4><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
+      case 5: dtt_eval_kernel<FIELD,5><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
+      default: dtt_eval_kernel<FIELD,6><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;   \
+    }                                                                              \
+  } while (0)
+
 // ====================================================================
 //  Host-side reduction (matches Phase 0 summation order for A/B parity)
 // ====================================================================
@@ -708,6 +966,150 @@ static double reduce_sum_host(const double *d_arr, int n) {
   double s = 0.0;
   for (int i = 0; i < n; ++i) s += h[i];
   return s;
+}
+
+// ====================================================================
+//  Target tree build / free (geometry-only; reuses the atom-tree pipeline).
+// ====================================================================
+static void build_target_tree(int num_pts, const double *d_pts, int leaf_size,
+                              bh_target_tree *tt) {
+  tt->N         = num_pts;
+  tt->n_nodes   = (num_pts > 0) ? (2 * num_pts - 1) : 0;
+  tt->leaf_size = (leaf_size < 1) ? 1 : leaf_size;
+  tt->n_leaves  = 0;
+  tt->d_pos = tt->d_min = tt->d_max = nullptr;
+  tt->d_orig = tt->d_left = tt->d_right = tt->d_parent = nullptr;
+  tt->d_first = tt->d_last = tt->d_leaf_nodes = nullptr;
+  if (num_pts <= 0) return;
+
+  const int N  = num_pts;
+  const int nn = tt->n_nodes;
+
+  CUDA_CHECK(cudaMalloc(&tt->d_pos,    3 * N  * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&tt->d_orig,       N  * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt->d_min,    3 * nn * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&tt->d_max,    3 * nn * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&tt->d_left,       nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt->d_right,      nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt->d_parent,     nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt->d_first,      nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt->d_last,       nn * sizeof(int)));
+
+  const int tpb = 256;
+
+  // 1. bounding box
+  double *d_gmin, *d_gmax;
+  CUDA_CHECK(cudaMalloc(&d_gmin, 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_gmax, 3 * sizeof(double)));
+  { double init_min[3] = { DBL_MAX,  DBL_MAX,  DBL_MAX};
+    double init_max[3] = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
+    CUDA_CHECK(cudaMemcpy(d_gmin, init_min, 3*sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_gmax, init_max, 3*sizeof(double), cudaMemcpyHostToDevice)); }
+  int bb_blocks = std::min(1024, (N + tpb - 1) / tpb);
+  bbox_kernel<<<bb_blocks, tpb>>>(N, d_pts, d_gmin, d_gmax);
+  CUDA_CHECK(cudaGetLastError());
+
+  double h_min[3], h_max[3];
+  CUDA_CHECK(cudaMemcpy(h_min, d_gmin, 3*sizeof(double), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_max, d_gmax, 3*sizeof(double), cudaMemcpyDeviceToHost));
+  cudaFree(d_gmin); cudaFree(d_gmax);
+
+  double sx = h_max[0]-h_min[0]; if (sx <= 0) sx = 1.0;
+  double sy = h_max[1]-h_min[1]; if (sy <= 0) sy = 1.0;
+  double sz = h_max[2]-h_min[2]; if (sz <= 0) sz = 1.0;
+
+  // 2. Morton codes + radix sort (keep the permutation)
+  uint64_t *d_codes, *d_codes_sorted;
+  int *d_idx, *d_idx_sorted;
+  CUDA_CHECK(cudaMalloc(&d_codes,        N * sizeof(uint64_t)));
+  CUDA_CHECK(cudaMalloc(&d_codes_sorted, N * sizeof(uint64_t)));
+  CUDA_CHECK(cudaMalloc(&d_idx,          N * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_idx_sorted,   N * sizeof(int)));
+
+  int mt_blocks = (N + tpb - 1) / tpb;
+  morton_kernel<<<mt_blocks, tpb>>>(N, d_pts, h_min[0], h_min[1], h_min[2],
+                                    1.0/sx, 1.0/sy, 1.0/sz, d_codes, d_idx);
+  CUDA_CHECK(cudaGetLastError());
+
+  void *d_tmp = nullptr; size_t tmp_bytes = 0;
+  cub::DeviceRadixSort::SortPairs(d_tmp, tmp_bytes, d_codes, d_codes_sorted,
+                                  d_idx, d_idx_sorted, N);
+  CUDA_CHECK(cudaMalloc(&d_tmp, tmp_bytes));
+  cub::DeviceRadixSort::SortPairs(d_tmp, tmp_bytes, d_codes, d_codes_sorted,
+                                  d_idx, d_idx_sorted, N);
+  cudaFree(d_tmp); cudaFree(d_codes); cudaFree(d_idx);
+
+  // 3. reorder into Morton order (geometry only) + leaf init + permutation
+  reorder_geom_kernel<<<mt_blocks, tpb>>>(N, d_idx_sorted, d_pts,
+                                          tt->d_pos, tt->d_orig,
+                                          tt->d_min, tt->d_max,
+                                          tt->d_parent, tt->d_first, tt->d_last);
+  CUDA_CHECK(cudaGetLastError());
+  cudaFree(d_idx_sorted);
+
+  if (N > 1) {
+    // 4. internal nodes + bottom-up AABB
+    int in_blocks = (N - 1 + tpb - 1) / tpb;
+    build_internal_kernel<<<in_blocks, tpb>>>(N, d_codes_sorted,
+                                              tt->d_left, tt->d_right, tt->d_parent,
+                                              tt->d_first, tt->d_last);
+    CUDA_CHECK(cudaGetLastError());
+
+    int *d_flags;
+    CUDA_CHECK(cudaMalloc(&d_flags, nn * sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_flags, 0, nn * sizeof(int)));
+    summarize_aabb_kernel<<<mt_blocks, tpb>>>(N, tt->d_left, tt->d_right, tt->d_parent,
+                                              tt->d_min, tt->d_max, d_flags);
+    CUDA_CHECK(cudaGetLastError());
+    cudaFree(d_flags);
+  }
+  cudaFree(d_codes_sorted);
+
+  // 5. mark + compact the leaf-size frontier -> d_leaf_nodes
+  int *d_frontier;
+  CUDA_CHECK(cudaMalloc(&d_frontier, nn * sizeof(int)));
+  int fr_blocks = (nn + tpb - 1) / tpb;
+  mark_frontier_kernel<<<fr_blocks, tpb>>>(nn, N, tt->leaf_size,
+                                           tt->d_first, tt->d_last, tt->d_parent,
+                                           d_frontier);
+  CUDA_CHECK(cudaGetLastError());
+
+  int *d_ids;
+  CUDA_CHECK(cudaMalloc(&d_ids, nn * sizeof(int)));
+  iota_kernel<<<fr_blocks, tpb>>>(nn, d_ids);
+  CUDA_CHECK(cudaGetLastError());
+
+  CUDA_CHECK(cudaMalloc(&tt->d_leaf_nodes, nn * sizeof(int)));
+  int *d_num;
+  CUDA_CHECK(cudaMalloc(&d_num, sizeof(int)));
+  void *d_sel_tmp = nullptr; size_t sel_bytes = 0;
+  cub::DeviceSelect::Flagged(d_sel_tmp, sel_bytes, d_ids, d_frontier,
+                             tt->d_leaf_nodes, d_num, nn);
+  CUDA_CHECK(cudaMalloc(&d_sel_tmp, sel_bytes));
+  cub::DeviceSelect::Flagged(d_sel_tmp, sel_bytes, d_ids, d_frontier,
+                             tt->d_leaf_nodes, d_num, nn);
+  CUDA_CHECK(cudaMemcpy(&tt->n_leaves, d_num, sizeof(int), cudaMemcpyDeviceToHost));
+  cudaFree(d_sel_tmp); cudaFree(d_num); cudaFree(d_frontier); cudaFree(d_ids);
+
+  CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+static void free_target_tree(bh_target_tree *tt) {
+  if (!tt) return;
+  cudaFree(tt->d_pos);    cudaFree(tt->d_orig);
+  cudaFree(tt->d_min);    cudaFree(tt->d_max);
+  cudaFree(tt->d_left);   cudaFree(tt->d_right);  cudaFree(tt->d_parent);
+  cudaFree(tt->d_first);  cudaFree(tt->d_last);
+  cudaFree(tt->d_leaf_nodes);
+}
+
+// Round the target block size up to a power of two >= leaf_size (cap 256, floor 32),
+// so each leaf point owns a distinct thread within the block.
+static int dtt_block_for(int leaf_size) {
+  int b = 32;
+  while (b < leaf_size) b <<= 1;
+  if (b > 256) b = 256;
+  return b;
 }
 
 // ========================== public C API ==========================
@@ -905,6 +1307,78 @@ double bh_ionic_energy(bh_tree *t, int num_tri_verts,
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   double r = reduce_sum_host(d_partial, num_tri_verts);
+  cudaFree(d_vert); cudaFree(d_norms); cudaFree(d_phi); cudaFree(d_area); cudaFree(d_partial);
+  return r;
+}
+
+// ---------------------- DTT (dual-tree-traversal) path ----------------------
+
+double bh_polarization_energy_dtt(bh_tree *src, int num_pts,
+                                  const double *h_V, const double *h_flux) {
+  if (!src || src->N == 0 || num_pts == 0) return 0.0;
+
+  double *d_V, *d_flux, *d_partial;
+  CUDA_CHECK(cudaMalloc(&d_V,       num_pts * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_flux,    num_pts     * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_partial, num_pts     * sizeof(double)));
+  CUDA_CHECK(cudaMemcpy(d_V,    h_V,    num_pts*3*sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_flux, h_flux, num_pts  *sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemset(d_partial, 0, num_pts * sizeof(double)));  // any uncovered target -> 0
+
+  // Target leaf cells are capped at 256 pts so a single block can serve a leaf.
+  int tleaf = src->leaf_size; if (tleaf > 256) tleaf = 256; if (tleaf < 1) tleaf = 1;
+  bh_target_tree tt;
+  build_target_tree(num_pts, d_V, tleaf, &tt);
+
+  int block = dtt_block_for(tt.leaf_size);
+  int grid  = tt.n_leaves;
+  if (grid > 0) {
+    BH_LAUNCH_DTT(false, grid, block, *src, tt, src->theta,
+                  d_flux, nullptr, nullptr, nullptr, 0.0, d_partial);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+  }
+
+  double r = reduce_sum_host(d_partial, num_pts);
+  free_target_tree(&tt);
+  cudaFree(d_V); cudaFree(d_flux); cudaFree(d_partial);
+  return r;
+}
+
+double bh_ionic_energy_dtt(bh_tree *src, int num_tri_verts,
+                           const double *h_vert, const double *h_norms,
+                           const double *h_phi_sup, const double *h_area,
+                           double inv_4pi) {
+  if (!src || src->N == 0 || num_tri_verts == 0) return 0.0;
+  int num_tris = num_tri_verts / 3;
+
+  double *d_vert, *d_norms, *d_phi, *d_area, *d_partial;
+  CUDA_CHECK(cudaMalloc(&d_vert,    num_tri_verts * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_norms,   num_tri_verts * 3 * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_phi,     num_tri_verts     * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_area,    num_tris          * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_partial, num_tri_verts     * sizeof(double)));
+  CUDA_CHECK(cudaMemcpy(d_vert,  h_vert,    num_tri_verts*3*sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_norms, h_norms,   num_tri_verts*3*sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_phi,   h_phi_sup, num_tri_verts  *sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_area,  h_area,    num_tris       *sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemset(d_partial, 0, num_tri_verts * sizeof(double)));  // any uncovered target -> 0
+
+  int tleaf = src->leaf_size; if (tleaf > 256) tleaf = 256; if (tleaf < 1) tleaf = 1;
+  bh_target_tree tt;
+  build_target_tree(num_tri_verts, d_vert, tleaf, &tt);
+
+  int block = dtt_block_for(tt.leaf_size);
+  int grid  = tt.n_leaves;
+  if (grid > 0) {
+    BH_LAUNCH_DTT(true, grid, block, *src, tt, src->theta,
+                  nullptr, d_norms, d_phi, d_area, inv_4pi, d_partial);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+  }
+
+  double r = reduce_sum_host(d_partial, num_tri_verts);
+  free_target_tree(&tt);
   cudaFree(d_vert); cudaFree(d_norms); cudaFree(d_phi); cudaFree(d_area); cudaFree(d_partial);
   return r;
 }
