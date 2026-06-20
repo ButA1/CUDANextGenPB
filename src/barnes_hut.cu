@@ -798,14 +798,81 @@ __global__ void field_kernel(bh_tree t, int num_tri_verts,
 }
 
 // ====================================================================
-//  DTT evaluation kernel: one CUDA block per target leaf cell. Every thread
-//  descends the source (atom) tree with its own private stack (the descent is
-//  control-flow identical across the block), testing a two-sided
-//  MAC once per source node (source cell vs the whole target leaf). Admissible
-//  source cells are resolved by M2P into each target point in the leaf;
-//  terminal source clusters by direct P2P. Far field is still M2P (no M2L yet).
-//  Targets != sources, so no self-exclusion. Weights and the final scatter use
-//  the original (caller) point order via tgt.d_orig.
+//  DTT evaluation kernel (FMM Stage 1): one CUDA block per target leaf cell.
+//  The block descends the source (atom) tree ONCE, cooperatively and
+//  breadth-first (Bonsai; Bedorf, Gaburov & Portegies Zwart 2012, sec. 2.2):
+//  each step the DTT_BDIM threads test DTT_BDIM source nodes in parallel against
+//  a two-sided MAC (source cell vs the whole target leaf), and a block prefix-sum
+//  (cub::BlockScan) compacts the survivors into per-block lists -- admissible
+//  source cells -> M2P list, terminal source clusters -> P2P list, internal nodes
+//  -> the next BFS level. The lists hold node INDICES; the expensive FP64 payload
+//  then runs over the shared list with one target point per thread, reading
+//  moments / particles from global. This removes the per-thread redundant descent
+//  of the old private-stack DFS and materializes exactly the admissible-cell list
+//  that M2L will consume (Stage 3). Far field is still M2P (no M2L yet). Targets
+//  != sources, so no self-exclusion. Weights and the final scatter use the
+//  original (caller) point order via tgt.d_orig.
+// ====================================================================
+
+// Cooperative block width. MUST equal the launch blockDim -- cub::BlockScan needs
+// it at compile time. Target leaves hold <= 256 points, so 256 threads always
+// cover a leaf and give the widest cooperative traversal.
+constexpr int DTT_BDIM      = 256;
+constexpr int DTT_FRONT_CAP = 2048;  // BFS frontier slots per level (shared); see overflow guard
+constexpr int DTT_LIST_CAP  = 512;   // M2P/P2P shared buffer; drained when within DTT_BDIM of full
+
+// M2P drain: each active thread evaluates the admissible-cell list into its own
+// target point. Verbatim multipole math from the old kernel; moments from global.
+template<bool FIELD, int P>
+__device__ __forceinline__ void dtt_drain_m2p(const bh_tree &src,
+                                             const int *__restrict__ list, int n, bool active,
+                                             double px, double py, double pz,
+                                             double &phi, double &gx, double &gy, double &gz) {
+  if (!active) return;
+  constexpr int COMP  = comp_of_h(P);
+  constexpr int MAX_T = FIELD ? (P + 1) : P;
+  for (int j = 0; j < n; ++j) {
+    int B = list[j];
+    double Bcx = 0.5*(src.d_min[3*B]   + src.d_max[3*B]);
+    double Bcy = 0.5*(src.d_min[3*B+1] + src.d_max[3*B+1]);
+    double Bcz = 0.5*(src.d_min[3*B+2] + src.d_max[3*B+2]);
+    double Rxp = px - Bcx, Ryp = py - Bcy, Rzp = pz - Bcz;
+    double d2  = Rxp*Rxp + Ryp*Ryp + Rzp*Rzp;
+    double inv_r  = rsqrt(d2);
+    double inv_r2 = inv_r * inv_r;
+    double T_buf[comp_of_h(MAX_T)];
+    compute_T_t<MAX_T>(Rxp, Ryp, Rzp, inv_r2, inv_r, T_buf);
+    const double *m = src.d_moments + (size_t)B * COMP;
+    if constexpr (FIELD) mp_field_eval_t<COMP>(m, T_buf, gx, gy, gz);
+    else                 phi += mp_potential_eval_t<COMP>(m, T_buf);
+  }
+}
+
+// P2P drain: each active thread direct-sums the terminal-leaf list into its point.
+template<bool FIELD>
+__device__ __forceinline__ void dtt_drain_p2p(const bh_tree &src,
+                                             const int *__restrict__ list, int n, bool active,
+                                             double px, double py, double pz,
+                                             double &phi, double &gx, double &gy, double &gz) {
+  if (!active) return;
+  for (int j = 0; j < n; ++j) {
+    int B = list[j];
+    int b0 = src.d_first[B], b1 = src.d_last[B];
+    for (int b = b0; b <= b1; ++b) {
+      double rx = px - src.d_pos[3*b], ry = py - src.d_pos[3*b+1], rz = pz - src.d_pos[3*b+2];
+      double dd = rx*rx + ry*ry + rz*rz;
+      if (dd <= 0.0) continue;
+      double q  = src.d_q[b];
+      double ir = rsqrt(dd);
+      if constexpr (FIELD) {
+        double qir3 = q * ir * ir * ir;
+        gx += qir3 * rx; gy += qir3 * ry; gz += qir3 * rz;
+      } else {
+        phi += q * ir;
+      }
+    }
+  }
+}
 // ====================================================================
 template<bool FIELD, int P>
 __global__ void dtt_eval_kernel(bh_tree src, bh_target_tree tgt,
@@ -816,9 +883,6 @@ __global__ void dtt_eval_kernel(bh_tree src, bh_target_tree tgt,
                                 const double *__restrict__ area,
                                 double inv_4pi,
                                 double *__restrict__ partial) {
-  constexpr int MAX_T = FIELD ? (P + 1) : P;   // Taylor order needed
-  constexpr int COMP  = comp_of_h(P);          // moments per source node
-
   // ---- this block's target leaf cell ----
   int A   = tgt.d_leaf_nodes[blockIdx.x];
   int a0  = tgt.d_first[A];
@@ -843,77 +907,113 @@ __global__ void dtt_eval_kernel(bh_tree src, bh_target_tree tgt,
   if (active) { px = tgt.d_pos[3*my]; py = tgt.d_pos[3*my+1]; pz = tgt.d_pos[3*my+2]; }
   double phi = 0.0, gx = 0.0, gy = 0.0, gz = 0.0;
 
-  // ---- per-thread DFS over the source tree ----
-  // The descent is control-flow identical on every thread in the block: which
-  // node is popped, the MAC/leaf tests, and the push/pop all depend only on the
-  // target cell + source node, never on threadIdx. Only the M2P/P2P payload is
-  // per-point. So instead of one thread owning the stack and broadcasting the
-  // popped node through shared memory (which needs a barrier each side), every
-  // thread keeps its own stack and walks the same descent independently: no
-  // shared state, no __syncthreads. The duplicated control is a few int/FP ops
-  // per node, far cheaper than the two block barriers it replaces.
-  // STACK_CAP matches the old shared cap (binary DFS, push-2/pop-1 => depth-bounded).
-  constexpr int STACK_CAP = 96;
-  int stack[STACK_CAP];               // dynamic index => local memory, L1-cached
-  int sp = 0;
-  stack[sp++] = 0;                    // root
+  // ---- cooperative breadth-first descent of the source tree (Bonsai sec. 2.2) ----
+  // The whole block walks the source tree ONCE. Each step, DTT_BDIM threads each
+  // take one source node from the current BFS frontier, test the (block-uniform)
+  // two-sided MAC + leaf test, and a block prefix-sum compacts the outcomes into
+  // shared lists: admissible -> s_m2p, terminal leaf -> s_p2p, internal -> s_next
+  // (its two children). The lists are drained (evaluated) when nearly full and at
+  // the end. Control is shared by the block; only the drain payload is per-point.
+  __shared__ int s_bufA[DTT_FRONT_CAP];
+  __shared__ int s_bufB[DTT_FRONT_CAP];
+  __shared__ int s_m2p[DTT_LIST_CAP];
+  __shared__ int s_p2p[DTT_LIST_CAP];
+  __shared__ int n_curr, n_next, n_m2p, n_p2p;
+  __shared__ typename cub::BlockScan<int, DTT_BDIM>::TempStorage scan_tmp;
 
-  for (;;) {
-    if (sp == 0) break;               // stack empty: uniform across the block
-    int B = stack[--sp];
+  int *s_curr = s_bufA;
+  int *s_next = s_bufB;
 
-    double Bmnx = src.d_min[3*B],   Bmxx = src.d_max[3*B];
-    double Bmny = src.d_min[3*B+1], Bmxy = src.d_max[3*B+1];
-    double Bmnz = src.d_min[3*B+2], Bmxz = src.d_max[3*B+2];
-    double Bcx = 0.5*(Bmnx+Bmxx), Bcy = 0.5*(Bmny+Bmxy), Bcz = 0.5*(Bmnz+Bmxz);
-    double Bex = Bmxx-Bmnx, Bey = Bmxy-Bmny, Bez = Bmxz-Bmnz;
-    double rB  = 0.5 * sqrt(Bex*Bex + Bey*Bey + Bez*Bez);   // half-diagonal (see rT)
+  if (threadIdx.x == 0) { s_curr[0] = 0; n_curr = 1; n_next = 0; n_m2p = 0; n_p2p = 0; }
+  __syncthreads();
 
-    double Rx = Tcx - Bcx, Ry = Tcy - Bcy, Rz = Tcz - Bcz;
-    double R2 = Rx*Rx + Ry*Ry + Rz*Rz;
-    double sumr = rT + rB;
+  while (n_curr > 0) {
+    int nc = n_curr;
+    for (int base = 0; base < nc; base += DTT_BDIM) {
+      int idx = base + threadIdx.x;
+      int B = (idx < nc) ? s_curr[idx] : -1;
 
-    // two-sided MAC: (rT + rB)/R < theta  <=>  (rT+rB)^2 < theta^2 * R^2
-    if (R2 > 0.0 && sumr*sumr < theta2 * R2) {
-      if (active) {
-        double Rxp = px - Bcx, Ryp = py - Bcy, Rzp = pz - Bcz;
-        double d2  = Rxp*Rxp + Ryp*Ryp + Rzp*Rzp;
-        double inv_r  = rsqrt(d2);
-        double inv_r2 = inv_r * inv_r;
-        double T_buf[comp_of_h(MAX_T)];
-        compute_T_t<MAX_T>(Rxp, Ryp, Rzp, inv_r2, inv_r, T_buf);
-        const double *m = src.d_moments + (size_t)B * COMP;
-        if constexpr (FIELD) mp_field_eval_t<COMP>(m, T_buf, gx, gy, gz);
-        else                 phi += mp_potential_eval_t<COMP>(m, T_buf);
-      }
-      continue;
-    }
-
-    int  bcnt  = src.d_last[B] - src.d_first[B] + 1;
-    bool bleaf = (B >= src.N - 1) || (bcnt <= src.leaf_size);
-    if (bleaf) {
-      if (active) {
-        int b0 = src.d_first[B], b1 = src.d_last[B];
-        for (int b = b0; b <= b1; ++b) {
-          double rx = px - src.d_pos[3*b], ry = py - src.d_pos[3*b+1], rz = pz - src.d_pos[3*b+2];
-          double dd = rx*rx + ry*ry + rz*rz;
-          if (dd <= 0.0) continue;
-          double q  = src.d_q[b];
-          double ir = rsqrt(dd);
-          if constexpr (FIELD) {
-            double qir3 = q * ir * ir * ir;
-            gx += qir3 * rx; gy += qir3 * ry; gz += qir3 * rz;
-          } else {
-            phi += q * ir;
-          }
+      // classify this source node against the target cell (block-uniform per node)
+      int admit = 0, leaf = 0, open = 0, Lc = -1, Rc = -1;
+      if (B >= 0) {
+        double Bmnx = src.d_min[3*B],   Bmxx = src.d_max[3*B];
+        double Bmny = src.d_min[3*B+1], Bmxy = src.d_max[3*B+1];
+        double Bmnz = src.d_min[3*B+2], Bmxz = src.d_max[3*B+2];
+        double Bcx = 0.5*(Bmnx+Bmxx), Bcy = 0.5*(Bmny+Bmxy), Bcz = 0.5*(Bmnz+Bmxz);
+        double Bex = Bmxx-Bmnx, Bey = Bmxy-Bmny, Bez = Bmxz-Bmnz;
+        double rB  = 0.5 * sqrt(Bex*Bex + Bey*Bey + Bez*Bez);   // half-diagonal (see rT)
+        double Rx = Tcx - Bcx, Ry = Tcy - Bcy, Rz = Tcz - Bcz;
+        double R2 = Rx*Rx + Ry*Ry + Rz*Rz;
+        double sumr = rT + rB;
+        // two-sided MAC: (rT + rB)/R < theta  <=>  (rT+rB)^2 < theta^2 * R^2
+        if (R2 > 0.0 && sumr*sumr < theta2 * R2) {
+          admit = 1;
+        } else {
+          int  bcnt  = src.d_last[B] - src.d_first[B] + 1;
+          bool bleaf = (B >= src.N - 1) || (bcnt <= src.leaf_size);
+          if (bleaf) { leaf = 1; }
+          else       { open = 1; Lc = src.d_left[B]; Rc = src.d_right[B]; }
         }
       }
-      continue;
+
+      // compact the three outcome streams via block prefix-sums; cub requires a
+      // __syncthreads between reuses of the same TempStorage.
+      int p_a, t_a, p_l, t_l, p_o, t_o;
+      cub::BlockScan<int, DTT_BDIM>(scan_tmp).ExclusiveSum(admit, p_a, t_a);
+      __syncthreads();
+      if (admit) s_m2p[n_m2p + p_a] = B;
+      cub::BlockScan<int, DTT_BDIM>(scan_tmp).ExclusiveSum(leaf, p_l, t_l);
+      __syncthreads();
+      if (leaf) s_p2p[n_p2p + p_l] = B;
+      cub::BlockScan<int, DTT_BDIM>(scan_tmp).ExclusiveSum(open, p_o, t_o);
+      __syncthreads();
+      if (open) {
+        int w = n_next + 2*p_o;
+        if (w + 1 < DTT_FRONT_CAP) { s_next[w] = Lc; s_next[w + 1] = Rc; }
+      }
+
+      if (threadIdx.x == 0) {
+        n_m2p += t_a;
+        n_p2p += t_l;
+        int nn = n_next + 2*t_o;
+        if (nn > DTT_FRONT_CAP) {
+          printf("[dtt] BFS frontier overflow (%d > %d) at block %d: Stage-1 shared-frontier "
+                 "limit -- this block's result is incomplete. Raise DTT_FRONT_CAP or move to a "
+                 "global-spill frontier.\n", nn, DTT_FRONT_CAP, blockIdx.x);
+          nn = DTT_FRONT_CAP;
+        }
+        n_next = nn;
+      }
+      __syncthreads();
+
+      // drain the interaction lists before they can overflow (Bonsai: evaluate
+      // once a list exceeds the block width), then reset.
+      if (n_m2p > DTT_LIST_CAP - DTT_BDIM) {
+        dtt_drain_m2p<FIELD, P>(src, s_m2p, n_m2p, active, px, py, pz, phi, gx, gy, gz);
+        __syncthreads();
+        if (threadIdx.x == 0) n_m2p = 0;
+        __syncthreads();
+      }
+      if (n_p2p > DTT_LIST_CAP - DTT_BDIM) {
+        dtt_drain_p2p<FIELD>(src, s_p2p, n_p2p, active, px, py, pz, phi, gx, gy, gz);
+        __syncthreads();
+        if (threadIdx.x == 0) n_p2p = 0;
+        __syncthreads();
+      }
     }
 
-    stack[sp++] = src.d_left[B];
-    stack[sp++] = src.d_right[B];
+    // advance one BFS level: swap the current/next frontier buffers (the pointer
+    // swap is identical on every thread, so the block stays consistent).
+    int *tmp = s_curr; s_curr = s_next; s_next = tmp;
+    if (threadIdx.x == 0) { n_curr = n_next; n_next = 0; }
+    __syncthreads();
   }
+
+  // ---- drain the tails ----
+  dtt_drain_m2p<FIELD, P>(src, s_m2p, n_m2p, active, px, py, pz, phi, gx, gy, gz);
+  __syncthreads();
+  dtt_drain_p2p<FIELD>(src, s_p2p, n_p2p, active, px, py, pz, phi, gx, gy, gz);
+  __syncthreads();
 
   // ---- apply the term weight and scatter back to original point order ----
   if (active) {
@@ -1101,15 +1201,6 @@ static void free_target_tree(bh_target_tree *tt) {
   cudaFree(tt->d_left);   cudaFree(tt->d_right);  cudaFree(tt->d_parent);
   cudaFree(tt->d_first);  cudaFree(tt->d_last);
   cudaFree(tt->d_leaf_nodes);
-}
-
-// Round the target block size up to a power of two >= leaf_size (cap 256, floor 32),
-// so each leaf point owns a distinct thread within the block.
-static int dtt_block_for(int leaf_size) {
-  int b = 32;
-  while (b < leaf_size) b <<= 1;
-  if (b > 256) b = 256;
-  return b;
 }
 
 // ========================== public C API ==========================
@@ -1330,7 +1421,7 @@ double bh_polarization_energy_dtt(bh_tree *src, int num_pts,
   bh_target_tree tt;
   build_target_tree(num_pts, d_V, tleaf, &tt);
 
-  int block = dtt_block_for(tt.leaf_size);
+  int block = DTT_BDIM;   // fixed cooperative width (must match cub::BlockScan<DTT_BDIM>)
   int grid  = tt.n_leaves;
   if (grid > 0) {
     BH_LAUNCH_DTT(false, grid, block, *src, tt, src->theta,
@@ -1368,7 +1459,7 @@ double bh_ionic_energy_dtt(bh_tree *src, int num_tri_verts,
   bh_target_tree tt;
   build_target_tree(num_tri_verts, d_vert, tleaf, &tt);
 
-  int block = dtt_block_for(tt.leaf_size);
+  int block = DTT_BDIM;   // fixed cooperative width (must match cub::BlockScan<DTT_BDIM>)
   int grid  = tt.n_leaves;
   if (grid > 0) {
     BH_LAUNCH_DTT(true, grid, block, *src, tt, src->theta,
