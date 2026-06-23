@@ -4,7 +4,7 @@ NVCC=nvcc
 
 CXXFLAGS= -std=c++17 -ggdb -O0
 
-NVCCFLAGS= -arch=native
+NVCCFLAGS= -arch=native -Xptxas -v
 
 MPI_COMPILE_FLAGS=$(shell $(CXX) --showme:compile)
 

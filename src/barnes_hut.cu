@@ -1,19 +1,19 @@
 /*
- *  Barnes-Hut Phase A: TABI-style high-order Cartesian Taylor treecode.
- *  See /home/leirex/.claude/plans/ok-enough-math-time-fancy-lighthouse.md
+ *  Barnes-Hut / FMM treecode (FMM Stage 2: complex spherical-harmonic moments).
  *
- *  Differences from Phase 0:
- *    - Per-node moments are stored as a flat array m^k indexed by multi-index
- *      k=(kx,ky,kz) with |k| <= p. Count: COMP(p) = (p+1)(p+2)(p+3)/6.
- *    - The multipole evaluator uses Cartesian Taylor coefficients
- *          T^k(R) = d^k(1/r)
- *      computed via the recurrence (Li-Johnston-Krasny 2009, kappa=0 case):
- *          r^2 * T^(k+e_i) = -(2n+1) * R_i * T^k  -  n * T^(k-e_i),    n = |k|
- *    - M2M shift is the generic multinomial expansion:
- *          m_parent^k += sum_{l <= k} C(k,l) * delta^(k-l) * m_child^l.
- *    - Field evaluator (E_ion) reuses T^k through order p+1.
+ *  Multipole representation (Cheng, Greengard & Rokhlin 1999, JCP 155:468):
+ *    - Per-node moments are complex M_n^m (CGR'99 Eq. 4 normalization), stored
+ *      for the m>=0 half only (0<=m<=n<=p); M_n^{-m}=conj(M_n^m). Layout: doubles
+ *      [re,im] at slot s=sph_slot(n,m). Count comp_sph(p) = (p+1)(p+2) doubles.
+ *    - P2M: leaf monopole M_0^0 = q (ρ=0). M2M: T_MM (Eq. 13). M2P potential:
+ *      irregular solid harmonics S_n^m = Y_n^m/r^{n+1} contracted with the moments
+ *      (Eq. 5). M2P field (E_ion): exact gradient of the potential expansion via
+ *      forward-mode automatic differentiation (the `dual` scalar), so no separate
+ *      solid-harmonic gradient recurrence is needed.
  *
- *  LBVH topology (one leaf per atom) and the bbox/Morton/build kernels are unchanged.
+ *  Traversal: cooperative breadth-first (Stage 1) for the DTT path, private-stack
+ *  DFS for the per-target treecode path. LBVH topology and the bbox/Morton/build
+ *  kernels are unchanged.
  */
 
 #include <cuda_runtime.h>
@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cfloat>
+#include <cmath>
 #include <algorithm>
 #include <utility>
 
@@ -34,63 +35,93 @@ static void check_cuda(cudaError_t err, const char *msg, int line) {
 #define CUDA_CHECK(call) check_cuda((call), #call, __LINE__)
 
 // ====================================================================
-//  Compile-time constants for the multi-index machinery.
-//  BH_MAX_P is the largest moment order supported; the field evaluator
-//  needs Taylor coefficients up to order p+1, hence BH_MAX_P_FIELD.
+//  FMM Stage 2: complex spherical-harmonic multipole moments (CGR'99,
+//  J. Comput. Phys. 155:468). BH_MAX_P is the largest multipole order
+//  supported. Moments M_n^m are stored for the m>=0 half only (0<=m<=n<=p);
+//  the m<0 half is recovered by M_n^{-m} = conj(M_n^m) (Eq. 4 convention,
+//  no (-1)^m). The field (gradient) is obtained by forward-mode automatic
+//  differentiation of the potential expansion (see solid_harmonics / dual),
+//  so it needs no expansion above order p.
 // ====================================================================
-#define BH_MAX_P        6
-#define BH_MAX_P_FIELD  7
-__host__ __device__ constexpr int comp_of_h(int p) { return (p + 1) * (p + 2) * (p + 3) / 6; }
-#define BH_COMP_MAX        comp_of_h(BH_MAX_P)         // 84
-#define BH_COMP_MAX_FIELD  comp_of_h(BH_MAX_P_FIELD)   // 120
+#define BH_MAX_P        10
+#define BH_FACT_MAX     (2 * BH_MAX_P + 2)   // highest factorial index needed: (n+m)! <= (2p)!
 
-__host__ __device__ __forceinline__ int comp_of(int p) {
-  return (p + 1) * (p + 2) * (p + 3) / 6;
-}
+// # complex moments per node for orders 0..p, m in [0,n] (the stored m>=0 half).
+__host__ __device__ constexpr int nmom_sph(int p) { return (p + 1) * (p + 2) / 2; }
+// # doubles per node = 2 * complex count (interleaved re,im at slot s -> [2s],[2s+1]).
+__host__ __device__ constexpr int comp_sph(int p) { return (p + 1) * (p + 2); }
+#define BH_NMOM_MAX  nmom_sph(BH_MAX_P)   // 66
+
+// runtime doubles-per-node for a given order (host alloc / bh_tree.comp)
+__host__ __device__ __forceinline__ int comp_of(int p) { return comp_sph(p); }
+
+// linear slot for (n,m) with 0 <= m <= n :  s = n(n+1)/2 + m
+__host__ __device__ constexpr int sph_slot(int n, int m) { return n * (n + 1) / 2 + m; }
 
 // ====================================================================
-//  Compile-time multi-index machinery (constexpr twins of the runtime
-//  __constant__ tables).  Used only by the templated traversal/evaluator
-//  hot path: because every index folds to a literal after unrolling, the
-//  per-thread Taylor buffer can be scalar-replaced into registers instead
-//  of spilling to local memory.  Enumeration order matches
-//  init_constant_tables(): ascending |k|, then lex (kx, ky) within a shell.
+//  Arithmetic types for the spherical-harmonic path.
+//  - dual: forward-mode AD scalar (value + d/dx,d/dy,d/dz). Used to obtain
+//    the field as the exact gradient of the potential expansion, so no
+//    hand-derived solid-harmonic gradient recurrence is required.
+//  - cT<T>: complex number over scalar T (T = double for the potential,
+//    T = dual for the field). cmplx is the plain double-complex alias.
 // ====================================================================
-// # multi-indices with |k| < n  (== comp_of_h(n-1), with comp_of_h(-1)=0)
-__host__ __device__ constexpr int mi_base(int n) { return n * (n + 1) * (n + 2) / 6; }
-// smallest n with comp_of_h(n) > s  ==> the order |k| of slot s
-__host__ __device__ constexpr int mi_order(int s) {
-  int n = 0;
-  while (comp_of_h(n) <= s) ++n;
-  return n;
+struct dual {
+  double v, dx, dy, dz;
+  __host__ __device__ dual() : v(0.0), dx(0.0), dy(0.0), dz(0.0) {}
+  __host__ __device__ dual(double a) : v(a), dx(0.0), dy(0.0), dz(0.0) {}
+  __host__ __device__ dual(double a, double bx, double by, double bz)
+      : v(a), dx(bx), dy(by), dz(bz) {}
+};
+__host__ __device__ __forceinline__ dual operator+(dual a, dual b) {
+  return dual(a.v + b.v, a.dx + b.dx, a.dy + b.dy, a.dz + b.dz);
 }
-__host__ __device__ constexpr int mi_kx_of(int s) {
-  int n = mi_order(s), w = s - mi_base(n), kx = 0;
-  while (w >= (n - kx + 1)) { w -= (n - kx + 1); ++kx; }
-  return kx;
+__host__ __device__ __forceinline__ dual operator-(dual a, dual b) {
+  return dual(a.v - b.v, a.dx - b.dx, a.dy - b.dy, a.dz - b.dz);
 }
-__host__ __device__ constexpr int mi_ky_of(int s) {
-  int n = mi_order(s), w = s - mi_base(n), kx = 0;
-  while (w >= (n - kx + 1)) { w -= (n - kx + 1); ++kx; }
-  return w;                                   // leftover within the shell == ky
+__host__ __device__ __forceinline__ dual operator*(dual a, dual b) {
+  return dual(a.v * b.v, a.dx * b.v + a.v * b.dx,
+              a.dy * b.v + a.v * b.dy, a.dz * b.v + a.v * b.dz);
 }
-__host__ __device__ constexpr int mi_kz_of(int s) {
-  return mi_order(s) - mi_kx_of(s) - mi_ky_of(s);
+__host__ __device__ __forceinline__ dual operator*(double s, dual a) {
+  return dual(s * a.v, s * a.dx, s * a.dy, s * a.dz);
 }
-// slot index of multi-index (kx, ky, kz)
-__host__ __device__ constexpr int mi_slot(int kx, int ky, int kz) {
-  int n = kx + ky + kz;
-  return mi_base(n) + kx * (n + 1) - (kx * (kx - 1)) / 2 + ky;
+__host__ __device__ __forceinline__ dual operator*(dual a, double s) { return s * a; }
+__host__ __device__ __forceinline__ dual operator/(dual a, dual b) {
+  double inv = 1.0 / b.v, v = a.v * inv;
+  return dual(v, (a.dx - v * b.dx) * inv, (a.dy - v * b.dy) * inv, (a.dz - v * b.dz) * inv);
 }
-__host__ __device__ constexpr double mi_cfact(int i) {
-  double f = 1.0;
-  for (int j = 2; j <= i; ++j) f *= (double)j;
-  return f;
+__host__ __device__ __forceinline__ dual operator/(dual a, double s) {
+  double inv = 1.0 / s;
+  return dual(a.v * inv, a.dx * inv, a.dy * inv, a.dz * inv);
 }
-// 1 / (kx! ky! kz!) for slot s
-__host__ __device__ constexpr double mi_inv_fact(int s) {
-  return 1.0 / (mi_cfact(mi_kx_of(s)) * mi_cfact(mi_ky_of(s)) * mi_cfact(mi_kz_of(s)));
+__host__ __device__ __forceinline__ dual operator/(double a, dual b) {
+  double inv = 1.0 / b.v, v = a * inv;
+  return dual(v, -v * b.dx * inv, -v * b.dy * inv, -v * b.dz * inv);
 }
+// scalar sqrt, overloaded so the templated harmonic builder works for both T.
+__host__ __device__ __forceinline__ double tsqrt(double a) { return sqrt(a); }
+__host__ __device__ __forceinline__ dual   tsqrt(dual a) {
+  double s = sqrt(a.v), h = (s > 0.0) ? 0.5 / s : 0.0;
+  return dual(s, a.dx * h, a.dy * h, a.dz * h);
+}
+
+template<class T> struct cT {
+  T re, im;
+  __host__ __device__ cT() {}
+  __host__ __device__ cT(T r, T i) : re(r), im(i) {}
+};
+template<class T> __host__ __device__ __forceinline__ cT<T> operator+(const cT<T>& a, const cT<T>& b) {
+  return cT<T>(a.re + b.re, a.im + b.im);
+}
+template<class T> __host__ __device__ __forceinline__ cT<T> operator*(const cT<T>& a, const cT<T>& b) {
+  return cT<T>(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
+}
+template<class T> __host__ __device__ __forceinline__ cT<T> operator*(const T& s, const cT<T>& a) {
+  return cT<T>(s * a.re, s * a.im);
+}
+typedef cT<double> cmplx;
+__host__ __device__ __forceinline__ cmplx conjc(cmplx a) { return cmplx(a.re, -a.im); }
 
 // ====================================================================
 //  Tree handle (device-resident). Combined node array of size 2N-1:
@@ -121,8 +152,9 @@ struct bh_tree {
   int    *d_first;    // n_nodes
   int    *d_last;     // n_nodes
 
-  // per-node multi-index moments m^k, k indexed in c_mi_kx/ky/kz order
-  double *d_moments;  // n_nodes * comp
+  // per-node complex spherical-harmonic moments M_n^m, m>=0 half, interleaved
+  // re,im at slot s=sph_slot(n,m): d_moments[node*comp + 2s], [..+2s+1].
+  double *d_moments;  // n_nodes * comp   (comp = comp_sph(p) doubles)
 };
 
 // ====================================================================
@@ -154,71 +186,107 @@ struct bh_target_tree {
 };
 
 // ====================================================================
-//  Constant-memory tables (populated once on first build).
-//
-//    c_mi_kx/ky/kz[s]   -> Cartesian components of the multi-index at slot s
-//    c_mi_lookup[idx]   -> slot for the multi-index (kx,ky,kz),  idx = kx<<6 | ky<<3 | kz
-//    c_inv_fact[s]      -> 1/(kx! ky! kz!)  for slot s  (used in the evaluators)
-//    c_int_fact[i]      -> i!  for i in 0..7  (used in M2M binomial coefficients)
-//    c_comp_at_order[n] -> # slots with |k| < n  (i.e. first slot index with |k|=n)
-//
-//  Slots are enumerated in ascending |k|, then by lex ordering within each shell.
+//  Constant-memory tables (populated once on first build):
+//    c_fact[k] = k!                      (k up to (2p)! ; doubles)
+//    c_A[idx]  = A_n^m = (-1)^n / sqrt((n-m)!(n+m)!)   (CGR'99 Eq. 14)
+//                idx = n*n + (m+n), m in [-n, n]
 // ====================================================================
-__constant__ char   c_mi_kx[BH_COMP_MAX_FIELD];
-__constant__ char   c_mi_ky[BH_COMP_MAX_FIELD];
-__constant__ char   c_mi_kz[BH_COMP_MAX_FIELD];
-__constant__ short  c_mi_lookup[8 * 8 * 8];
-__constant__ double c_inv_fact[BH_COMP_MAX_FIELD];
-__constant__ double c_int_fact[8];
-__constant__ int    c_comp_at_order[BH_MAX_P_FIELD + 2];
+__constant__ double c_fact[BH_FACT_MAX + 1];
+__constant__ double c_A[(BH_MAX_P + 1) * (BH_MAX_P + 1)];
 
-#define MI_LOOKUP(kx, ky, kz) (c_mi_lookup[((kx) << 6) | ((ky) << 3) | (kz)])
+__device__ __forceinline__ double fact_dev(int k) { return c_fact[k]; }
+__device__ __forceinline__ double A_nm(int n, int m) { return c_A[n * n + (m + n)]; }
 
 // Host-side one-shot initializer for the constant tables.
 static void init_constant_tables() {
   static bool initialized = false;
   if (initialized) return;
 
-  char   h_mi_kx[BH_COMP_MAX_FIELD];
-  char   h_mi_ky[BH_COMP_MAX_FIELD];
-  char   h_mi_kz[BH_COMP_MAX_FIELD];
-  short  h_mi_lookup[8 * 8 * 8];
-  double h_inv_fact[BH_COMP_MAX_FIELD];
-  double h_int_fact[8];
-  int    h_comp_at_order[BH_MAX_P_FIELD + 2];
+  double h_fact[BH_FACT_MAX + 1];
+  h_fact[0] = 1.0;
+  for (int k = 1; k <= BH_FACT_MAX; ++k) h_fact[k] = h_fact[k - 1] * (double)k;
 
-  h_int_fact[0] = 1.0;
-  for (int i = 1; i < 8; ++i) h_int_fact[i] = h_int_fact[i - 1] * i;
-
-  for (int i = 0; i < 8 * 8 * 8; ++i) h_mi_lookup[i] = -1;
-
-  int slot = 0;
-  h_comp_at_order[0] = 0;
-  for (int n = 0; n <= BH_MAX_P_FIELD; ++n) {
-    for (int kx = 0; kx <= n; ++kx) {
-      for (int ky = 0; ky <= n - kx; ++ky) {
-        int kz = n - kx - ky;
-        h_mi_kx[slot] = (char)kx;
-        h_mi_ky[slot] = (char)ky;
-        h_mi_kz[slot] = (char)kz;
-        h_mi_lookup[(kx << 6) | (ky << 3) | kz] = (short)slot;
-        h_inv_fact[slot] = 1.0 / (h_int_fact[kx] * h_int_fact[ky] * h_int_fact[kz]);
-        ++slot;
-      }
-    }
-    h_comp_at_order[n + 1] = slot;
+  double h_A[(BH_MAX_P + 1) * (BH_MAX_P + 1)];
+  for (int n = 0; n <= BH_MAX_P; ++n) {
+    double sgn = (n & 1) ? -1.0 : 1.0;
+    for (int m = -n; m <= n; ++m)
+      h_A[n * n + (m + n)] = sgn / sqrt(h_fact[n - m] * h_fact[n + m]);
   }
-  // (slot now equals BH_COMP_MAX_FIELD)
 
-  CUDA_CHECK(cudaMemcpyToSymbol(c_mi_kx,         h_mi_kx,         sizeof(h_mi_kx)));
-  CUDA_CHECK(cudaMemcpyToSymbol(c_mi_ky,         h_mi_ky,         sizeof(h_mi_ky)));
-  CUDA_CHECK(cudaMemcpyToSymbol(c_mi_kz,         h_mi_kz,         sizeof(h_mi_kz)));
-  CUDA_CHECK(cudaMemcpyToSymbol(c_mi_lookup,     h_mi_lookup,     sizeof(h_mi_lookup)));
-  CUDA_CHECK(cudaMemcpyToSymbol(c_inv_fact,      h_inv_fact,      sizeof(h_inv_fact)));
-  CUDA_CHECK(cudaMemcpyToSymbol(c_int_fact,      h_int_fact,      sizeof(h_int_fact)));
-  CUDA_CHECK(cudaMemcpyToSymbol(c_comp_at_order, h_comp_at_order, sizeof(h_comp_at_order)));
-
+  CUDA_CHECK(cudaMemcpyToSymbol(c_fact, h_fact, sizeof(h_fact)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_A,    h_A,    sizeof(h_A)));
   initialized = true;
+}
+
+// scalar value extractor (for value-only branch guards inside the AD path)
+__host__ __device__ __forceinline__ double val(double a) { return a; }
+__host__ __device__ __forceinline__ double val(dual a)   { return a.v; }
+
+// ====================================================================
+//  Solid harmonics of a vector (x,y,z) in CGR'99 normalization (Eq. 4):
+//    Y_n^m(θ,φ) = sqrt((n-|m|)!/(n+|m|)!) · P_n^{|m|}(cosθ) · e^{imφ}   (CS in P)
+//  REGULAR=true  -> R_n^m =  r^n     · Y_n^m   (forming/translating moments)
+//  REGULAR=false -> S_n^m =  Y_n^m / r^{n+1}   (irregular; evaluating Φ)
+//  Filled for the m>=0 half: out[sph_slot(n,m)], 0<=m<=n<=maxn (m<0 = conj).
+//  Templated on scalar T: T=double for the potential, T=dual for the field
+//  (the gradient falls out by forward-mode AD, no derivative recurrence).
+// ====================================================================
+template<class T, bool REGULAR>
+__device__ void solid_harmonics(int maxn, T x, T y, T z, cT<T>* out) {
+  T r   = tsqrt(x * x + y * y + z * z);
+  T rxy = tsqrt(x * x + y * y);
+  bool ron  = val(r)   > 0.0;
+  bool rxon = val(rxy) > 0.0;
+  T ct   = ron  ? (z   / r)   : T(1.0);   // cosθ
+  T st   = ron  ? (rxy / r)   : T(0.0);   // sinθ >= 0
+  T cphi = rxon ? (x   / rxy) : T(1.0);   // on the z-axis P_n^{m>0}=0 kills e^{imφ}
+  T sphi = rxon ? (y   / rxy) : T(0.0);
+
+  // associated Legendre P_n^m(cosθ) (Condon–Shortley), m>=0
+  T P[BH_NMOM_MAX];
+  P[sph_slot(0, 0)] = T(1.0);
+  for (int m = 1; m <= maxn; ++m)
+    P[sph_slot(m, m)] = (-(2.0 * m - 1.0)) * (st * P[sph_slot(m - 1, m - 1)]);
+  for (int m = 0; m < maxn; ++m)
+    P[sph_slot(m + 1, m)] = (2.0 * m + 1.0) * (ct * P[sph_slot(m, m)]);
+  for (int m = 0; m <= maxn; ++m)
+    for (int n = m + 2; n <= maxn; ++n)
+      P[sph_slot(n, m)] = ((2.0 * n - 1.0) * (ct * P[sph_slot(n - 1, m)])
+                          - (n + m - 1.0) * P[sph_slot(n - 2, m)]) / (double)(n - m);
+
+  // e^{i m φ}, m = 0..maxn
+  cT<T> eim[BH_MAX_P + 1];
+  eim[0] = cT<T>(T(1.0), T(0.0));
+  cT<T> ep(cphi, sphi);
+  for (int m = 1; m <= maxn; ++m) eim[m] = eim[m - 1] * ep;
+
+  // radial scaling per degree: r^n (regular) or 1/r^{n+1} (irregular)
+  T rad[BH_MAX_P + 1];
+  if constexpr (REGULAR) {
+    rad[0] = T(1.0);
+    for (int n = 1; n <= maxn; ++n) rad[n] = rad[n - 1] * r;
+  } else {
+    T inv_r = ron ? (T(1.0) / r) : T(0.0);
+    rad[0] = inv_r;
+    for (int n = 1; n <= maxn; ++n) rad[n] = rad[n - 1] * inv_r;
+  }
+
+  for (int n = 0; n <= maxn; ++n)
+    for (int m = 0; m <= n; ++m) {
+      double c = sqrt(fact_dev(n - m) / fact_dev(n + m));   // sqrt((n-m)!/(n+m)!)
+      T a = c * (P[sph_slot(n, m)] * rad[n]);
+      out[sph_slot(n, m)] = a * eim[m];
+    }
+}
+
+// Fetch M_n^m / R_n^m for any m in [-n,n] from the stored m>=0 half (conj for m<0).
+__device__ __forceinline__ cmplx get_M(const double* M, int n, int m) {
+  if (m >= 0) { int s = sph_slot(n, m);  return cmplx(M[2 * s], M[2 * s + 1]); }
+  int s = sph_slot(n, -m);               return cmplx(M[2 * s], -M[2 * s + 1]);
+}
+__device__ __forceinline__ cmplx get_R(const cmplx* R, int n, int m) {
+  if (m >= 0) return R[sph_slot(n, m)];
+  cmplx r = R[sph_slot(n, -m)];          return cmplx(r.re, -r.im);
 }
 
 // ====================================================================
@@ -402,41 +470,43 @@ __global__ void build_internal_kernel(int n, const uint64_t *__restrict__ codes,
 // ====================================================================
 //  Kernel 5: bottom-up multipole summarize (M2M upward pass)
 // ====================================================================
-// Accumulate m_parent^k += sum_{l<=k} C(k,l) * delta^(k-l) * m_child^l
-// where delta = (dx,dy,dz) = c_child - c_parent.
-__device__ __forceinline__ void m2m_shift(int comp,
-                                          const double *__restrict__ m_child,
-                                          double dx, double dy, double dz,
-                                          double *__restrict__ m_parent) {
-  // Precompute powers of dx, dy, dz up to BH_MAX_P (highest exponent we can need
-  // for any l <= k with |k| <= p, since k_i - l_i <= k_i <= p).
-  double pwx[BH_MAX_P + 1], pwy[BH_MAX_P + 1], pwz[BH_MAX_P + 1];
-  pwx[0] = pwy[0] = pwz[0] = 1.0;
-  #pragma unroll
-  for (int i = 1; i <= BH_MAX_P; ++i) {
-    pwx[i] = pwx[i - 1] * dx;
-    pwy[i] = pwy[i - 1] * dy;
-    pwz[i] = pwz[i - 1] * dz;
-  }
-  for (int sk = 0; sk < comp; ++sk) {
-    int kx = c_mi_kx[sk], ky = c_mi_ky[sk], kz = c_mi_kz[sk];
-    int n_k = kx + ky + kz;
-    // l <= k component-wise implies |l| <= |k|; only walk slots up to the |l|=|k| shell.
-    int sl_end = c_comp_at_order[n_k + 1];
-    double k_fact = c_int_fact[kx] * c_int_fact[ky] * c_int_fact[kz];
-    double sum = 0.0;
-    for (int sl = 0; sl < sl_end; ++sl) {
-      int lx = c_mi_kx[sl], ly = c_mi_ky[sl], lz = c_mi_kz[sl];
-      int ex = kx - lx, ey = ky - ly, ez = kz - lz;
-      if (ex < 0 || ey < 0 || ez < 0) continue;
-      double l_fact = c_int_fact[lx] * c_int_fact[ly] * c_int_fact[lz];
-      double e_fact = c_int_fact[ex] * c_int_fact[ey] * c_int_fact[ez];
-      double C_kl  = k_fact / (l_fact * e_fact);   // C(k,l)
-      double dpow  = pwx[ex] * pwy[ey] * pwz[ez];  // delta^(k-l)
-      sum += C_kl * dpow * m_child[sl];
+// recover p from the doubles-per-node count: comp = comp_sph(p) = (p+1)(p+2).
+__device__ __forceinline__ int p_from_comp(int comp) {
+  int p = 0; while (comp_sph(p) < comp) ++p; return p;
+}
+__device__ __forceinline__ int iabs(int a) { return a < 0 ? -a : a; }
+
+// Multipole-to-multipole translation T_MM (CGR'99 Thm 2.3, Eq. 13), shifting a
+// child expansion {O} about the child center to the parent center and adding it
+// into {M}. (ρ,α,β) are the spherical coords of the shift (child-parent), encoded
+// here as the regular solid harmonics R_n^m = ρ^n Y_n^m of the shift vector:
+//   M_j^k += Σ_{n=0}^{j} Σ_{m=-n}^{n} O_{j-n}^{k-m} · i^{|k|-|m|-|k-m|}
+//                · A_n^m A_{j-n}^{k-m} / A_j^k · R_n^{-m}.
+// The phase i^{|k|-|m|-|k-m|} has an even exponent, hence the real (-1)^(e/2).
+__device__ void m2m_shift(int comp,
+                          const double *__restrict__ O,
+                          double dx, double dy, double dz,
+                          double *__restrict__ M) {
+  int p = p_from_comp(comp);
+  cmplx R[BH_NMOM_MAX];
+  solid_harmonics<double, true>(p, dx, dy, dz, R);   // R_n^m of shift, n<=p
+
+  for (int j = 0; j <= p; ++j)
+    for (int k = 0; k <= j; ++k) {                   // store the m>=0 half only
+      cmplx acc(0.0, 0.0);
+      for (int n = 0; n <= j; ++n)
+        for (int m = -n; m <= n; ++m) {
+          int jn = j - n, km = k - m;
+          if (km < -jn || km > jn) continue;         // O_{jn}^{km} needs |km| <= jn
+          int e = k - iabs(m) - iabs(km);            // |k|=k (k>=0); e is even
+          double ipow = ((e / 2) & 1) ? -1.0 : 1.0;
+          double coef = ipow * A_nm(n, m) * A_nm(jn, km) / A_nm(j, k);
+          acc = acc + (coef * (get_M(O, jn, km) * get_R(R, n, -m)));
+        }
+      int s = sph_slot(j, k);
+      M[2 * s]     += acc.re;
+      M[2 * s + 1] += acc.im;
     }
-    m_parent[sk] += sum;
-  }
 }
 
 __global__ void summarize_kernel(int N, int comp,
@@ -572,107 +642,45 @@ __global__ void iota_kernel(int n, int *__restrict__ out) {
 }
 
 // ====================================================================
-//  Tree traversal + multipole evaluation (device helpers, called by the
-//  target-side kernels below).  Multi-index Cartesian Taylor.
+//  Multipole evaluation (M2P) in the complex spherical-harmonic basis.
+//  Both evaluators contract the stored moments {M_n^m, m>=0} against the
+//  irregular solid harmonics S_n^m of the target-relative vector, using
+//  M_n^{-m}=conj(M_n^m), S_n^{-m}=conj(S_n^m) to fold the m<0 half:
+//     Σ_{m=-n}^{n} M_n^m S_n^m = M_n^0 S_n^0 + 2·Re Σ_{m=1}^{n} M_n^m S_n^m.
 // ====================================================================
-//
-// Fill T[0 .. comp_of_h(MAXO)-1] with Cartesian Taylor coefficients
-//   T^k(R) = d^k(1/r),   r = sqrt(R.R)
-// via the all-axis Lindsay-Krasny recurrence
-//   r^2 |k| T^k = -(2|k|-1) sum_i k_i R_i T^{k-e_i} - (|k|-1) sum_i k_i(k_i-1) T^{k-2e_i}.
-// Slot S and all predecessor slots are compile-time constants (constexpr mi_*),
-// so T[] can be scalar-replaced into registers instead of spilling.
-template<int S>
-__device__ __forceinline__ void fill_T_slot(double Rx, double Ry, double Rz,
-                                            double inv_r, double inv_r2, double inv_r3,
-                                            double *T) {
-  constexpr int kx = mi_kx_of(S), ky = mi_ky_of(S), kz = mi_kz_of(S);
-  constexpr int n  = kx + ky + kz;
-  if constexpr (n == 0) {
-    T[S] = inv_r;                                       // T^(0,0,0) = 1/r
-  } else if constexpr (n == 1) {
-    T[S] = (kx ? -Rx : (ky ? -Ry : -Rz)) * inv_r3;      // T^(e_i) = -R_i / r^3
-  } else {
-    // fold the 1/|k| normalization into the constants at compile time, so the
-    // per-slot result is just (c1*s1 + c2*s2)*inv_r2 -- one fewer FP64 multiply.
-    constexpr double inv_n = 1.0 / (double)n;
-    constexpr double c1    = -(2.0 * n - 1.0) * inv_n;  // -(2|k|-1)/|k|
-    constexpr double c2    = -(double)(n - 1) * inv_n;  // -(|k|-1)/|k|
-    double s1 = 0.0, s2 = 0.0;
-    if constexpr (kx >= 1) {
-      s1 += kx * Rx * T[mi_slot(kx - 1, ky, kz)];
-      if constexpr (kx >= 2) s2 += kx * (kx - 1) * T[mi_slot(kx - 2, ky, kz)];
+
+// Potential Φ (CGR'99 Thm 2.1, Eq. 5). S = irregular solid harmonics (double).
+__device__ double mp_potential_eval_sph(int p, const double *__restrict__ M,
+                                                        const cmplx *__restrict__ S) {
+  double phi = 0.0;
+  for (int n = 0; n <= p; ++n) {
+    int s0 = sph_slot(n, 0);
+    phi += M[2 * s0] * S[s0].re;                                   // m = 0 (real)
+    for (int m = 1; m <= n; ++m) {
+      int s = sph_slot(n, m);
+      phi += 2.0 * (M[2 * s] * S[s].re - M[2 * s + 1] * S[s].im);  // 2 Re(M_n^m S_n^m)
     }
-    if constexpr (ky >= 1) {
-      s1 += ky * Ry * T[mi_slot(kx, ky - 1, kz)];
-      if constexpr (ky >= 2) s2 += ky * (ky - 1) * T[mi_slot(kx, ky - 2, kz)];
-    }
-    if constexpr (kz >= 1) {
-      s1 += kz * Rz * T[mi_slot(kx, ky, kz - 1)];
-      if constexpr (kz >= 2) s2 += kz * (kz - 1) * T[mi_slot(kx, ky, kz - 2)];
-    }
-    T[S] = (c1 * s1 + c2 * s2) * inv_r2;
   }
+  return phi;
 }
 
-template<int... S>
-__device__ __forceinline__ void compute_T_impl(double Rx, double Ry, double Rz,
-                                               double inv_r, double inv_r2, double inv_r3,
-                                               double *T, std::integer_sequence<int, S...>) {
-  // comma fold over ascending slot S: the comma operator sequences left-to-right,
-  // so every predecessor T^{k-e_i} is written before it is read.
-  (fill_T_slot<S>(Rx, Ry, Rz, inv_r, inv_r2, inv_r3, T), ...);
-}
-
-template<int MAXO>
-__device__ __forceinline__ void compute_T_t(double Rx, double Ry, double Rz,
-                                            double inv_r2, double inv_r, double *T) {
-  double inv_r3 = inv_r * inv_r2;
-  compute_T_impl(Rx, Ry, Rz, inv_r, inv_r2, inv_r3, T,
-                 std::make_integer_sequence<int, comp_of_h(MAXO)>{});
-}
-
-// Potential: phi += sum_{|k|<=p} (-1)^|k| / k! * T^k * m^k
-template<int S>
-__device__ __forceinline__ double pot_term(const double *m, const double *T) {
-  constexpr int n = mi_kx_of(S) + mi_ky_of(S) + mi_kz_of(S);
-  constexpr double sign  = (n & 1) ? -1.0 : 1.0;
-  constexpr double inv_f = mi_inv_fact(S);
-  return sign * inv_f * T[S] * m[S];
-}
-template<int... S>
-__device__ __forceinline__ double mp_potential_eval_impl(const double *m, const double *T,
-                                                         std::integer_sequence<int, S...>) {
-  return (... + pot_term<S>(m, T));            // left fold: matches s=0..comp-1 order
-}
-template<int COMP>
-__device__ __forceinline__ double mp_potential_eval_t(const double *m, const double *T) {
-  return mp_potential_eval_impl(m, T, std::make_integer_sequence<int, COMP>{});
-}
-
-// Field: g_i += -sum_{|k|<=p} (-1)^|k| / k! * T^(k+e_i) * m^k
-template<int S>
-__device__ __forceinline__ void field_term(const double *m, const double *T,
-                                           double &gx, double &gy, double &gz) {
-  constexpr int kx = mi_kx_of(S), ky = mi_ky_of(S), kz = mi_kz_of(S);
-  constexpr int n  = kx + ky + kz;
-  constexpr double sign  = (n & 1) ? -1.0 : 1.0;
-  constexpr double inv_f = mi_inv_fact(S);
-  double common = sign * inv_f * m[S];
-  gx -= common * T[mi_slot(kx + 1, ky, kz)];
-  gy -= common * T[mi_slot(kx, ky + 1, kz)];
-  gz -= common * T[mi_slot(kx, ky, kz + 1)];
-}
-template<int... S>
-__device__ __forceinline__ void mp_field_eval_impl(const double *m, const double *T,
-                                                   double &gx, double &gy, double &gz,
-                                                   std::integer_sequence<int, S...>) {
-  (field_term<S>(m, T, gx, gy, gz), ...);
-}
-template<int COMP>
-__device__ __forceinline__ void mp_field_eval_t(const double *m, const double *T,
-                                               double &gx, double &gy, double &gz) {
-  mp_field_eval_impl(m, T, gx, gy, gz, std::make_integer_sequence<int, COMP>{});
+// Field E = -∇Φ. S is built in dual arithmetic (S_n^m carries d/dx,d/dy,d/dz),
+// so contracting it with the moments yields Φ together with its exact gradient
+// (forward-mode AD); the field is the negated gradient. No expansion above p.
+__device__ void mp_field_eval_sph(int p, const double *__restrict__ M,
+                                                  const cT<dual> *__restrict__ S,
+                                                  double &gx, double &gy, double &gz) {
+  dual phi;
+  for (int n = 0; n <= p; ++n) {
+    int s0 = sph_slot(n, 0);
+    phi = phi + M[2 * s0] * S[s0].re;
+    for (int m = 1; m <= n; ++m) {
+      int s = sph_slot(n, m);
+      dual termre = M[2 * s] * S[s].re - M[2 * s + 1] * S[s].im;   // Re(M_n^m S_n^m)
+      phi = phi + 2.0 * termre;
+    }
+  }
+  gx -= phi.dx; gy -= phi.dy; gz -= phi.dz;
 }
 
 template<bool FIELD, int P>
@@ -683,13 +691,10 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
   const double theta2 = t.theta * t.theta;
   const int leaf_size = t.leaf_size;
 
-  constexpr int MAX_T = FIELD ? (P + 1) : P;   // Taylor order needed
-  constexpr int COMP  = comp_of_h(P);          // moments per node
-
-  // Per-thread Taylor buffer; compile-time sized so it can be register-resident
-  // (fully for low P; at P=6 the order-7 buffer still exceeds the register
-  // budget and partially spills).
-  double T_buf[comp_of_h(MAX_T)];
+  constexpr int NM       = nmom_sph(P);   // # complex moments per node (m>=0 half)
+  constexpr int COMP_DBL = comp_sph(P);   // # doubles per node
+  // The per-thread solid-harmonic buffer is declared inside the far-field branch
+  // (cmplx for the potential, dual-complex for the field).
 
   // Binary radix tree over 63-bit Morton codes has depth ~< 63 plus duplicate
   // index tie-break; 96 leaves comfortable margin on the DFS stack.
@@ -714,16 +719,18 @@ __device__ void traverse(double tx, double ty, double tz, int self_atom,
     double size = fmax(ex, fmax(ey, ez));
 
     if (dist2 > 0.0 && size*size < theta2 * dist2) {
-      // far enough: particle-cluster multipole interaction.
-      // rsqrt(dist2) is ~17 FP64 ops vs ~45 for 1.0/dist2 then sqrt().
-      double inv_r  = rsqrt(dist2);
-      double inv_r2 = inv_r * inv_r;
-      compute_T_t<MAX_T>(Rx, Ry, Rz, inv_r2, inv_r, T_buf);
-      const double *m = t.d_moments + (size_t)node * COMP;
+      // far enough: particle-cluster multipole (M2P) interaction.
+      const double *m = t.d_moments + (size_t)node * COMP_DBL;
       if constexpr (FIELD) {
-        mp_field_eval_t<COMP>(m, T_buf, gx, gy, gz);
+        cT<dual> S[NM];
+        solid_harmonics<dual, false>(P, dual(Rx, 1.0, 0.0, 0.0),
+                                        dual(Ry, 0.0, 1.0, 0.0),
+                                        dual(Rz, 0.0, 0.0, 1.0), S);
+        mp_field_eval_sph(P, m, S, gx, gy, gz);
       } else {
-        out_phi += mp_potential_eval_t<COMP>(m, T_buf);
+        cmplx S[NM];
+        solid_harmonics<double, false>(P, Rx, Ry, Rz, S);
+        out_phi += mp_potential_eval_sph(P, m, S);
       }
       continue;
     }
@@ -824,33 +831,37 @@ constexpr int DTT_LIST_CAP  = 512;   // M2P/P2P shared buffer; drained when with
 // M2P drain: each active thread evaluates the admissible-cell list into its own
 // target point. Verbatim multipole math from the old kernel; moments from global.
 template<bool FIELD, int P>
-__device__ __forceinline__ void dtt_drain_m2p(const bh_tree &src,
+__device__ void dtt_drain_m2p(const bh_tree &src,
                                              const int *__restrict__ list, int n, bool active,
                                              double px, double py, double pz,
                                              double &phi, double &gx, double &gy, double &gz) {
   if (!active) return;
-  constexpr int COMP  = comp_of_h(P);
-  constexpr int MAX_T = FIELD ? (P + 1) : P;
+  constexpr int NM       = nmom_sph(P);
+  constexpr int COMP_DBL = comp_sph(P);
   for (int j = 0; j < n; ++j) {
     int B = list[j];
     double Bcx = 0.5*(src.d_min[3*B]   + src.d_max[3*B]);
     double Bcy = 0.5*(src.d_min[3*B+1] + src.d_max[3*B+1]);
     double Bcz = 0.5*(src.d_min[3*B+2] + src.d_max[3*B+2]);
     double Rxp = px - Bcx, Ryp = py - Bcy, Rzp = pz - Bcz;
-    double d2  = Rxp*Rxp + Ryp*Ryp + Rzp*Rzp;
-    double inv_r  = rsqrt(d2);
-    double inv_r2 = inv_r * inv_r;
-    double T_buf[comp_of_h(MAX_T)];
-    compute_T_t<MAX_T>(Rxp, Ryp, Rzp, inv_r2, inv_r, T_buf);
-    const double *m = src.d_moments + (size_t)B * COMP;
-    if constexpr (FIELD) mp_field_eval_t<COMP>(m, T_buf, gx, gy, gz);
-    else                 phi += mp_potential_eval_t<COMP>(m, T_buf);
+    const double *m = src.d_moments + (size_t)B * COMP_DBL;
+    if constexpr (FIELD) {
+      cT<dual> S[NM];
+      solid_harmonics<dual, false>(P, dual(Rxp, 1.0, 0.0, 0.0),
+                                      dual(Ryp, 0.0, 1.0, 0.0),
+                                      dual(Rzp, 0.0, 0.0, 1.0), S);
+      mp_field_eval_sph(P, m, S, gx, gy, gz);
+    } else {
+      cmplx S[NM];
+      solid_harmonics<double, false>(P, Rxp, Ryp, Rzp, S);
+      phi += mp_potential_eval_sph(P, m, S);
+    }
   }
 }
 
 // P2P drain: each active thread direct-sums the terminal-leaf list into its point.
 template<bool FIELD>
-__device__ __forceinline__ void dtt_drain_p2p(const bh_tree &src,
+__device__ void dtt_drain_p2p(const bh_tree &src,
                                              const int *__restrict__ list, int n, bool active,
                                              double px, double py, double pz,
                                              double &phi, double &gx, double &gy, double &gz) {
@@ -1038,7 +1049,11 @@ __global__ void dtt_eval_kernel(bh_tree src, bh_target_tree tgt,
       case 3: KERNEL<3><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
       case 4: KERNEL<4><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
       case 5: KERNEL<5><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
-      default: KERNEL<6><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;        \
+      case 6: KERNEL<6><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
+      case 7: KERNEL<7><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
+      case 8: KERNEL<8><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
+      case 9: KERNEL<9><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
+      default: KERNEL<10><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;       \
     }                                                                     \
   } while (0)
 
@@ -1053,7 +1068,11 @@ __global__ void dtt_eval_kernel(bh_tree src, bh_target_tree tgt,
       case 3: dtt_eval_kernel<FIELD,3><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
       case 4: dtt_eval_kernel<FIELD,4><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
       case 5: dtt_eval_kernel<FIELD,5><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
-      default: dtt_eval_kernel<FIELD,6><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;   \
+      case 6: dtt_eval_kernel<FIELD,6><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
+      case 7: dtt_eval_kernel<FIELD,7><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
+      case 8: dtt_eval_kernel<FIELD,8><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
+      case 9: dtt_eval_kernel<FIELD,9><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
+      default: dtt_eval_kernel<FIELD,10><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;  \
     }                                                                              \
   } while (0)
 
