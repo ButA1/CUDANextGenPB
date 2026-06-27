@@ -201,6 +201,15 @@ struct bh_target_tree {
   double *d_local;    // n_box * comp : per-box local expansion L_n^m (m>=0 half)
   int    *d_depth;    // n_nodes : tree depth (root = 0), for the top-down L2L sweep
   int     max_depth;  // deepest BOX-node depth (host copy; bounds the L2L level loop)
+
+  // ---- near-field P2P interaction lists (CSR, grouped by target-leaf node A) ----
+  // The pair-DTT emits near (leaf,leaf) pairs; a counting sort by A groups them so the
+  // fused L2P+P2P kernel walks each leaf's near source leaves directly -- no per-leaf
+  // BFS descent, no shared frontier. d_p2p_off is indexed by node id (target leaf A);
+  // d_p2p_val[off[A] .. off[A+1]) are that leaf's near SOURCE leaf node ids.
+  int     n_p2p;      // total near (leaf,leaf) pairs
+  int    *d_p2p_off;  // n_nodes + 1 : CSR row offsets, indexed by target node id
+  int    *d_p2p_val;  // n_p2p       : source-leaf node ids, grouped by target leaf
 };
 
 // ====================================================================
@@ -963,12 +972,9 @@ __global__ void field_kernel(bh_tree t, int num_tri_verts,
 //  original (caller) point order via tgt.d_orig.
 // ====================================================================
 
-// Cooperative block width. MUST equal the launch blockDim -- cub::BlockScan needs
-// it at compile time. Target leaves hold <= 256 points, so 256 threads always
-// cover a leaf and give the widest cooperative traversal.
+// Leaf-kernel block width = launch blockDim. Target leaves hold <= 256 points, so 256
+// threads always cover a leaf (one target point per thread in the fused L2P+P2P kernel).
 constexpr int DTT_BDIM      = 256;
-constexpr int DTT_FRONT_CAP = 2048;  // BFS frontier slots per level (shared); see overflow guard
-constexpr int DTT_LIST_CAP  = 512;   // M2P/P2P shared buffer; drained when within DTT_BDIM of full
 
 // M2P drain: each active thread evaluates the admissible-cell list into its own
 // target point. Verbatim multipole math from the old kernel; moments from global.
@@ -1068,31 +1074,28 @@ __device__ void dtt_drain_p2p(const bh_tree &src,
   }
 }
 // ====================================================================
+// Fused near (P2P) + far (L2P) leaf kernel. One block per target leaf A. Each thread owns one
+// target point. The near/far split was already decided by the single pair-DTT pass: the far
+// field sits in tgt.d_local (M2L + L2L), and this leaf's near source leaves are tgt.d_p2p_val
+// over the CSR segment [d_p2p_off[A], d_p2p_off[A+1]). No tree descent, no shared frontier, no
+// MAC here -- so no DTT_FRONT_CAP to overflow.
 template<bool FIELD, int P>
-__global__ void dtt_eval_kernel(bh_tree src, bh_target_tree tgt,
-                                double theta,
-                                const double *__restrict__ flux,    // pol   (FIELD=false)
-                                const double *__restrict__ norms,   // ionic (FIELD=true)
-                                const double *__restrict__ phi_sup,
-                                const double *__restrict__ area,
-                                double inv_4pi,
-                                double *__restrict__ partial) {
+__global__ void l2p_p2p_kernel(bh_tree src, bh_target_tree tgt,
+                               const double *__restrict__ flux,    // pol   (FIELD=false)
+                               const double *__restrict__ norms,   // ionic (FIELD=true)
+                               const double *__restrict__ phi_sup,
+                               const double *__restrict__ area,
+                               double inv_4pi,
+                               double *__restrict__ partial) {
   // ---- this block's target leaf cell ----
   int A   = tgt.d_leaf_nodes[blockIdx.x];
   int a0  = tgt.d_first[A];
   int cnt = tgt.d_last[A] - a0 + 1;
 
-  // target cell center + radius (half max-extent), same metric as the source side
-  double Tmnx = tgt.d_min[3*A],   Tmxx = tgt.d_max[3*A];
-  double Tmny = tgt.d_min[3*A+1], Tmxy = tgt.d_max[3*A+1];
-  double Tmnz = tgt.d_min[3*A+2], Tmxz = tgt.d_max[3*A+2];
-  double Tcx = 0.5*(Tmnx+Tmxx), Tcy = 0.5*(Tmny+Tmxy), Tcz = 0.5*(Tmnz+Tmxz);
-  // enclosing-sphere radius = half the AABB diagonal (NOT half the max-extent:
-  // that under-bounds anisotropic cells and lets corner targets fall inside the
-  // expansion's inaccurate region).
-  double Tex = Tmxx-Tmnx, Tey = Tmxy-Tmny, Tez = Tmxz-Tmnz;
-  double rT  = 0.5 * sqrt(Tex*Tex + Tey*Tey + Tez*Tez);
-  double theta2 = theta * theta;
+  // target cell center (L2P expands about it)
+  double Tcx = 0.5*(tgt.d_min[3*A]   + tgt.d_max[3*A]);
+  double Tcy = 0.5*(tgt.d_min[3*A+1] + tgt.d_max[3*A+1]);
+  double Tcz = 0.5*(tgt.d_min[3*A+2] + tgt.d_max[3*A+2]);
 
   // ---- this thread's target point (one per thread; cnt <= leaf_size <= blockDim) ----
   bool active = (threadIdx.x < cnt);
@@ -1101,97 +1104,9 @@ __global__ void dtt_eval_kernel(bh_tree src, bh_target_tree tgt,
   if (active) { px = tgt.d_pos[3*my]; py = tgt.d_pos[3*my+1]; pz = tgt.d_pos[3*my+2]; }
   double phi = 0.0, gx = 0.0, gy = 0.0, gz = 0.0;
 
-  // ---- cooperative breadth-first descent of the source tree (Bonsai sec. 2.2) ----
-  // In Stage 3.2 the far field is already in tgt.d_local (M2L + L2L), so this descent only
-  // separates the NEAR field: each step DTT_BDIM threads test DTT_BDIM source nodes against
-  // the two-sided MAC; admissible nodes are PRUNED (their contribution lives in d_local),
-  // terminal source clusters go to the P2P list, internal nodes recurse. One block per
-  // target leaf cell; the descent is identical to Stage 1 minus the M2L payload.
-  __shared__ int s_bufA[DTT_FRONT_CAP];
-  __shared__ int s_bufB[DTT_FRONT_CAP];
-  __shared__ int s_p2p[DTT_LIST_CAP];
-  __shared__ int n_curr, n_next, n_p2p;
-  __shared__ typename cub::BlockScan<int, DTT_BDIM>::TempStorage scan_tmp;
-
-  int *s_curr = s_bufA;
-  int *s_next = s_bufB;
-
-  if (threadIdx.x == 0) { s_curr[0] = 0; n_curr = 1; n_next = 0; n_p2p = 0; }
-  __syncthreads();
-
-  while (n_curr > 0) {
-    int nc = n_curr;
-    for (int base = 0; base < nc; base += DTT_BDIM) {
-      int idx = base + threadIdx.x;
-      int B = (idx < nc) ? s_curr[idx] : -1;
-
-      // classify this source node against the target cell (block-uniform per node)
-      int leaf = 0, open = 0, Lc = -1, Rc = -1;
-      if (B >= 0) {
-        double Bmnx = src.d_min[3*B],   Bmxx = src.d_max[3*B];
-        double Bmny = src.d_min[3*B+1], Bmxy = src.d_max[3*B+1];
-        double Bmnz = src.d_min[3*B+2], Bmxz = src.d_max[3*B+2];
-        double Bcx = 0.5*(Bmnx+Bmxx), Bcy = 0.5*(Bmny+Bmxy), Bcz = 0.5*(Bmnz+Bmxz);
-        double Bex = Bmxx-Bmnx, Bey = Bmxy-Bmny, Bez = Bmxz-Bmnz;
-        double rB  = 0.5 * sqrt(Bex*Bex + Bey*Bey + Bez*Bez);   // half-diagonal (see rT)
-        double Rx = Tcx - Bcx, Ry = Tcy - Bcy, Rz = Tcz - Bcz;
-        double R2 = Rx*Rx + Ry*Ry + Rz*Rz;
-        double sumr = rT + rB;
-        // two-sided MAC: admissible (far) -> prune; else near -> P2P leaf or recurse
-        if (R2 > 0.0 && sumr*sumr < theta2 * R2) {
-          /* admissible: far field already in d_local -> prune (no list, no recurse) */
-        } else {
-          int  bcnt  = src.d_last[B] - src.d_first[B] + 1;
-          bool bleaf = (B >= src.N - 1) || (bcnt <= src.leaf_size);
-          if (bleaf) { leaf = 1; }
-          else       { open = 1; Lc = src.d_left[B]; Rc = src.d_right[B]; }
-        }
-      }
-
-      // compact the two outcome streams via block prefix-sums; cub requires a
-      // __syncthreads between reuses of the same TempStorage.
-      int p_l, t_l, p_o, t_o;
-      cub::BlockScan<int, DTT_BDIM>(scan_tmp).ExclusiveSum(leaf, p_l, t_l);
-      __syncthreads();
-      if (leaf) s_p2p[n_p2p + p_l] = B;
-      cub::BlockScan<int, DTT_BDIM>(scan_tmp).ExclusiveSum(open, p_o, t_o);
-      __syncthreads();
-      if (open) {
-        int w = n_next + 2*p_o;
-        if (w + 1 < DTT_FRONT_CAP) { s_next[w] = Lc; s_next[w + 1] = Rc; }
-      }
-
-      if (threadIdx.x == 0) {
-        n_p2p += t_l;
-        int nn = n_next + 2*t_o;
-        if (nn > DTT_FRONT_CAP) {
-          printf("[dtt] BFS frontier overflow (%d > %d) at block %d: shared-frontier limit -- "
-                 "this block's near field is incomplete. Raise DTT_FRONT_CAP.\n",
-                 nn, DTT_FRONT_CAP, blockIdx.x);
-          nn = DTT_FRONT_CAP;
-        }
-        n_next = nn;
-      }
-      __syncthreads();
-
-      // drain the P2P list before it can overflow (Bonsai), then reset.
-      if (n_p2p > DTT_LIST_CAP - DTT_BDIM) {
-        dtt_drain_p2p<FIELD>(src, s_p2p, n_p2p, active, px, py, pz, phi, gx, gy, gz);
-        __syncthreads();
-        if (threadIdx.x == 0) n_p2p = 0;
-        __syncthreads();
-      }
-    }
-
-    // advance one BFS level: swap the current/next frontier buffers (the pointer
-    // swap is identical on every thread, so the block stays consistent).
-    int *tmp = s_curr; s_curr = s_next; s_next = tmp;
-    if (threadIdx.x == 0) { n_curr = n_next; n_next = 0; }
-    __syncthreads();
-  }
-
-  // ---- drain the P2P tail ----
-  dtt_drain_p2p<FIELD>(src, s_p2p, n_p2p, active, px, py, pz, phi, gx, gy, gz);
+  // ---- near field: direct P2P over this leaf's CSR list of near source leaves ----
+  int p0 = tgt.d_p2p_off[A], p1 = tgt.d_p2p_off[A + 1];
+  dtt_drain_p2p<FIELD>(src, tgt.d_p2p_val + p0, p1 - p0, active, px, py, pz, phi, gx, gy, gz);
 
   // ---- L2P: evaluate this leaf's complete far-field local expansion d_local[A] at each
   // target point (relative to the leaf center) and add it to the per-point P2P near field.
@@ -1243,22 +1158,21 @@ __global__ void dtt_eval_kernel(bh_tree src, bh_target_tree tgt,
     }                                                                     \
   } while (0)
 
-// Dispatch the DTT kernel on (compile-time FIELD, runtime src->p). One block per
-// target leaf; BLOCK must be >= the target leaf_size so every leaf point maps to
-// a distinct thread.
+// Dispatch the fused L2P+P2P leaf kernel on (compile-time FIELD, runtime src->p). One block per
+// target leaf; BLOCK must be >= the target leaf_size so every leaf point maps to a distinct thread.
 #define BH_LAUNCH_DTT(FIELD, GRID, BLOCK, ...)                                     \
   do {                                                                             \
     switch (src->p) {                                                              \
-      case 1: dtt_eval_kernel<FIELD,1><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
-      case 2: dtt_eval_kernel<FIELD,2><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
-      case 3: dtt_eval_kernel<FIELD,3><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
-      case 4: dtt_eval_kernel<FIELD,4><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
-      case 5: dtt_eval_kernel<FIELD,5><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
-      case 6: dtt_eval_kernel<FIELD,6><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
-      case 7: dtt_eval_kernel<FIELD,7><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
-      case 8: dtt_eval_kernel<FIELD,8><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
-      case 9: dtt_eval_kernel<FIELD,9><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;    \
-      default: dtt_eval_kernel<FIELD,10><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;  \
+      case 1: l2p_p2p_kernel<FIELD,1><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
+      case 2: l2p_p2p_kernel<FIELD,2><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
+      case 3: l2p_p2p_kernel<FIELD,3><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
+      case 4: l2p_p2p_kernel<FIELD,4><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
+      case 5: l2p_p2p_kernel<FIELD,5><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
+      case 6: l2p_p2p_kernel<FIELD,6><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
+      case 7: l2p_p2p_kernel<FIELD,7><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
+      case 8: l2p_p2p_kernel<FIELD,8><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
+      case 9: l2p_p2p_kernel<FIELD,9><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
+      default: l2p_p2p_kernel<FIELD,10><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;   \
     }                                                                              \
   } while (0)
 
@@ -1322,9 +1236,11 @@ static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, i
   tt->comp      = comp_sph(p);
   tt->max_depth = 0;
   tt->n_box     = 0;
+  tt->n_p2p     = 0;
   tt->d_pos = tt->d_min = tt->d_max = tt->d_local = nullptr;
   tt->d_orig = tt->d_left = tt->d_right = tt->d_parent = nullptr;
   tt->d_first = tt->d_last = tt->d_leaf_nodes = tt->d_depth = tt->d_box_slot = nullptr;
+  tt->d_p2p_off = tt->d_p2p_val = nullptr;
   if (num_pts <= 0) return;
 
   const int N  = num_pts;
@@ -1484,6 +1400,7 @@ static void free_target_tree(bh_target_tree *tt) {
   cudaFree(tt->d_first);  cudaFree(tt->d_last);
   cudaFree(tt->d_leaf_nodes);
   cudaFree(tt->d_local);  cudaFree(tt->d_depth);  cudaFree(tt->d_box_slot);
+  cudaFree(tt->d_p2p_off); cudaFree(tt->d_p2p_val);
 }
 
 // ====================================================================
@@ -1493,15 +1410,16 @@ static void free_target_tree(bh_target_tree *tt) {
 // ====================================================================
 
 // One BFS round over (target node A, source node B) pairs. Well-separated pairs emit an
-// M2L entry; pairs whose two sides are both leaf-size cells are NEAR pairs handled by the
-// per-leaf P2P descent (dropped here); otherwise the larger cell is split and its two child
-// pairs enqueued. The two-sided MAC is identical to the leaf kernel's. Geometry only -> not
-// templated on the order. cap_* guard the worklists; the host retries with bigger buffers if
-// the true counts (returned by the atomics) exceed them.
+// M2L entry; pairs whose two sides are both leaf-size cells are NEAR pairs emitted to the
+// P2P worklist (later grouped by target leaf into a CSR for the fused L2P+P2P kernel);
+// otherwise the larger cell is split and its two child pairs enqueued. The two-sided MAC is
+// identical to the leaf kernel's. Geometry only -> not templated on the order. cap_* guard the
+// worklists; the host retries with bigger buffers if the true counts (from the atomics) exceed them.
 __global__ void dtt_pair_kernel(bh_tree src, bh_target_tree tgt, double theta,
                                 const int2 *__restrict__ cur, int n_cur,
                                 int2 *__restrict__ nxt, int *__restrict__ n_nxt, int cap_nxt,
-                                int2 *__restrict__ m2l, int *__restrict__ n_m2l, int cap_m2l) {
+                                int2 *__restrict__ m2l, int *__restrict__ n_m2l, int cap_m2l,
+                                int2 *__restrict__ p2p, int *__restrict__ n_p2p, int cap_p2p) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n_cur) return;
   int A = cur[i].x, B = cur[i].y;
@@ -1529,7 +1447,11 @@ __global__ void dtt_pair_kernel(bh_tree src, bh_target_tree tgt, double theta,
   int bcnt = src.d_last[B] - src.d_first[B] + 1;
   bool A_leaf = (A >= tgt.N - 1) || (acnt <= tgt.leaf_size);
   bool B_leaf = (B >= src.N - 1) || (bcnt <= src.leaf_size);
-  if (A_leaf && B_leaf) return;                         // near pair -> per-leaf P2P descent
+  if (A_leaf && B_leaf) {                               // near pair -> P2P list (keyed by target leaf A)
+    int o = atomicAdd(n_p2p, 1);
+    if (o < cap_p2p) p2p[o] = make_int2(A, B);
+    return;
+  }
   bool split_A = A_leaf ? false : (B_leaf ? true : (rA >= rB));   // split the larger
   int o = atomicAdd(n_nxt, 2);
   if (o + 1 < cap_nxt) {
@@ -1588,47 +1510,66 @@ __global__ void l2l_level_kernel(bh_target_tree tgt, int lvl) {
             tgt.d_local + (size_t)sv * COMP_DBL);
 }
 
-// Pair-BFS host loop. Grows the worklists and retries from scratch on overflow (the atomic
-// counters report the TRUE counts even past the cap, so doubling always converges). Returns
-// the M2L pair count and hands back the device pair array (caller frees).
+// Pair-BFS host loop. Returns the M2L pair count and the near P2P pair count, handing back both
+// raw device pair arrays (caller frees). The P2P pairs are unsorted (A,B); fmm_build_p2p_csr
+// groups them by target.
+//
+// Two distinct overflow regimes, handled separately (at small theta the interaction lists are
+// large -- O(theta^-3) -- so naive doubling restarts the whole O(N) traversal many times):
+//   * Frontier (per-level live split-pairs): can't know its peak ahead of time; if it overflows
+//     the descent aborts early (counts are partial) -> grow x4 and redo. Small, rarely binds.
+//   * Cumulative M2L / P2P lists: the atomic counters report the EXACT totals even past the cap,
+//     so on overflow we resize straight to the true size (+ margin) and redo exactly ONCE -- no
+//     doubling spiral.
 static int fmm_pair_traverse(const bh_tree &src, bh_target_tree &tt, double theta,
-                             int2 *&d_m2l_out) {
-  // Start near the expected scale (M2L pairs ~ O(n_box) with the interaction-list constant)
-  // so the grow-on-overflow retry rarely fires; it still covers any underestimate.
-  int cap_front = 1 << 16, cap_m2l = 1 << 16;
-  while (32 * tt.n_box > cap_m2l && cap_m2l < (1 << 27)) { cap_front <<= 1; cap_m2l <<= 1; }
+                             int2 *&d_m2l_out, int2 *&d_p2p_out, int &n_p2p_out) {
+  // Seed the cumulative caps from a generous interaction-list estimate so the common case is a
+  // single pass; the exact-resize below is the safety net when this still underestimates.
+  int cap_m2l = 1 << 18;
+  while ((size_t)cap_m2l < (size_t)64 * tt.n_box && cap_m2l < (1 << 27)) cap_m2l <<= 1;
+  int cap_p2p   = cap_m2l;
+  int cap_front = cap_m2l;   // per-level frontier is <= the cumulative totals; same seed, grows x4 if it binds
   while (true) {
-    int2 *d_cur, *d_nxt, *d_m2l; int *d_cnt;   // d_cnt[0]=n_nxt, d_cnt[1]=n_m2l
+    int2 *d_cur, *d_nxt, *d_m2l, *d_p2p; int *d_cnt;   // d_cnt[0]=n_nxt, [1]=n_m2l, [2]=n_p2p
     CUDA_CHECK(cudaMalloc(&d_cur, (size_t)cap_front * sizeof(int2)));
     CUDA_CHECK(cudaMalloc(&d_nxt, (size_t)cap_front * sizeof(int2)));
     CUDA_CHECK(cudaMalloc(&d_m2l, (size_t)cap_m2l   * sizeof(int2)));
-    CUDA_CHECK(cudaMalloc(&d_cnt, 2 * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_p2p, (size_t)cap_p2p   * sizeof(int2)));
+    CUDA_CHECK(cudaMalloc(&d_cnt, 3 * sizeof(int)));
     int2 seed = make_int2(0, 0);
     CUDA_CHECK(cudaMemcpy(d_cur, &seed, sizeof(int2), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(&d_cnt[1], 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(&d_cnt[1], 0, 2 * sizeof(int)));   // zero n_m2l and n_p2p
 
-    int n_cur = 1; bool overflow = false;
+    int n_cur = 1; bool front_overflow = false;
     while (n_cur > 0) {
       CUDA_CHECK(cudaMemset(&d_cnt[0], 0, sizeof(int)));
       int tpb = 128, g = (n_cur + tpb - 1) / tpb;
       dtt_pair_kernel<<<g, tpb>>>(src, tt, theta, d_cur, n_cur,
-                                  d_nxt, &d_cnt[0], cap_front, d_m2l, &d_cnt[1], cap_m2l);
+                                  d_nxt, &d_cnt[0], cap_front, d_m2l, &d_cnt[1], cap_m2l,
+                                  d_p2p, &d_cnt[2], cap_p2p);
       CUDA_CHECK(cudaGetLastError());
       int n_nxt; CUDA_CHECK(cudaMemcpy(&n_nxt, &d_cnt[0], sizeof(int), cudaMemcpyDeviceToHost));
-      if (n_nxt > cap_front) { overflow = true; break; }
+      if (n_nxt > cap_front) { front_overflow = true; break; }
       int2 *tmp = d_cur; d_cur = d_nxt; d_nxt = tmp; n_cur = n_nxt;
     }
-    int n_m2l; CUDA_CHECK(cudaMemcpy(&n_m2l, &d_cnt[1], sizeof(int), cudaMemcpyDeviceToHost));
-    if (n_m2l > cap_m2l) overflow = true;
+    int cnt[3]; CUDA_CHECK(cudaMemcpy(cnt, d_cnt, 3 * sizeof(int), cudaMemcpyDeviceToHost));
     cudaFree(d_cur); cudaFree(d_nxt); cudaFree(d_cnt);
-    if (overflow) {
-      cudaFree(d_m2l);
-      fprintf(stderr, "[fmm] pair worklist overflow (front=%d m2l=%d); retrying x2\n",
-              cap_front, cap_m2l);
-      cap_front *= 2; cap_m2l *= 2;
+
+    if (front_overflow) {                         // partial counts -> grow frontier and redo
+      cudaFree(d_m2l); cudaFree(d_p2p);
+      cap_front *= 4;
+      continue;
+    }
+    int n_m2l = cnt[1], n_p2p = cnt[2];            // descent completed -> these are EXACT totals
+    if (n_m2l > cap_m2l || n_p2p > cap_p2p) {
+      cudaFree(d_m2l); cudaFree(d_p2p);
+      if (n_m2l > cap_m2l) cap_m2l = n_m2l + (n_m2l >> 4) + 1024;   // resize to exact (+ ~6%)
+      if (n_p2p > cap_p2p) cap_p2p = n_p2p + (n_p2p >> 4) + 1024;
       continue;
     }
     d_m2l_out = d_m2l;
+    d_p2p_out = d_p2p;
+    n_p2p_out = n_p2p;
     return n_m2l;
   }
 }
@@ -1650,10 +1591,67 @@ static void fmm_translations(const bh_tree &src, bh_target_tree &tt,
   }
 }
 
-// Build every target node's complete far-field local expansion into tt.d_local.
+// Count near pairs per target node A (CSR row sizes). key = pairs[i].x = target leaf node id.
+__global__ void p2p_count_kernel(const int2 *__restrict__ pairs, int n_pairs,
+                                 int *__restrict__ cnt) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n_pairs) return;
+  atomicAdd(&cnt[pairs[i].x], 1);
+}
+
+// Scatter each near pair's source-leaf B into its target node's CSR segment. Intra-segment
+// order is non-deterministic (atomic fill) -- fine: P2P sum order already differs from the
+// host basis (parity ~1e-10, not bit-exact).
+__global__ void p2p_scatter_kernel(const int2 *__restrict__ pairs, int n_pairs,
+                                   const int *__restrict__ off, int *__restrict__ fill,
+                                   int *__restrict__ val) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n_pairs) return;
+  int A = pairs[i].x, B = pairs[i].y;
+  val[off[A] + atomicAdd(&fill[A], 1)] = B;
+}
+
+// Group the raw near (A,B) pairs into a CSR keyed by target node id: counting sort over
+// n_nodes buckets. Populates tt.{n_p2p, d_p2p_off[n_nodes+1], d_p2p_val[n_p2p]}.
+static void fmm_build_p2p_csr(bh_target_tree &tt, const int2 *d_p2p, int n_p2p) {
+  int nn = tt.n_nodes;
+  tt.n_p2p = n_p2p;
+  CUDA_CHECK(cudaMalloc(&tt.d_p2p_off, (size_t)(nn + 1) * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt.d_p2p_val, (size_t)(n_p2p > 0 ? n_p2p : 1) * sizeof(int)));
+
+  int *d_cnt, *d_fill;
+  CUDA_CHECK(cudaMalloc(&d_cnt,  (size_t)nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_fill, (size_t)nn * sizeof(int)));
+  CUDA_CHECK(cudaMemset(d_cnt,  0, (size_t)nn * sizeof(int)));
+  CUDA_CHECK(cudaMemset(d_fill, 0, (size_t)nn * sizeof(int)));
+
+  if (n_p2p > 0) {
+    int tpb = 128, g = (n_p2p + tpb - 1) / tpb;
+    p2p_count_kernel<<<g, tpb>>>(d_p2p, n_p2p, d_cnt);
+    CUDA_CHECK(cudaGetLastError());
+  }
+  // exclusive scan of the bucket counts -> CSR offsets off[0..nn-1]; off[nn] = total.
+  { void *d_t = nullptr; size_t tb = 0;
+    cub::DeviceScan::ExclusiveSum(d_t, tb, d_cnt, tt.d_p2p_off, nn);
+    CUDA_CHECK(cudaMalloc(&d_t, tb));
+    cub::DeviceScan::ExclusiveSum(d_t, tb, d_cnt, tt.d_p2p_off, nn);
+    cudaFree(d_t); }
+  CUDA_CHECK(cudaMemcpy(tt.d_p2p_off + nn, &n_p2p, sizeof(int), cudaMemcpyHostToDevice));
+  if (n_p2p > 0) {
+    int tpb = 128, g = (n_p2p + tpb - 1) / tpb;
+    p2p_scatter_kernel<<<g, tpb>>>(d_p2p, n_p2p, tt.d_p2p_off, d_fill, tt.d_p2p_val);
+    CUDA_CHECK(cudaGetLastError());
+  }
+  cudaFree(d_cnt); cudaFree(d_fill);
+}
+
+// Build every target node's complete far-field local expansion into tt.d_local, and the
+// near-field P2P CSR (tt.d_p2p_*). One pair-DTT pass feeds both.
 static void fmm_build_local(const bh_tree &src, bh_target_tree &tt, double theta) {
-  int2 *d_m2l = nullptr;
-  int   n_m2l = fmm_pair_traverse(src, tt, theta, d_m2l);
+  int2 *d_m2l = nullptr, *d_p2p = nullptr; int n_p2p = 0;
+  int   n_m2l = fmm_pair_traverse(src, tt, theta, d_m2l, d_p2p, n_p2p);
+  fmm_build_p2p_csr(tt, d_p2p, n_p2p);
+  cudaFree(d_p2p);
   switch (tt.p) {
     case 1: fmm_translations<1>(src, tt, d_m2l, n_m2l); break;
     case 2: fmm_translations<2>(src, tt, d_m2l, n_m2l); break;
@@ -1887,11 +1885,11 @@ double bh_polarization_energy_dtt(bh_tree *src, int num_pts,
   bh_target_tree tt;
   build_target_tree(num_pts, d_V, tleaf, src->p, &tt);
 
-  int block = DTT_BDIM;   // fixed cooperative width (must match cub::BlockScan<DTT_BDIM>)
+  int block = DTT_BDIM;   // one target point per thread; >= target leaf_size
   int grid  = tt.n_leaves;
   if (grid > 0) {
-    fmm_build_local(*src, tt, src->theta);   // M2L + L2L -> per-node far-field local expansions
-    BH_LAUNCH_DTT(false, grid, block, *src, tt, src->theta,
+    fmm_build_local(*src, tt, src->theta);   // M2L+L2L -> d_local (far); P2P CSR (near)
+    BH_LAUNCH_DTT(false, grid, block, *src, tt,
                   d_flux, nullptr, nullptr, nullptr, 0.0, d_partial);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -1926,11 +1924,11 @@ double bh_ionic_energy_dtt(bh_tree *src, int num_tri_verts,
   bh_target_tree tt;
   build_target_tree(num_tri_verts, d_vert, tleaf, src->p, &tt);
 
-  int block = DTT_BDIM;   // fixed cooperative width (must match cub::BlockScan<DTT_BDIM>)
+  int block = DTT_BDIM;   // one target point per thread; >= target leaf_size
   int grid  = tt.n_leaves;
   if (grid > 0) {
-    fmm_build_local(*src, tt, src->theta);   // M2L + L2L -> per-node far-field local expansions
-    BH_LAUNCH_DTT(true, grid, block, *src, tt, src->theta,
+    fmm_build_local(*src, tt, src->theta);   // M2L+L2L -> d_local (far); P2P CSR (near)
+    BH_LAUNCH_DTT(true, grid, block, *src, tt,
                   nullptr, d_norms, d_phi, d_area, inv_4pi, d_partial);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
