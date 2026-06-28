@@ -22,8 +22,8 @@ calc_coulombic = 1
 
 [algorithm]
 linear_solver = amgx
-use_gpu       = 1
-bh_theta      = 0.4
-bh_order      = 6
-bh_leaf_size  = 256
+energy_method       = 2
+fmm_mac             = 0.4
+fmm_multipole_order = 6
+fmm_leaf_size       = 256
 [../]

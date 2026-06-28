@@ -14,7 +14,7 @@
 set -euo pipefail
 module load singularity
 
-# --- The sweep: one bh_leaf_size per array index ---
+# --- The sweep: one fmm_leaf_size per array index ---
 LEAF_SIZES=(64 128 256 512 1024)
 LEAF=${LEAF_SIZES[$SLURM_ARRAY_TASK_ID]}
 
@@ -25,10 +25,10 @@ RUNDIR="$BASE/leaf_${LEAF}"
 # Per-task working dir: own options.prm + own copy of the pqr, so outputs never collide.
 mkdir -p "$RUNDIR"
 cp "$BASE/6VYB.pqr" "$RUNDIR/"
-sed "s/^bh_leaf_size.*/bh_leaf_size  = ${LEAF}/" "$BASE/options.prm" > "$RUNDIR/options.prm"
+sed "s/^fmm_leaf_size.*/fmm_leaf_size       = ${LEAF}/" "$BASE/options.prm" > "$RUNDIR/options.prm"
 
 cd "$RUNDIR"
-echo "Task $SLURM_ARRAY_TASK_ID : bh_leaf_size=$LEAF  host=$(hostname)"
+echo "Task $SLURM_ARRAY_TASK_ID : fmm_leaf_size=$LEAF  host=$(hostname)"
 
 singularity exec --nv "$SIF" \
     mpirun -n "$SLURM_NTASKS" ngpb --prmfile options.prm

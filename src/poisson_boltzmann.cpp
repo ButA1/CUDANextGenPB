@@ -289,20 +289,20 @@ main (int argc, char **argv)
         pb.pot_field_fast (ray_cache);
 
         if (pb.calc_energy > pb.calc_potential_term && pb.calc_energy > pb.calc_field_term)
-          if (pb.use_gpu)
-            pb.energy_cuda_fast (ray_cache);
-          else
+          if (pb.energy_method == 0)
             pb.energy_fast (ray_cache);
+          else
+            pb.energy_cuda_fast (ray_cache);
       }
     } else {
       if (refined)
         pb.energy (ray_cache);
       else
         // pb.pot_field_fast (ray_cache);
-        if (pb.use_gpu)          
-          pb.energy_cuda_fast (ray_cache);
-        else
+        if (pb.energy_method == 0)
           pb.energy_fast (ray_cache);
+        else
+          pb.energy_cuda_fast (ray_cache);
     }
 
 

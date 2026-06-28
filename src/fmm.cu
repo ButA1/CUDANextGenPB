@@ -1,19 +1,21 @@
 /*
- *  Barnes-Hut / FMM treecode (FMM Stage 2: complex spherical-harmonic moments).
+ *  FMM with complex spherical-harmonic moments (CGR'99 operator chain).
  *
  *  Multipole representation (Cheng, Greengard & Rokhlin 1999, JCP 155:468):
  *    - Per-node moments are complex M_n^m (CGR'99 Eq. 4 normalization), stored
  *      for the m>=0 half only (0<=m<=n<=p); M_n^{-m}=conj(M_n^m). Layout: doubles
  *      [re,im] at slot s=sph_slot(n,m). Count comp_sph(p) = (p+1)(p+2) doubles.
- *    - P2M: leaf monopole M_0^0 = q (ρ=0). M2M: T_MM (Eq. 13). M2P potential:
- *      irregular solid harmonics S_n^m = Y_n^m/r^{n+1} contracted with the moments
- *      (Eq. 5). M2P field (E_ion): exact gradient of the potential expansion via
- *      forward-mode automatic differentiation (the `dual` scalar), so no separate
- *      solid-harmonic gradient recurrence is needed.
+ *    - P2M: leaf monopole M_0^0 = q (ρ=0). Upward pass M2M: T_MM (Eq. 13).
+ *      Downward pass M2L: T_ML (Eq. 17), L2L: T_LL (Eq. 21). Targets evaluate
+ *      their leaf's local expansion by L2P, plus a direct near field (P2P).
+ *      The potential uses the irregular/regular solid harmonics contracted with
+ *      the moments (Eq. 5/8); the field (E_ion) is the exact gradient of the same
+ *      expansion via forward-mode automatic differentiation (the `dual` scalar),
+ *      so no separate solid-harmonic gradient recurrence is needed.
  *
- *  Traversal: cooperative breadth-first (Stage 1) for the DTT path, private-stack
- *  DFS for the per-target treecode path. LBVH topology and the bbox/Morton/build
- *  kernels are unchanged.
+ *  Traversal: a single dual-tree pair traversal over the source (atom) tree and
+ *  an internally built target tree splits each cell pair into near (P2P) and far
+ *  (M2L) work. LBVH topology and the bbox/Morton/build kernels are unchanged.
  */
 
 #include <cuda_runtime.h>
@@ -36,27 +38,27 @@ static void check_cuda(cudaError_t err, const char *msg, int line) {
 
 // ====================================================================
 //  FMM Stage 2: complex spherical-harmonic multipole moments (CGR'99,
-//  J. Comput. Phys. 155:468). BH_MAX_P is the largest multipole order
+//  J. Comput. Phys. 155:468). FMM_MAX_P is the largest multipole order
 //  supported. Moments M_n^m are stored for the m>=0 half only (0<=m<=n<=p);
 //  the m<0 half is recovered by M_n^{-m} = conj(M_n^m) (Eq. 4 convention,
 //  no (-1)^m). The field (gradient) is obtained by forward-mode automatic
 //  differentiation of the potential expansion (see solid_harmonics / dual),
 //  so it needs no expansion above order p.
 // ====================================================================
-#define BH_MAX_P        10
-#define BH_MAX_2P       (2 * BH_MAX_P)        // 20; M2L builds irregular harmonics to order 2p
+#define FMM_MAX_P        10
+#define FMM_MAX_2P       (2 * FMM_MAX_P)        // 20; M2L builds irregular harmonics to order 2p
 // Highest factorial index needed. M2L (Eq.17) and the order-2p solid harmonics both touch
 // (l+|q|) with l <= 2p, |q| <= l, hence up to 4p:  A_{j+n}^{m-k} and sqrt((n-m)!/(n+m)!) at n=2p.
-#define BH_FACT_MAX     (4 * BH_MAX_P)        // 40
+#define FMM_FACT_MAX     (4 * FMM_MAX_P)        // 40
 
 // # complex moments per node for orders 0..p, m in [0,n] (the stored m>=0 half).
 __host__ __device__ constexpr int nmom_sph(int p) { return (p + 1) * (p + 2) / 2; }
 // # doubles per node = 2 * complex count (interleaved re,im at slot s -> [2s],[2s+1]).
 __host__ __device__ constexpr int comp_sph(int p) { return (p + 1) * (p + 2); }
-#define BH_NMOM_MAX   nmom_sph(BH_MAX_P)    // 66  (order-p harmonic buffer)
-#define BH_NMOM_2MAX  nmom_sph(BH_MAX_2P)   // 231 (order-2p harmonic buffer, M2L only)
+#define FMM_NMOM_MAX   nmom_sph(FMM_MAX_P)    // 66  (order-p harmonic buffer)
+#define FMM_NMOM_2MAX  nmom_sph(FMM_MAX_2P)   // 231 (order-2p harmonic buffer, M2L only)
 
-// runtime doubles-per-node for a given order (host alloc / bh_tree.comp)
+// runtime doubles-per-node for a given order (host alloc / fmm_tree.comp)
 __host__ __device__ __forceinline__ int comp_of(int p) { return comp_sph(p); }
 
 // linear slot for (n,m) with 0 <= m <= n :  s = n(n+1)/2 + m
@@ -133,10 +135,10 @@ __host__ __device__ __forceinline__ cmplx conjc(cmplx a) { return cmplx(a.re, -a
 //    index N-1 .. 2N-2  : leaf nodes  (leaf k at index (N-1)+k)
 //  "is leaf" test: idx >= N-1 (also correct for N==1).
 // ====================================================================
-struct bh_tree {
+struct fmm_tree {
   int     N;          // number of atoms (leaves)
   int     n_nodes;    // 2N - 1
-  int     p;          // multipole order in [1, BH_MAX_P]
+  int     p;          // multipole order in [1, FMM_MAX_P]
   int     comp;       // moments per node = COMP(p)
   int     leaf_size;  // max atoms per terminal cluster (P2P cutoff)
   double  theta;
@@ -162,14 +164,14 @@ struct bh_tree {
 };
 
 // ====================================================================
-//  Target tree (geometry only) for the DTT energy path. Same 2N-1 LBVH
-//  layout as bh_tree but carries no charges or multipole moments -- targets
+//  Target tree (geometry only) for the FMM energy path. Same 2N-1 LBVH
+//  layout as fmm_tree but carries no charges or multipole moments -- targets
 //  are only grouped into cells so one CUDA block can serve a whole leaf.
-//  d_orig[sorted] -> original (caller) point index, so per-target weights
+//  d_orig[sorted] -> original (caller) point index, so per-point weights
 //  (flux / norms / phi_sup / area[i/3]) are read in the caller's order and
 //  results scatter back to the original layout.
 // ====================================================================
-struct bh_target_tree {
+struct fmm_target_tree {
   int     N;          // number of target points (leaves)
   int     n_nodes;    // 2N - 1
   int     leaf_size;  // max points per terminal cluster
@@ -203,7 +205,7 @@ struct bh_target_tree {
   int     max_depth;  // deepest BOX-node depth (host copy; bounds the L2L level loop)
 
   // ---- near-field P2P interaction lists (CSR, grouped by target-leaf node A) ----
-  // The pair-DTT emits near (leaf,leaf) pairs; a counting sort by A groups them so the
+  // The pair traversal emits near (leaf,leaf) pairs; a counting sort by A groups them so the
   // fused L2P+P2P kernel walks each leaf's near source leaves directly -- no per-leaf
   // BFS descent, no shared frontier. d_p2p_off is indexed by node id (target leaf A);
   // d_p2p_val[off[A] .. off[A+1]) are that leaf's near SOURCE leaf node ids.
@@ -218,9 +220,9 @@ struct bh_target_tree {
 //    c_A[idx]  = A_n^m = (-1)^n / sqrt((n-m)!(n+m)!)   (CGR'99 Eq. 14)
 //                idx = n*n + (m+n), m in [-n, n]
 // ====================================================================
-__constant__ double c_fact[BH_FACT_MAX + 1];
+__constant__ double c_fact[FMM_FACT_MAX + 1];
 // A_n^m table to degree 2p: M2L (Eq.17) indexes A_{j+n}^{m-k} with degree j+n up to 2p.
-__constant__ double c_A[(BH_MAX_2P + 1) * (BH_MAX_2P + 1)];
+__constant__ double c_A[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
 
 __device__ __forceinline__ double fact_dev(int k) { return c_fact[k]; }
 __device__ __forceinline__ double A_nm(int n, int m) { return c_A[n * n + (m + n)]; }
@@ -230,12 +232,12 @@ static void init_constant_tables() {
   static bool initialized = false;
   if (initialized) return;
 
-  double h_fact[BH_FACT_MAX + 1];
+  double h_fact[FMM_FACT_MAX + 1];
   h_fact[0] = 1.0;
-  for (int k = 1; k <= BH_FACT_MAX; ++k) h_fact[k] = h_fact[k - 1] * (double)k;
+  for (int k = 1; k <= FMM_FACT_MAX; ++k) h_fact[k] = h_fact[k - 1] * (double)k;
 
-  double h_A[(BH_MAX_2P + 1) * (BH_MAX_2P + 1)];
-  for (int n = 0; n <= BH_MAX_2P; ++n) {
+  double h_A[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
+  for (int n = 0; n <= FMM_MAX_2P; ++n) {
     double sgn = (n & 1) ? -1.0 : 1.0;
     for (int m = -n; m <= n; ++m)
       h_A[n * n + (m + n)] = sgn / sqrt(h_fact[n - m] * h_fact[n + m]);
@@ -260,9 +262,9 @@ __host__ __device__ __forceinline__ double val(dual a)   { return a.v; }
 //  (the gradient falls out by forward-mode AD, no derivative recurrence).
 // ====================================================================
 // NMOMCAP / DEGCAP size the per-thread scratch; defaults cover order p (the hot M2P/M2M
-// path). M2L passes the order-2p caps (BH_NMOM_2MAX / BH_MAX_2P) so only that call pays for
+// path). M2L passes the order-2p caps (FMM_NMOM_2MAX / FMM_MAX_2P) so only that call pays for
 // the larger scratch -- the order-p instantiations keep their small stack frames.
-template<class T, bool REGULAR, int NMOMCAP = BH_NMOM_MAX, int DEGCAP = BH_MAX_P>
+template<class T, bool REGULAR, int NMOMCAP = FMM_NMOM_MAX, int DEGCAP = FMM_MAX_P>
 __device__ void solid_harmonics(int maxn, T x, T y, T z, cT<T>* out) {
   if constexpr (REGULAR) {
     // Regular solid harmonics G_n^m = r^n Y_n^m (CGR'99 Eq.4 normalization), m>=0 half,
@@ -531,10 +533,6 @@ __global__ void build_internal_kernel(int n, const uint64_t *__restrict__ codes,
 // ====================================================================
 //  Kernel 5: bottom-up multipole summarize (M2M upward pass)
 // ====================================================================
-// recover p from the doubles-per-node count: comp = comp_sph(p) = (p+1)(p+2).
-__device__ __forceinline__ int p_from_comp(int comp) {
-  int p = 0; while (comp_sph(p) < comp) ++p; return p;
-}
 __device__ __forceinline__ int iabs(int a) { return a < 0 ? -a : a; }
 
 // Multipole-to-multipole translation T_MM (CGR'99 Thm 2.3, Eq. 13), shifting a
@@ -544,15 +542,14 @@ __device__ __forceinline__ int iabs(int a) { return a < 0 ? -a : a; }
 //   M_j^k += Σ_{n=0}^{j} Σ_{m=-n}^{n} O_{j-n}^{k-m} · i^{|k|-|m|-|k-m|}
 //                · A_n^m A_{j-n}^{k-m} / A_j^k · R_n^{-m}.
 // The phase i^{|k|-|m|-|k-m|} has an even exponent, hence the real (-1)^(e/2).
-__device__ void m2m_shift(int comp,
-                          const double *__restrict__ O,
+template<int P>
+__device__ void m2m_shift(const double *__restrict__ O,
                           double dx, double dy, double dz,
                           double *__restrict__ M) {
-  int p = p_from_comp(comp);
-  cmplx R[BH_NMOM_MAX];
-  solid_harmonics<double, true>(p, dx, dy, dz, R);   // R_n^m of shift, n<=p
+  cmplx R[nmom_sph(P)];
+  solid_harmonics<double, true, nmom_sph(P), P>(P, dx, dy, dz, R);   // R_n^m of shift, n<=P
 
-  for (int j = 0; j <= p; ++j)
+  for (int j = 0; j <= P; ++j)
     for (int k = 0; k <= j; ++k) {                   // store the m>=0 half only
       cmplx acc(0.0, 0.0);
       for (int n = 0; n <= j; ++n)
@@ -580,7 +577,7 @@ __device__ void m2m_shift(int comp,
 // Phase exponent |k-m|-|k|-|m| is even -> real (-1)^(e/2). S indices stay in range:
 // |m-k| <= |m|+|k| <= n+j = j+n, so no bounds guard is needed.
 // One output coefficient L_j^k of M2L (the inner (n,m) sum of Eq. 17). Factored out so
-// the full operator and the cooperative kernel (one thread per (j,k)) share the math.
+// the M2L accumulate kernel (m2l_accumulate_kernel) can reuse the per-coefficient math.
 __device__ __forceinline__ cmplx m2l_coeff(int p,
                                            const double *__restrict__ O,
                                            const cmplx  *__restrict__ S,
@@ -598,20 +595,6 @@ __device__ __forceinline__ cmplx m2l_coeff(int p,
   return acc;
 }
 
-__device__ void m2l_shift(int comp,
-                          const double *__restrict__ O,
-                          const cmplx  *__restrict__ S,   // irregular harmonics of t, order 2p
-                          double *__restrict__ L) {
-  int p = p_from_comp(comp);
-  for (int j = 0; j <= p; ++j)
-    for (int k = 0; k <= j; ++k) {                   // store the m>=0 half only
-      cmplx acc = m2l_coeff(p, O, S, j, k);
-      int s = sph_slot(j, k);
-      L[2 * s]     += acc.re;
-      L[2 * s + 1] += acc.im;
-    }
-}
-
 // Local-to-local translation T_LL (CGR'99 Thm 2.5, Eq. 21). Shifts a parent local
 // expansion {O} about the parent center to the child center and adds it into {L}.
 // The shift t = (parent center) - (child center) is encoded as the REGULAR solid
@@ -619,18 +602,17 @@ __device__ void m2l_shift(int comp,
 //   L_j^k += Σ_{n=j}^{p} Σ_{m=-n}^{n} O_n^m · i^{|m|-|m-k|-|k|}
 //                · A_{n-j}^{m-k} A_j^k / ((-1)^{n+j} A_n^m) · R_{n-j}^{m-k}.
 // Phase exponent is even -> real (-1)^(e/2). R_{n-j}^{m-k} requires |m-k| <= n-j (guard).
-__device__ void l2l_shift(int comp,
-                          const double *__restrict__ O,
+template<int P>
+__device__ void l2l_shift(const double *__restrict__ O,
                           double dx, double dy, double dz,   // t = parent center - child center
                           double *__restrict__ L) {
-  int p = p_from_comp(comp);
-  cmplx R[BH_NMOM_MAX];
-  solid_harmonics<double, true>(p, dx, dy, dz, R);   // R_l^q of t, l<=p
+  cmplx R[nmom_sph(P)];
+  solid_harmonics<double, true, nmom_sph(P), P>(P, dx, dy, dz, R);   // R_l^q of t, l<=P
 
-  for (int j = 0; j <= p; ++j)
+  for (int j = 0; j <= P; ++j)
     for (int k = 0; k <= j; ++k) {                   // store the m>=0 half only
       cmplx acc(0.0, 0.0);
-      for (int n = j; n <= p; ++n)
+      for (int n = j; n <= P; ++n)
         for (int m = -n; m <= n; ++m) {
           int nj = n - j, mk = m - k;
           if (mk < -nj || mk > nj) continue;         // R_{nj}^{mk} needs |mk| <= nj
@@ -646,7 +628,8 @@ __device__ void l2l_shift(int comp,
     }
 }
 
-__global__ void summarize_kernel(int N, int comp,
+template<int P>
+__global__ void summarize_kernel(int N,
                                  const int *__restrict__ left,
                                  const int *__restrict__ right,
                                  const int *__restrict__ parent,
@@ -654,6 +637,7 @@ __global__ void summarize_kernel(int N, int comp,
                                  double *__restrict__ nmax,
                                  double *__restrict__ moments,
                                  int *__restrict__ flags) {
+  constexpr int comp = comp_sph(P);
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= N) return;
 
@@ -687,7 +671,7 @@ __global__ void summarize_kernel(int N, int comp,
       double ccy = 0.5 * (nmin[3*c+1] + nmax[3*c+1]);
       double ccz = 0.5 * (nmin[3*c+2] + nmax[3*c+2]);
       const double *mc = moments + (size_t)c * comp;
-      m2m_shift(comp, mc, ccx - cx, ccy - cy, ccz - cz, mp);
+      m2m_shift<P>(mc, ccx - cx, ccy - cy, ccz - cz, mp);
     }
 
     node = parent[node];
@@ -834,223 +818,24 @@ __device__ __forceinline__ void l2p_field(int p, const double *__restrict__ L,
   mp_field_eval_sph(p, L, R, gx, gy, gz);
 }
 
-template<bool FIELD, int P>
-__device__ void traverse(double tx, double ty, double tz, int self_atom,
-                         const bh_tree t,
-                         double &out_phi, double &gx, double &gy, double &gz) {
-  out_phi = 0.0; gx = gy = gz = 0.0;
-  const double theta2 = t.theta * t.theta;
-  const int leaf_size = t.leaf_size;
-
-  constexpr int NM       = nmom_sph(P);   // # complex moments per node (m>=0 half)
-  constexpr int COMP_DBL = comp_sph(P);   // # doubles per node
-  // The per-thread solid-harmonic buffer is declared inside the far-field branch
-  // (cmplx for the potential, dual-complex for the field).
-
-  // Binary radix tree over 63-bit Morton codes has depth ~< 63 plus duplicate
-  // index tie-break; 96 leaves comfortable margin on the DFS stack.
-  int stack[96];
-  int sp = 0;
-  stack[sp++] = 0;
-
-  while (sp > 0) {
-    int node = stack[--sp];
-    // load each AABB bound once; reused for both the center and the extent
-    double mnx = t.d_min[3*node],   mxx = t.d_max[3*node];
-    double mny = t.d_min[3*node+1], mxy = t.d_max[3*node+1];
-    double mnz = t.d_min[3*node+2], mxz = t.d_max[3*node+2];
-    double cx = 0.5 * (mnx + mxx);
-    double cy = 0.5 * (mny + mxy);
-    double cz = 0.5 * (mnz + mxz);
-    double Rx = tx - cx, Ry = ty - cy, Rz = tz - cz;
-    double dist2 = Rx*Rx + Ry*Ry + Rz*Rz;
-
-    // MAC: accept cell if (size / dist) < theta  <=>  size^2 < theta^2 * dist^2
-    double ex = mxx - mnx, ey = mxy - mny, ez = mxz - mnz;
-    double size = fmax(ex, fmax(ey, ez));
-
-    if (dist2 > 0.0 && size*size < theta2 * dist2) {
-      // far enough: particle-cluster multipole (M2P) interaction.
-      const double *m = t.d_moments + (size_t)node * COMP_DBL;
-      if constexpr (FIELD) {
-        cT<dual> S[NM];
-        solid_harmonics<dual, false>(P, dual(Rx, 1.0, 0.0, 0.0),
-                                        dual(Ry, 0.0, 1.0, 0.0),
-                                        dual(Rz, 0.0, 0.0, 1.0), S);
-        mp_field_eval_sph(P, m, S, gx, gy, gz);
-      } else {
-        cmplx S[NM];
-        solid_harmonics<double, false>(P, Rx, Ry, Rz, S);
-        out_phi += mp_potential_eval_sph(P, m, S);
-      }
-      continue;
-    }
-
-    int cnt = t.d_last[node] - t.d_first[node] + 1;
-    if (cnt <= leaf_size) {
-      // terminal cluster: resolve its atoms by direct particle-particle sums
-      int a0 = t.d_first[node], a1 = t.d_last[node];
-      for (int a = a0; a <= a1; ++a) {
-        if (a == self_atom) continue;
-        double rx = tx - t.d_pos[3*a], ry = ty - t.d_pos[3*a+1], rz = tz - t.d_pos[3*a+2];
-        double d2 = rx*rx + ry*ry + rz*rz;
-        if (d2 <= 0.0) continue;
-        double q = t.d_q[a];
-        double inv_r = rsqrt(d2);
-        if constexpr (FIELD) {
-          // hoist q/r^3 so each component update is a single FMA
-          double qir3 = q * inv_r * inv_r * inv_r;
-          gx += qir3 * rx;
-          gy += qir3 * ry;
-          gz += qir3 * rz;
-        } else {
-          out_phi += q * inv_r;
-        }
-      }
-    } else {
-      stack[sp++] = t.d_left[node];
-      stack[sp++] = t.d_right[node];
-    }
-  }
-}
-
 // ====================================================================
-//  Target-side evaluation kernels (launched from the public C API)
-// ====================================================================
-template<int P>
-__global__ void coulomb_kernel(bh_tree t, double *__restrict__ partial) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= t.N) return;
-  double phi, gx, gy, gz;
-  traverse<false, P>(t.d_pos[3*i], t.d_pos[3*i+1], t.d_pos[3*i+2], i, t,
-                     phi, gx, gy, gz);
-  partial[i] = 0.5 * t.d_q[i] * phi;
-}
-
-template<int P>
-__global__ void potential_kernel(bh_tree t, int num_pts,
-                                 const double *__restrict__ V,
-                                 const double *__restrict__ flux,
-                                 double *__restrict__ partial) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= num_pts) return;
-  double phi, gx, gy, gz;
-  traverse<false, P>(V[3*i], V[3*i+1], V[3*i+2], -1, t, phi, gx, gy, gz);
-  partial[i] = flux[i] * phi;
-}
-
-template<int P>
-__global__ void field_kernel(bh_tree t, int num_tri_verts,
-                             const double *__restrict__ vert,
-                             const double *__restrict__ norms,
-                             const double *__restrict__ phi_sup,
-                             const double *__restrict__ area,
-                             double inv_4pi, double *__restrict__ partial) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= num_tri_verts) return;
-  double phi, gx, gy, gz;
-  traverse<true, P>(vert[3*i], vert[3*i+1], vert[3*i+2], -1, t, phi, gx, gy, gz);
-  double dot    = gx*norms[3*i] + gy*norms[3*i+1] + gz*norms[3*i+2];
-  double factor = phi_sup[i] * inv_4pi * area[i / 3] / 3.0;
-  partial[i] = dot * factor;
-}
-
-// ====================================================================
-//  DTT evaluation kernel (FMM Stage 1): one CUDA block per target leaf cell.
-//  The block descends the source (atom) tree ONCE, cooperatively and
-//  breadth-first (Bonsai; Bedorf, Gaburov & Portegies Zwart 2012, sec. 2.2):
-//  each step the DTT_BDIM threads test DTT_BDIM source nodes in parallel against
-//  a two-sided MAC (source cell vs the whole target leaf), and a block prefix-sum
-//  (cub::BlockScan) compacts the survivors into per-block lists -- admissible
-//  source cells -> M2P list, terminal source clusters -> P2P list, internal nodes
-//  -> the next BFS level. The lists hold node INDICES; the expensive FP64 payload
-//  then runs over the shared list with one target point per thread, reading
-//  moments / particles from global. This removes the per-thread redundant descent
-//  of the old private-stack DFS and materializes exactly the admissible-cell list
-//  that M2L will consume (Stage 3). Far field is still M2P (no M2L yet). Targets
-//  != sources, so no self-exclusion. Weights and the final scatter use the
-//  original (caller) point order via tgt.d_orig.
+//  FMM target-leaf evaluation. One CUDA block per target leaf cell. The
+//  near/far split is decided once by the pair traversal (fmm_pair_kernel):
+//  far interactions are folded into each leaf's local expansion (M2L + L2L,
+//  stored in tgt.d_local) and the near source leaves are listed per target
+//  leaf in the P2P CSR (tgt.d_p2p_*). The fused kernel below then evaluates,
+//  per target point, the local expansion (L2P) plus the direct near field
+//  (P2P). Targets != sources, so no self-exclusion. Weights and the final
+//  scatter use the original (caller) point order via tgt.d_orig.
 // ====================================================================
 
 // Leaf-kernel block width = launch blockDim. Target leaves hold <= 256 points, so 256
 // threads always cover a leaf (one target point per thread in the fused L2P+P2P kernel).
-constexpr int DTT_BDIM      = 256;
-
-// M2P drain: each active thread evaluates the admissible-cell list into its own
-// target point. Verbatim multipole math from the old kernel; moments from global.
-template<bool FIELD, int P>
-__device__ void dtt_drain_m2p(const bh_tree &src,
-                                             const int *__restrict__ list, int n, bool active,
-                                             double px, double py, double pz,
-                                             double &phi, double &gx, double &gy, double &gz) {
-  if (!active) return;
-  constexpr int NM       = nmom_sph(P);
-  constexpr int COMP_DBL = comp_sph(P);
-  for (int j = 0; j < n; ++j) {
-    int B = list[j];
-    double Bcx = 0.5*(src.d_min[3*B]   + src.d_max[3*B]);
-    double Bcy = 0.5*(src.d_min[3*B+1] + src.d_max[3*B+1]);
-    double Bcz = 0.5*(src.d_min[3*B+2] + src.d_max[3*B+2]);
-    double Rxp = px - Bcx, Ryp = py - Bcy, Rzp = pz - Bcz;
-    const double *m = src.d_moments + (size_t)B * COMP_DBL;
-    if constexpr (FIELD) {
-      cT<dual> S[NM];
-      solid_harmonics<dual, false>(P, dual(Rxp, 1.0, 0.0, 0.0),
-                                      dual(Ryp, 0.0, 1.0, 0.0),
-                                      dual(Rzp, 0.0, 0.0, 1.0), S);
-      mp_field_eval_sph(P, m, S, gx, gy, gz);
-    } else {
-      cmplx S[NM];
-      solid_harmonics<double, false>(P, Rxp, Ryp, Rzp, S);
-      phi += mp_potential_eval_sph(P, m, S);
-    }
-  }
-}
-
-// M2L drain (FMM, rung 3.1): translate each admissible source cell's multipole into the
-// block's shared local expansion sL about the target-leaf center Tc, accumulating ACROSS
-// drains (sL persists; the list is cleared after). FIELD-agnostic -- operates on the real
-// coefficient arrays; the leaf's L2P (later) produces potential or field from sL.
-//
-// Cooperative mapping (correctness-first; rung 3.2 will optimize): thread 0 builds the
-// order-2p irregular harmonics S(Bc-Tc) of the shift into shared sS once per source cell;
-// then threads [0,NM) each own one output coefficient (j,k) and add it into its own sL slot
-// (distinct slots -> no race). ALL threads must enter (block-wide __syncthreads inside), so
-// there is no `active` early-out here. n is the shared list count, uniform across the block.
-template<int P>
-__device__ void dtt_drain_m2l(const bh_tree &src,
-                              const int *__restrict__ list, int n,
-                              double Tcx, double Tcy, double Tcz,
-                              cmplx  *__restrict__ sS,     // shared scratch, nmom_sph(2P)
-                              double *__restrict__ sL) {   // shared local,   comp_sph(P)
-  constexpr int NM       = nmom_sph(P);
-  constexpr int COMP_DBL = comp_sph(P);
-  for (int e = 0; e < n; ++e) {
-    int B = list[e];
-    if (threadIdx.x == 0) {
-      double Bcx = 0.5*(src.d_min[3*B]   + src.d_max[3*B]);
-      double Bcy = 0.5*(src.d_min[3*B+1] + src.d_max[3*B+1]);
-      double Bcz = 0.5*(src.d_min[3*B+2] + src.d_max[3*B+2]);
-      // t = (source center) - (target center)  (Eq. 17 sign convention)
-      solid_harmonics<double, false, nmom_sph(2*P), 2*P>(2*P, Bcx-Tcx, Bcy-Tcy, Bcz-Tcz, sS);
-    }
-    __syncthreads();
-    if (threadIdx.x < NM) {
-      const double *O = src.d_moments + (size_t)B * COMP_DBL;
-      int s = threadIdx.x;
-      int j = 0; while (sph_slot(j + 1, 0) <= s) ++j;   // decode (j,k) from slot s
-      int k = s - sph_slot(j, 0);
-      cmplx acc = m2l_coeff(P, O, sS, j, k);
-      sL[2 * s]     += acc.re;
-      sL[2 * s + 1] += acc.im;
-    }
-    __syncthreads();
-  }
-}
+constexpr int FMM_BDIM      = 256;
 
 // P2P drain: each active thread direct-sums the terminal-leaf list into its point.
 template<bool FIELD>
-__device__ void dtt_drain_p2p(const bh_tree &src,
+__device__ void fmm_drain_p2p(const fmm_tree &src,
                                              const int *__restrict__ list, int n, bool active,
                                              double px, double py, double pz,
                                              double &phi, double &gx, double &gy, double &gz) {
@@ -1075,12 +860,12 @@ __device__ void dtt_drain_p2p(const bh_tree &src,
 }
 // ====================================================================
 // Fused near (P2P) + far (L2P) leaf kernel. One block per target leaf A. Each thread owns one
-// target point. The near/far split was already decided by the single pair-DTT pass: the far
+// target point. The near/far split was already decided by the single pair-traversal pass: the far
 // field sits in tgt.d_local (M2L + L2L), and this leaf's near source leaves are tgt.d_p2p_val
 // over the CSR segment [d_p2p_off[A], d_p2p_off[A+1]). No tree descent, no shared frontier, no
-// MAC here -- so no DTT_FRONT_CAP to overflow.
+// MAC here -- so no frontier cap to overflow.
 template<bool FIELD, int P>
-__global__ void l2p_p2p_kernel(bh_tree src, bh_target_tree tgt,
+__global__ void l2p_p2p_kernel(fmm_tree src, fmm_target_tree tgt,
                                const double *__restrict__ flux,    // pol   (FIELD=false)
                                const double *__restrict__ norms,   // ionic (FIELD=true)
                                const double *__restrict__ phi_sup,
@@ -1106,7 +891,7 @@ __global__ void l2p_p2p_kernel(bh_tree src, bh_target_tree tgt,
 
   // ---- near field: direct P2P over this leaf's CSR list of near source leaves ----
   int p0 = tgt.d_p2p_off[A], p1 = tgt.d_p2p_off[A + 1];
-  dtt_drain_p2p<FIELD>(src, tgt.d_p2p_val + p0, p1 - p0, active, px, py, pz, phi, gx, gy, gz);
+  fmm_drain_p2p<FIELD>(src, tgt.d_p2p_val + p0, p1 - p0, active, px, py, pz, phi, gx, gy, gz);
 
   // ---- L2P: evaluate this leaf's complete far-field local expansion d_local[A] at each
   // target point (relative to the leaf center) and add it to the per-point P2P near field.
@@ -1140,41 +925,29 @@ __global__ void l2p_p2p_kernel(bh_tree src, bh_target_tree tgt,
   }
 }
 
-// Dispatch a P-templated kernel on the runtime multipole order t->p (clamped to
-// [1, BH_MAX_P] at build time, so the default arm covers BH_MAX_P).
-#define BH_LAUNCH_BY_ORDER(KERNEL, GRID, BLOCK, ...)                      \
-  do {                                                                    \
-    switch (t->p) {                                                       \
-      case 1: KERNEL<1><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
-      case 2: KERNEL<2><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
-      case 3: KERNEL<3><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
-      case 4: KERNEL<4><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
-      case 5: KERNEL<5><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
-      case 6: KERNEL<6><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
-      case 7: KERNEL<7><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
-      case 8: KERNEL<8><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
-      case 9: KERNEL<9><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;         \
-      default: KERNEL<10><<<(GRID), (BLOCK)>>>(__VA_ARGS__); break;       \
-    }                                                                     \
-  } while (0)
-
-// Dispatch the fused L2P+P2P leaf kernel on (compile-time FIELD, runtime src->p). One block per
-// target leaf; BLOCK must be >= the target leaf_size so every leaf point maps to a distinct thread.
-#define BH_LAUNCH_DTT(FIELD, GRID, BLOCK, ...)                                     \
-  do {                                                                             \
-    switch (src->p) {                                                              \
-      case 1: l2p_p2p_kernel<FIELD,1><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
-      case 2: l2p_p2p_kernel<FIELD,2><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
-      case 3: l2p_p2p_kernel<FIELD,3><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
-      case 4: l2p_p2p_kernel<FIELD,4><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
-      case 5: l2p_p2p_kernel<FIELD,5><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
-      case 6: l2p_p2p_kernel<FIELD,6><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
-      case 7: l2p_p2p_kernel<FIELD,7><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
-      case 8: l2p_p2p_kernel<FIELD,8><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
-      case 9: l2p_p2p_kernel<FIELD,9><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;     \
-      default: l2p_p2p_kernel<FIELD,10><<<(GRID),(BLOCK)>>>(__VA_ARGS__); break;   \
-    }                                                                              \
-  } while (0)
+// Dispatch the fused L2P+P2P leaf kernel for the runtime multipole order p. l2p_p2p_kernel<FIELD,P>
+// is a distinct instantiation per order P (its harmonic buffers are sized at compile time), so we
+// switch p -> P here. One block per target leaf; block must be >= the target leaf_size so every
+// leaf point maps to a distinct thread.
+template<bool FIELD>
+static void launch_l2p_p2p(int p, int grid, int block,
+                           const fmm_tree &src, const fmm_target_tree &tgt,
+                           const double *flux, const double *norms,
+                           const double *phi_sup, const double *area,
+                           double inv_4pi, double *partial) {
+  switch (p) {
+    case 1: l2p_p2p_kernel<FIELD,1 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    case 2: l2p_p2p_kernel<FIELD,2 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    case 3: l2p_p2p_kernel<FIELD,3 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    case 4: l2p_p2p_kernel<FIELD,4 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    case 5: l2p_p2p_kernel<FIELD,5 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    case 6: l2p_p2p_kernel<FIELD,6 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    case 7: l2p_p2p_kernel<FIELD,7 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    case 8: l2p_p2p_kernel<FIELD,8 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    case 9: l2p_p2p_kernel<FIELD,9 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    default: l2p_p2p_kernel<FIELD,10><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+  }
+}
 
 // ====================================================================
 //  Host-side reduction (matches Phase 0 summation order for A/B parity)
@@ -1203,7 +976,7 @@ __global__ void node_depth_kernel(int n_nodes, const int *__restrict__ parent,
 
 // Flag the "box" nodes that carry a local expansion: the root and every node whose PARENT
 // holds more than leaf_size points (i.e., the leaf-size frontier + all strict ancestors --
-// exactly the target nodes the pair-DTT can reach before stopping). flag[v] in {0,1}.
+// exactly the target nodes the pair traversal can reach before stopping). flag[v] in {0,1}.
 __global__ void mark_box_kernel(int n_nodes, int leaf_size,
                                 const int *__restrict__ parent,
                                 const int *__restrict__ first, const int *__restrict__ last,
@@ -1227,7 +1000,7 @@ __global__ void box_slot_kernel(int n_nodes, const int *__restrict__ flag,
 }
 
 static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, int p,
-                              bh_target_tree *tt) {
+                              fmm_target_tree *tt) {
   tt->N         = num_pts;
   tt->n_nodes   = (num_pts > 0) ? (2 * num_pts - 1) : 0;
   tt->leaf_size = (leaf_size < 1) ? 1 : leaf_size;
@@ -1392,7 +1165,7 @@ static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, i
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-static void free_target_tree(bh_target_tree *tt) {
+static void free_target_tree(fmm_target_tree *tt) {
   if (!tt) return;
   cudaFree(tt->d_pos);    cudaFree(tt->d_orig);
   cudaFree(tt->d_min);    cudaFree(tt->d_max);
@@ -1415,7 +1188,7 @@ static void free_target_tree(bh_target_tree *tt) {
 // otherwise the larger cell is split and its two child pairs enqueued. The two-sided MAC is
 // identical to the leaf kernel's. Geometry only -> not templated on the order. cap_* guard the
 // worklists; the host retries with bigger buffers if the true counts (from the atomics) exceed them.
-__global__ void dtt_pair_kernel(bh_tree src, bh_target_tree tgt, double theta,
+__global__ void fmm_pair_kernel(fmm_tree src, fmm_target_tree tgt, double theta,
                                 const int2 *__restrict__ cur, int n_cur,
                                 int2 *__restrict__ nxt, int *__restrict__ n_nxt, int cap_nxt,
                                 int2 *__restrict__ m2l, int *__restrict__ n_m2l, int cap_m2l,
@@ -1465,7 +1238,7 @@ __global__ void dtt_pair_kernel(bh_tree src, bh_target_tree tgt, double theta,
 // pairs share a target node A). d_local must be zeroed first. (Correctness-first; the heavy
 // per-thread S build + atomics are the obvious 3.2 optimization target.)
 template<int P>
-__global__ void m2l_accumulate_kernel(bh_tree src, bh_target_tree tgt,
+__global__ void m2l_accumulate_kernel(fmm_tree src, fmm_target_tree tgt,
                                       const int2 *__restrict__ m2l, int n_m2l) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n_m2l) return;
@@ -1493,7 +1266,7 @@ __global__ void m2l_accumulate_kernel(bh_tree src, bh_target_tree tgt,
 // (already complete) local expansion to v's center and adds it into d_local[v]. Run for
 // lvl = 1..max_depth so each node sees a finalized parent. Distinct v -> no write races.
 template<int P>
-__global__ void l2l_level_kernel(bh_target_tree tgt, int lvl) {
+__global__ void l2l_level_kernel(fmm_target_tree tgt, int lvl) {
   int v = blockIdx.x * blockDim.x + threadIdx.x;
   if (v >= tgt.n_nodes || tgt.d_depth[v] != lvl) return;
   int sv = tgt.d_box_slot[v];
@@ -1506,8 +1279,8 @@ __global__ void l2l_level_kernel(bh_target_tree tgt, int lvl) {
   double vcx=0.5*(tgt.d_min[3*v]+tgt.d_max[3*v]), vcy=0.5*(tgt.d_min[3*v+1]+tgt.d_max[3*v+1]),
          vcz=0.5*(tgt.d_min[3*v+2]+tgt.d_max[3*v+2]);
   // t = (parent center) - (child center)  (Eq.21 sign convention)
-  l2l_shift(COMP_DBL, tgt.d_local + (size_t)su * COMP_DBL, ucx-vcx, ucy-vcy, ucz-vcz,
-            tgt.d_local + (size_t)sv * COMP_DBL);
+  l2l_shift<P>(tgt.d_local + (size_t)su * COMP_DBL, ucx-vcx, ucy-vcy, ucz-vcz,
+               tgt.d_local + (size_t)sv * COMP_DBL);
 }
 
 // Pair-BFS host loop. Returns the M2L pair count and the near P2P pair count, handing back both
@@ -1521,7 +1294,7 @@ __global__ void l2l_level_kernel(bh_target_tree tgt, int lvl) {
 //   * Cumulative M2L / P2P lists: the atomic counters report the EXACT totals even past the cap,
 //     so on overflow we resize straight to the true size (+ margin) and redo exactly ONCE -- no
 //     doubling spiral.
-static int fmm_pair_traverse(const bh_tree &src, bh_target_tree &tt, double theta,
+static int fmm_pair_traverse(const fmm_tree &src, fmm_target_tree &tt, double theta,
                              int2 *&d_m2l_out, int2 *&d_p2p_out, int &n_p2p_out) {
   // Seed the cumulative caps from a generous interaction-list estimate so the common case is a
   // single pass; the exact-resize below is the safety net when this still underestimates.
@@ -1544,7 +1317,7 @@ static int fmm_pair_traverse(const bh_tree &src, bh_target_tree &tt, double thet
     while (n_cur > 0) {
       CUDA_CHECK(cudaMemset(&d_cnt[0], 0, sizeof(int)));
       int tpb = 128, g = (n_cur + tpb - 1) / tpb;
-      dtt_pair_kernel<<<g, tpb>>>(src, tt, theta, d_cur, n_cur,
+      fmm_pair_kernel<<<g, tpb>>>(src, tt, theta, d_cur, n_cur,
                                   d_nxt, &d_cnt[0], cap_front, d_m2l, &d_cnt[1], cap_m2l,
                                   d_p2p, &d_cnt[2], cap_p2p);
       CUDA_CHECK(cudaGetLastError());
@@ -1576,7 +1349,7 @@ static int fmm_pair_traverse(const bh_tree &src, bh_target_tree &tt, double thet
 
 // M2L accumulate + L2L downward sweep at compile-time order P.
 template<int P>
-static void fmm_translations(const bh_tree &src, bh_target_tree &tt,
+static void fmm_translations(const fmm_tree &src, fmm_target_tree &tt,
                              const int2 *d_m2l, int n_m2l) {
   CUDA_CHECK(cudaMemset(tt.d_local, 0, (size_t)tt.n_box * tt.comp * sizeof(double)));
   if (n_m2l > 0) {
@@ -1613,7 +1386,7 @@ __global__ void p2p_scatter_kernel(const int2 *__restrict__ pairs, int n_pairs,
 
 // Group the raw near (A,B) pairs into a CSR keyed by target node id: counting sort over
 // n_nodes buckets. Populates tt.{n_p2p, d_p2p_off[n_nodes+1], d_p2p_val[n_p2p]}.
-static void fmm_build_p2p_csr(bh_target_tree &tt, const int2 *d_p2p, int n_p2p) {
+static void fmm_build_p2p_csr(fmm_target_tree &tt, const int2 *d_p2p, int n_p2p) {
   int nn = tt.n_nodes;
   tt.n_p2p = n_p2p;
   CUDA_CHECK(cudaMalloc(&tt.d_p2p_off, (size_t)(nn + 1) * sizeof(int)));
@@ -1646,8 +1419,8 @@ static void fmm_build_p2p_csr(bh_target_tree &tt, const int2 *d_p2p, int n_p2p) 
 }
 
 // Build every target node's complete far-field local expansion into tt.d_local, and the
-// near-field P2P CSR (tt.d_p2p_*). One pair-DTT pass feeds both.
-static void fmm_build_local(const bh_tree &src, bh_target_tree &tt, double theta) {
+// near-field P2P CSR (tt.d_p2p_*). One pair-traversal pass feeds both.
+static void fmm_build_local(const fmm_tree &src, fmm_target_tree &tt, double theta) {
   int2 *d_m2l = nullptr, *d_p2p = nullptr; int n_p2p = 0;
   int   n_m2l = fmm_pair_traverse(src, tt, theta, d_m2l, d_p2p, n_p2p);
   fmm_build_p2p_csr(tt, d_p2p, n_p2p);
@@ -1670,31 +1443,31 @@ static void fmm_build_local(const bh_tree &src, bh_target_tree &tt, double theta
 // ========================== public C API ==========================
 extern "C" {
 
-void bh_build_atom_tree(int num_atoms,
+void fmm_build_atom_tree(int num_atoms,
                         const double *d_atoms,
                         const double *d_charges,
-                        double theta,
+                        double mac,
                         int p,
                         int leaf_size,
-                        bh_tree **out) {
+                        fmm_tree **out) {
   // Clamp p to the supported range with a stderr warning.
   if (p < 1) {
-    fprintf(stderr, "[barnes_hut] bh_order=%d clamped to 1\n", p);
+    fprintf(stderr, "[fmm] fmm_multipole_order=%d clamped to 1\n", p);
     p = 1;
-  } else if (p > BH_MAX_P) {
-    fprintf(stderr, "[barnes_hut] bh_order=%d clamped to %d (BH_MAX_P)\n", p, BH_MAX_P);
-    p = BH_MAX_P;
+  } else if (p > FMM_MAX_P) {
+    fprintf(stderr, "[fmm] fmm_multipole_order=%d clamped to %d (FMM_MAX_P)\n", p, FMM_MAX_P);
+    p = FMM_MAX_P;
   }
 
   init_constant_tables();
 
-  bh_tree *t = new bh_tree();
+  fmm_tree *t = new fmm_tree();
   t->N       = num_atoms;
   t->n_nodes = (num_atoms > 0) ? (2 * num_atoms - 1) : 0;
   t->p       = p;
   t->comp    = comp_of(p);
   t->leaf_size = (leaf_size < 1) ? 1 : leaf_size;
-  t->theta   = theta;
+  t->theta   = mac;
   *out = t;
   if (num_atoms <= 0) {
     t->d_pos = t->d_q = t->d_min = t->d_max = t->d_moments = nullptr;
@@ -1786,10 +1559,18 @@ void bh_build_atom_tree(int num_atoms,
     int *d_flags;
     CUDA_CHECK(cudaMalloc(&d_flags, nn * sizeof(int)));
     CUDA_CHECK(cudaMemset(d_flags, 0, nn * sizeof(int)));
-    summarize_kernel<<<mt_blocks, tpb>>>(N, comp,
-                                         t->d_left, t->d_right, t->d_parent,
-                                         t->d_min, t->d_max,
-                                         t->d_moments, d_flags);
+    switch (p) {
+      case 1: summarize_kernel<1 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+      case 2: summarize_kernel<2 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+      case 3: summarize_kernel<3 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+      case 4: summarize_kernel<4 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+      case 5: summarize_kernel<5 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+      case 6: summarize_kernel<6 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+      case 7: summarize_kernel<7 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+      case 8: summarize_kernel<8 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+      case 9: summarize_kernel<9 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+      default: summarize_kernel<10><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+    }
     CUDA_CHECK(cudaGetLastError());
     cudaFree(d_flags);
   }
@@ -1797,7 +1578,7 @@ void bh_build_atom_tree(int num_atoms,
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-void bh_free_tree(bh_tree *t) {
+void fmm_free_tree(fmm_tree *t) {
   if (!t) return;
   cudaFree(t->d_pos);     cudaFree(t->d_q);
   cudaFree(t->d_min);     cudaFree(t->d_max);
@@ -1807,68 +1588,7 @@ void bh_free_tree(bh_tree *t) {
   delete t;
 }
 
-double bh_coulombic_energy(bh_tree *t) {
-  if (!t || t->N < 2) return 0.0;
-  double *d_partial;
-  CUDA_CHECK(cudaMalloc(&d_partial, t->N * sizeof(double)));
-  int tpb = 256, blocks = (t->N + tpb - 1) / tpb;
-  BH_LAUNCH_BY_ORDER(coulomb_kernel, blocks, tpb, *t, d_partial);
-  CUDA_CHECK(cudaGetLastError());
-  CUDA_CHECK(cudaDeviceSynchronize());
-  double r = reduce_sum_host(d_partial, t->N);
-  cudaFree(d_partial);
-  return r;
-}
-
-double bh_polarization_energy(bh_tree *t, int num_pts,
-                              const double *h_V, const double *h_flux) {
-  if (!t || t->N == 0 || num_pts == 0) return 0.0;
-  double *d_V, *d_flux, *d_partial;
-  CUDA_CHECK(cudaMalloc(&d_V,       num_pts * 3 * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_flux,    num_pts     * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_partial, num_pts     * sizeof(double)));
-  CUDA_CHECK(cudaMemcpy(d_V,    h_V,    num_pts*3*sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_flux, h_flux, num_pts  *sizeof(double), cudaMemcpyHostToDevice));
-
-  int tpb = 256, blocks = (num_pts + tpb - 1) / tpb;
-  BH_LAUNCH_BY_ORDER(potential_kernel, blocks, tpb, *t, num_pts, d_V, d_flux, d_partial);
-  CUDA_CHECK(cudaGetLastError());
-  CUDA_CHECK(cudaDeviceSynchronize());
-  double r = reduce_sum_host(d_partial, num_pts);
-  cudaFree(d_V); cudaFree(d_flux); cudaFree(d_partial);
-  return r;
-}
-
-double bh_ionic_energy(bh_tree *t, int num_tri_verts,
-                       const double *h_vert, const double *h_norms,
-                       const double *h_phi_sup, const double *h_area,
-                       double inv_4pi) {
-  if (!t || t->N == 0 || num_tri_verts == 0) return 0.0;
-  int num_tris = num_tri_verts / 3;
-  double *d_vert, *d_norms, *d_phi, *d_area, *d_partial;
-  CUDA_CHECK(cudaMalloc(&d_vert,    num_tri_verts * 3 * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_norms,   num_tri_verts * 3 * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_phi,     num_tri_verts     * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_area,    num_tris          * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_partial, num_tri_verts     * sizeof(double)));
-  CUDA_CHECK(cudaMemcpy(d_vert,  h_vert,    num_tri_verts*3*sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_norms, h_norms,   num_tri_verts*3*sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_phi,   h_phi_sup, num_tri_verts  *sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_area,  h_area,    num_tris       *sizeof(double), cudaMemcpyHostToDevice));
-
-  int tpb = 256, blocks = (num_tri_verts + tpb - 1) / tpb;
-  BH_LAUNCH_BY_ORDER(field_kernel, blocks, tpb, *t, num_tri_verts, d_vert, d_norms, d_phi,
-                     d_area, inv_4pi, d_partial);
-  CUDA_CHECK(cudaGetLastError());
-  CUDA_CHECK(cudaDeviceSynchronize());
-  double r = reduce_sum_host(d_partial, num_tri_verts);
-  cudaFree(d_vert); cudaFree(d_norms); cudaFree(d_phi); cudaFree(d_area); cudaFree(d_partial);
-  return r;
-}
-
-// ---------------------- DTT (dual-tree-traversal) path ----------------------
-
-double bh_polarization_energy_dtt(bh_tree *src, int num_pts,
+double fmm_polarization_energy(fmm_tree *src, int num_pts,
                                   const double *h_V, const double *h_flux) {
   if (!src || src->N == 0 || num_pts == 0) return 0.0;
 
@@ -1882,15 +1602,15 @@ double bh_polarization_energy_dtt(bh_tree *src, int num_pts,
 
   // Target leaf cells are capped at 256 pts so a single block can serve a leaf.
   int tleaf = src->leaf_size; if (tleaf > 256) tleaf = 256; if (tleaf < 1) tleaf = 1;
-  bh_target_tree tt;
+  fmm_target_tree tt;
   build_target_tree(num_pts, d_V, tleaf, src->p, &tt);
 
-  int block = DTT_BDIM;   // one target point per thread; >= target leaf_size
+  int block = FMM_BDIM;   // one target point per thread; >= target leaf_size
   int grid  = tt.n_leaves;
   if (grid > 0) {
     fmm_build_local(*src, tt, src->theta);   // M2L+L2L -> d_local (far); P2P CSR (near)
-    BH_LAUNCH_DTT(false, grid, block, *src, tt,
-                  d_flux, nullptr, nullptr, nullptr, 0.0, d_partial);
+    launch_l2p_p2p<false>(src->p, grid, block, *src, tt,
+                          d_flux, nullptr, nullptr, nullptr, 0.0, d_partial);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
   }
@@ -1901,7 +1621,7 @@ double bh_polarization_energy_dtt(bh_tree *src, int num_pts,
   return r;
 }
 
-double bh_ionic_energy_dtt(bh_tree *src, int num_tri_verts,
+double fmm_ionic_energy(fmm_tree *src, int num_tri_verts,
                            const double *h_vert, const double *h_norms,
                            const double *h_phi_sup, const double *h_area,
                            double inv_4pi) {
@@ -1921,15 +1641,15 @@ double bh_ionic_energy_dtt(bh_tree *src, int num_tri_verts,
   CUDA_CHECK(cudaMemset(d_partial, 0, num_tri_verts * sizeof(double)));  // any uncovered target -> 0
 
   int tleaf = src->leaf_size; if (tleaf > 256) tleaf = 256; if (tleaf < 1) tleaf = 1;
-  bh_target_tree tt;
+  fmm_target_tree tt;
   build_target_tree(num_tri_verts, d_vert, tleaf, src->p, &tt);
 
-  int block = DTT_BDIM;   // one target point per thread; >= target leaf_size
+  int block = FMM_BDIM;   // one target point per thread; >= target leaf_size
   int grid  = tt.n_leaves;
   if (grid > 0) {
     fmm_build_local(*src, tt, src->theta);   // M2L+L2L -> d_local (far); P2P CSR (near)
-    BH_LAUNCH_DTT(true, grid, block, *src, tt,
-                  nullptr, d_norms, d_phi, d_area, inv_4pi, d_partial);
+    launch_l2p_p2p<true>(src->p, grid, block, *src, tt,
+                         nullptr, d_norms, d_phi, d_area, inv_4pi, d_partial);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
   }

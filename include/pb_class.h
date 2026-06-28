@@ -144,11 +144,10 @@ struct
   //algorithm:
   std::string linear_solver_name;
   std::string linear_solver_options;
-  bool use_gpu;
-  int energy_method = 1;   // 0 = naive dense kernels, 1 = Barnes-Hut tree code
-  double bh_theta = 0.4;   // Barnes-Hut opening angle (MAC threshold)
-  int bh_order = 6;        // Barnes-Hut multipole truncation order (1..BH_MAX_P)
-  int bh_leaf_size = 32;   // Barnes-Hut max atoms per terminal cluster (P2P cutoff)
+  int energy_method = 0;          // 0 = CPU, 1 = naive GPU kernel, 2 = FMM
+  double fmm_mac = 0.4;           // FMM opening angle (multipole acceptance criterion)
+  int fmm_multipole_order = 6;    // FMM multipole truncation order (1..FMM_MAX_P)
+  int fmm_leaf_size = 32;         // FMM max atoms per terminal cluster (P2P cutoff)
 
   MPI_Comm mpicomm;
   tmesh_3d tmsh;
@@ -512,7 +511,7 @@ struct
                      int bc_ = 1, int linearized_ = 1,
                      double e_in_ = 2.0, double e_out_ = 80.0, double ionic_strength_ = 0.145,
                      std::string linear_solver_name_ = "mumps", std::string linear_solver_options_ = "",
-                     bool use_gpu_ = false, MPI_Comm mpicomm_ = MPI_COMM_WORLD)
+                     MPI_Comm mpicomm_ = MPI_COMM_WORLD)
     : maxlevel (maxlevel_),
       minlevel (minlevel_),
       unilevel (unilevel_),
@@ -524,7 +523,6 @@ struct
       ionic_strength (ionic_strength_),
       linear_solver_name (linear_solver_name_),
       linear_solver_options (linear_solver_options_),
-      use_gpu (use_gpu_),
       mpicomm (mpicomm_),
       tmsh (mpicomm)
   { };
