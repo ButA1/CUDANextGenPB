@@ -818,6 +818,49 @@ __device__ __forceinline__ void l2p_field(int p, const double *__restrict__ L,
   mp_field_eval_sph(p, L, R, gx, gy, gz);
 }
 
+// Fused L2P: build the regular solid harmonics R_n^m of (x,y,z) by the pole-free Cartesian
+// recurrence (same one as solid_harmonics<T,true>) and contract them against the local
+// expansion L on the fly, in the same m>=0-folded form as mp_*_eval_sph. Walked column-major
+// (m outer, n inner) so the live set is O(P) -- a diagonal seed plus a 2-deep vertical window,
+// held in NAMED scalars -- never the full O(P^2) array. That keeps everything in registers
+// instead of spilling the harmonic buffer to local memory. T=double: potential (returns Phi).
+// T=dual: forward-mode AD field (returned Phi carries d/dx,d/dy,d/dz). Compile-time P makes
+// every sph_slot() a constant offset under the unrolled loops.
+template<int P, class T>
+__device__ __forceinline__ T l2p_contract(const double* __restrict__ L, T x, T y, T z) {
+  T r2 = x*x + y*y + z*z;
+  cT<T> w(x, y);                       // x + i y
+  cT<T> diag(T(1.0), T(0.0));          // G_0^0
+  T phi = T(0.0);
+  #pragma unroll
+  for (int m = 0; m <= P; ++m) {
+    if (m > 0) {                        // advance diagonal seed G_m^m = c*(x+iy)*G_{m-1}^{m-1}
+      double c = -sqrt((2.0*m - 1.0) / (2.0*m));
+      diag = T(c) * (w * diag);
+    }
+    cT<T> g1, g2;                       // named scalars (NOT an indexed array) -> no re-spill
+    #pragma unroll
+    for (int n = m; n <= P; ++n) {
+      cT<T> g;
+      if (n == m) g = diag;
+      else {                            // vertical climb G_n^m = a*z*G_{n-1}^m - b*r^2*G_{n-2}^m
+        double a = (2.0*n - 1.0) / sqrt((double)(n-m)*(double)(n+m));
+        g = T(a) * (z * g1);
+        if (n - 2 >= m) {
+          double b = sqrt(((double)(n+m-1)*(double)(n-m-1))
+                        / ((double)(n+m)*(double)(n-m)));
+          g = g + (T(-b) * (r2 * g2));
+        }
+      }
+      int s = sph_slot(n, m);           // compile-time under unroll
+      if (m == 0) phi = phi + L[2*s] * g.re;
+      else        phi = phi + 2.0 * (L[2*s] * g.re - L[2*s+1] * g.im);
+      g2 = g1; g1 = g;                  // roll the 2-deep window
+    }
+  }
+  return phi;
+}
+
 // ====================================================================
 //  FMM target-leaf evaluation. One CUDA block per target leaf cell. The
 //  near/far split is decided once by the pair traversal (fmm_pair_kernel):
@@ -900,15 +943,12 @@ __global__ void l2p_p2p_kernel(fmm_tree src, fmm_target_tree tgt,
     const double *L = tgt.d_local + (size_t)tgt.d_box_slot[A] * tgt.comp;   // A = frontier box
     double Rxp = px - Tcx, Ryp = py - Tcy, Rzp = pz - Tcz;
     if constexpr (FIELD) {
-      cT<dual> R[nmom_sph(P)];
-      solid_harmonics<dual, true>(P, dual(Rxp, 1.0, 0.0, 0.0),
-                                     dual(Ryp, 0.0, 1.0, 0.0),
-                                     dual(Rzp, 0.0, 0.0, 1.0), R);
-      l2p_field(P, L, R, gx, gy, gz);
+      dual phi_l = l2p_contract<P, dual>(L, dual(Rxp, 1.0, 0.0, 0.0),
+                                            dual(Ryp, 0.0, 1.0, 0.0),
+                                            dual(Rzp, 0.0, 0.0, 1.0));
+      gx -= phi_l.dx; gy -= phi_l.dy; gz -= phi_l.dz;   // E = -grad Phi (matches mp_field_eval)
     } else {
-      cmplx R[nmom_sph(P)];
-      solid_harmonics<double, true>(P, Rxp, Ryp, Rzp, R);
-      phi += l2p_potential(P, L, R);
+      phi += l2p_contract<P, double>(L, Rxp, Ryp, Rzp);
     }
   }
 
@@ -1321,7 +1361,8 @@ static int fmm_pair_traverse(const fmm_tree &src, fmm_target_tree &tt, double th
                                   d_nxt, &d_cnt[0], cap_front, d_m2l, &d_cnt[1], cap_m2l,
                                   d_p2p, &d_cnt[2], cap_p2p);
       CUDA_CHECK(cudaGetLastError());
-      int n_nxt; CUDA_CHECK(cudaMemcpy(&n_nxt, &d_cnt[0], sizeof(int), cudaMemcpyDeviceToHost));
+      int n_nxt; 
+      CUDA_CHECK(cudaMemcpy(&n_nxt, &d_cnt[0], sizeof(int), cudaMemcpyDeviceToHost));
       if (n_nxt > cap_front) { front_overflow = true; break; }
       int2 *tmp = d_cur; d_cur = d_nxt; d_nxt = tmp; n_cur = n_nxt;
     }
