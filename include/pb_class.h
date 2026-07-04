@@ -37,6 +37,7 @@ const double p4esttol = 1 / std::pow (2, P8EST_QMAXLEVEL);
 #include <memory>
 
 #include "raytracer.h"
+#include "gpu_topology.h"
 #include <nanoshaper.h>
 
 
@@ -150,6 +151,7 @@ struct
   int fmm_leaf_size = 32;         // FMM max atoms per terminal cluster (P2P cutoff)
 
   MPI_Comm mpicomm;
+  gpu_topology gpu_topo;   // set once in main() via setup_gpu_topology (multi-GPU binding/dispatch)
   tmesh_3d tmsh;
 
   std::string optionsfilename;
@@ -749,6 +751,12 @@ struct
 
   void
   amgx_compute_electric_potential (ray_cache_t & ray_cache);
+
+  // Multi-GPU AMGX: sub-gather each GPU-group's CSR to its leader, then run a
+  // distributed AMGX solve across the group leaders (one rank per GPU). Selected
+  // automatically when gpu_topo.total_gpus > 1. See src/amgx_solver.cu.
+  void
+  amgx_compute_electric_potential_dist (ray_cache_t & ray_cache);
 
   int
   classifyCube (tmesh_3d::quadrant_iterator& quadrant,double isolevel);

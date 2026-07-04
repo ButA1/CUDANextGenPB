@@ -19,6 +19,8 @@
 
 #include <mpi.h>
 
+#include <cstdlib>
+
 #include "pb_class.h"
 #include "readpdb.h"
 #include "vtk_class.h"
@@ -71,6 +73,11 @@ main (int argc, char **argv)
 
   poisson_boltzmann pb;
   ray_cache_t ray_cache;
+
+  // Bind this rank to a GPU (block mapping) and detect the job-wide GPU count.
+  // Must happen before any CUDA use; drives multi-GPU selection for the energy
+  // kernels and the AMGX solver (gather-to-rank-0 vs. distributed).
+  pb.gpu_topo = setup_gpu_topology (mpicomm);
 
   // pb_global = (void *) (&pb);
 
@@ -254,10 +261,22 @@ main (int argc, char **argv)
 
     pb.lis_compute_electric_potential (ray_cache);
   } else if (pb.linear_solver_name == "amgx") {
-    if (rank == 0)
-      std::cout << "\n== [ Starting numerical solution using AMGX ] ==\n";
+    // Auto-select the multi-GPU distributed path when >1 GPU is in use.
+    // NGPB_AMGX_FORCE_GATHER=1 forces the single-GPU gather-to-rank-0 path even
+    // on multiple GPUs (used for same-config A/B parity testing).
+    const char *force_gather = std::getenv ("NGPB_AMGX_FORCE_GATHER");
+    const bool use_dist = (pb.gpu_topo.total_gpus > 1)
+                          && !(force_gather && std::atoi (force_gather) != 0);
 
-    pb.amgx_compute_electric_potential (ray_cache);
+    if (rank == 0)
+      std::cout << "\n== [ Starting numerical solution using AMGX ("
+                << (use_dist ? "distributed, multi-GPU" : "single-GPU")
+                << ") ] ==\n";
+
+    if (use_dist)
+      pb.amgx_compute_electric_potential_dist (ray_cache);
+    else
+      pb.amgx_compute_electric_potential (ray_cache);
   } else {
     std::cerr << "Invalid linear solver selected" << std::endl;
     return 1;

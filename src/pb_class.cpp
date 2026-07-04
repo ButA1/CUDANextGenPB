@@ -3568,7 +3568,11 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
                         fmm_leaf_size, &fmm);
 
   // --- Coulombic energy (naive O(N^2) atom pairs; atom count is small) ---
-  if (calc_coulombic == 1) {
+  // Atoms are replicated on every rank, so this sum is identical on all ranks and
+  // is deliberately NOT part of the MPI_Reduce below -- only rank 0 prints it.
+  // Compute it on rank 0 only, to avoid redundant O(N^2) work on every GPU when
+  // running multi-GPU (each rank would otherwise recompute the same value).
+  if (calc_coulombic == 1 && rank == 0) {
     double coul_raw = coulombic_energy_cuda_dev((int)num_atoms, d_atoms, d_charges);
     this->coul_energy = coul_raw * den_in;
   }
