@@ -783,6 +783,9 @@ struct
   energy_cuda_fast (ray_cache_t & ray_cache);
 
   void
+  energy_cuda (ray_cache_t & ray_cache);
+
+  void
   write_potential_on_surface (ray_cache_t & ray_cache);
 
   double
