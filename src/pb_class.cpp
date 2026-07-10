@@ -3107,6 +3107,15 @@ poisson_boltzmann::energy (ray_cache_t & ray_cache)
       std::tie (tmp_phi, tmp_eps, edg, fl_dir) = classifyCube_flux (quadrant, tmp_phi, tmp_eps);
       ntriang = getTriangles (cubeindex, triangles);
 
+      // --- Per-quadrant edge lookup table (avoids redundant normal_intersection calls) ---
+      std::array<std::array<double,3>, 12> edge_N{};
+      std::array<double, 12> edge_fract{};
+      std::array<bool, 12> has_inters{};
+
+      for (const int e : edg) {
+        has_inters[e] = normal_intersection (quadrant, ray_cache, e, edge_N[e], edge_fract[e]);
+      }
+
       // --- flussi
       for (int ip = 0; ip < edg.size (); ++ip) {
         const int edge = edg[ip];
@@ -3114,8 +3123,7 @@ poisson_boltzmann::energy (ray_cache_t & ray_cache)
         const int i1 = edge2nodes[2 * edge];
         const int i2 = edge2nodes[2 * edge + 1];
 
-        double fract = 0.0;
-        normal_intersection (quadrant, ray_cache, edge, N, fract);
+        const double fract = edge_fract[edge];
 
         V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
         V[axis] += fract * h[axis];
@@ -3140,23 +3148,31 @@ poisson_boltzmann::energy (ray_cache_t & ray_cache)
 
       // --- triangoli (componente ionica)
       for (int itri = 0; itri < ntriang; ++itri) {
+        bool discard_triangle = false;
+
         for (int jj = 0; jj < 3; ++jj) {
           const int edge = triangles[itri][jj];
           const int axis = edge_axis[edge];
           const int i1 = edge2nodes[2 * edge];
           const int i2 = edge2nodes[2 * edge + 1];
 
-          double fract = 0.0;
-          normal_intersection (quadrant, ray_cache, edge, N, fract);
+          if (!has_inters[edge])
+            // nanoshaper and marching cubes disagree
+            // discard triangle
+            discard_triangle = true;
+          const double fract = edge_fract[edge];
 
           V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
           V[axis] += fract * h[axis];
 
           vert_triangles[jj] = V;
-          norms_vert[jj] = N;
+          norms_vert[jj] = edge_N[edge];
 
           phi_sup[jj] = phi0 (tmp_eps[i1], tmp_eps[i2], tmp_phi[i1], tmp_phi[i2], fract);
         }
+
+        if (discard_triangle)
+          continue;
 
         const double area = areaTriangle (vert_triangles);
 
@@ -3377,6 +3393,15 @@ poisson_boltzmann::energy_fast (ray_cache_t & ray_cache)
       std::tie (tmp_phi, tmp_eps, edg, fl_dir) = classifyCube_flux_fast (quadrant, tmp_phi, tmp_eps);
       ntriang = getTriangles (cubeindex, triangles);
 
+      // --- Per-quadrant edge lookup table (avoids redundant normal_intersection calls) ---
+      std::array<std::array<double,3>, 12> edge_N{};
+      std::array<double, 12> edge_fract{};
+      std::array<bool, 12> has_inters{};
+
+      for (const int e : edg) {
+        has_inters[e] = normal_intersection (quadrant, ray_cache, e, edge_N[e], edge_fract[e]);
+      }
+
       // --- flussi
       for (int ip = 0; ip < edg.size (); ++ip) {
         const int edge = edg[ip];
@@ -3384,8 +3409,7 @@ poisson_boltzmann::energy_fast (ray_cache_t & ray_cache)
         const int i1 = edge2nodes[2 * edge];
         const int i2 = edge2nodes[2 * edge + 1];
 
-        double fract = 0.0;
-        normal_intersection (quadrant, ray_cache, edge, N, fract);
+        const double fract = edge_fract[edge];
 
         V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
         V[axis] += fract * h[axis];
@@ -3410,23 +3434,31 @@ poisson_boltzmann::energy_fast (ray_cache_t & ray_cache)
 
       // --- triangoli (componente ionica)
       for (int itri = 0; itri < ntriang; ++itri) {
+        bool discard_triangle = false;
+
         for (int jj = 0; jj < 3; ++jj) {
           const int edge = triangles[itri][jj];
           const int axis = edge_axis[edge];
           const int i1 = edge2nodes[2 * edge];
           const int i2 = edge2nodes[2 * edge + 1];
 
-          double fract = 0.0;
-          normal_intersection (quadrant, ray_cache, edge, N, fract);
+          if (!has_inters[edge])
+            // nanoshaper and marching cubes disagree
+            // discard triangle
+            discard_triangle = true;
+          const double fract = edge_fract[edge];
 
           V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
           V[axis] += fract * h[axis];
 
           vert_triangles[jj] = V;
-          norms_vert[jj] = N;
+          norms_vert[jj] = edge_N[edge];
 
           phi_sup[jj] = phi0 (tmp_eps[i1], tmp_eps[i2], tmp_phi[i1], tmp_phi[i2], fract);
         }
+
+        if (discard_triangle)
+          continue;
 
         const double area = areaTriangle (vert_triangles);
 
