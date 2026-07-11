@@ -145,6 +145,7 @@ struct
   //algorithm:
   std::string linear_solver_name;
   std::string linear_solver_options;
+  std::string amgx_config_file;   // path to AMGX config file; empty = built-in default
   int energy_method = 0;          // 0 = CPU, 1 = naive GPU kernel, 2 = FMM
   double fmm_mac = 0.4;           // FMM opening angle (multipole acceptance criterion)
   int fmm_multipole_order = 6;    // FMM multipole truncation order (1..FMM_MAX_P)

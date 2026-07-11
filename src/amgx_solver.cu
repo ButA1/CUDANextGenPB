@@ -27,6 +27,38 @@
 #include <bim_distributed_vector.h>
 #include <quad_operators_3d.h>
 
+// Built-in fallback AMGX config (single source of truth for all paths).
+static const char *NGPB_AMGX_DEFAULT_CFG =
+    "config_version=2, solver(main)=PCG, main:max_iters=1000, "
+    "main:tolerance=1e-10, main:norm=L2, main:convergence=RELATIVE_INI_CORE, "
+    "main:monitor_residual=1, main:print_solve_stats=1, main:obtain_timings=1, "
+    "main:preconditioner(amg)=BLOCK_JACOBI, amg:max_iters=1";
+
+// Create an AMGX config handle. If cfg_file is non-empty, load it; on any load
+// failure, warn (rank 0) and fall back to NGPB_AMGX_DEFAULT_CFG.
+static AMGX_config_handle
+create_amgx_config (const std::string &cfg_file, int rank)
+{
+  AMGX_config_handle cfg = nullptr;
+  if (!cfg_file.empty ())
+    {
+      AMGX_RC rc = AMGX_config_create_from_file (&cfg, cfg_file.c_str ());
+      if (rc == AMGX_RC_OK)
+        {
+          if (rank == 0)
+            std::cout << "AMGX: using config file " << cfg_file << std::endl;
+          return cfg;
+        }
+      if (rank == 0)
+        std::cerr << "AMGX: could not load config file '" << cfg_file
+                  << "' (rc=" << rc << "); falling back to built-in config"
+                  << std::endl;
+      cfg = nullptr;   // ensure clean handle before the fallback create
+    }
+  AMGX_SAFE_CALL (AMGX_config_create (&cfg, NGPB_AMGX_DEFAULT_CFG));
+  return cfg;
+}
+
 void
 poisson_boltzmann::amgx_compute_electric_potential (ray_cache_t & ray_cache)
 {
@@ -53,28 +85,13 @@ poisson_boltzmann::amgx_compute_electric_potential (ray_cache_t & ray_cache)
   std::vector<double> rhs_local = rhs->get_owned_data ();
   rhs.reset ();
 
-  // AMGX config string (shared between single- and multi-rank paths)
-  const char *amgx_cfg_str =
-    "config_version=2, "
-    "solver(main)=PCG, "
-    "main:max_iters=1000, "
-    "main:tolerance=1e-10, "
-    "main:norm=L2, "
-    "main:convergence=RELATIVE_INI_CORE, "
-    "main:monitor_residual=1, "
-    "main:print_solve_stats=1, "
-    "main:obtain_timings=1, "
-    "main:preconditioner(amg)=BLOCK_JACOBI, "
-    "amg:max_iters=1";
-
   if (size == 1)
     {
       // --- Single rank: solve directly ---
       AMGX_SAFE_CALL (AMGX_initialize ());
       AMGX_SAFE_CALL (AMGX_initialize_plugins ());
 
-      AMGX_config_handle cfg;
-      AMGX_SAFE_CALL (AMGX_config_create (&cfg, amgx_cfg_str));
+      AMGX_config_handle cfg = create_amgx_config (amgx_config_file, rank);
 
       AMGX_resources_handle rsrc;
       int device_id = 0;
@@ -192,8 +209,7 @@ poisson_boltzmann::amgx_compute_electric_potential (ray_cache_t & ray_cache)
         AMGX_SAFE_CALL (AMGX_initialize ());
         AMGX_SAFE_CALL (AMGX_initialize_plugins ());
 
-        AMGX_config_handle cfg;
-        AMGX_SAFE_CALL (AMGX_config_create (&cfg, amgx_cfg_str));
+        AMGX_config_handle cfg = create_amgx_config (amgx_config_file, rank);
 
         AMGX_resources_handle rsrc;
         int device_id = 0;
@@ -399,26 +415,10 @@ poisson_boltzmann::amgx_compute_electric_potential_dist (ray_cache_t & ray_cache
       MPI_Abort (mpicomm, 1);
     }
 
-    // Same config as the single-GPU path; BLOCK_JACOBI is rank-local and
-    // distributes trivially across GPUs.
-    const char *amgx_cfg_str =
-      "config_version=2, "
-      "solver(main)=PCG, "
-      "main:max_iters=1000, "
-      "main:tolerance=1e-10, "
-      "main:norm=L2, "
-      "main:convergence=RELATIVE_INI_CORE, "
-      "main:monitor_residual=1, "
-      "main:print_solve_stats=1, "
-      "main:obtain_timings=1, "
-      "main:preconditioner(amg)=BLOCK_JACOBI, "
-      "amg:max_iters=1";
-
     AMGX_SAFE_CALL (AMGX_initialize ());
     AMGX_SAFE_CALL (AMGX_initialize_plugins ());
 
-    AMGX_config_handle cfg;
-    AMGX_SAFE_CALL (AMGX_config_create (&cfg, amgx_cfg_str));
+    AMGX_config_handle cfg = create_amgx_config (amgx_config_file, world_rank);
 
     AMGX_resources_handle rsrc;
     int device_id = gpu_topo.my_device;   // this leader's bound physical device

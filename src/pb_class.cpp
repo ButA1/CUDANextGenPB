@@ -970,6 +970,7 @@ poisson_boltzmann::parse_options (int argc, char **argv)
   const std::string alg_options = "algorithm/";
   linear_solver_name = g2 ( (alg_options + "linear_solver").c_str (), "lis");
   linear_solver_options = g2 ( (alg_options + "solver_options").c_str (), "-p ssor -ssor_omega 0.51 -i cgs -tol 1.e-6 -print 2 -conv_cond 2 -tol_w 0");
+  amgx_config_file = g2 ( (alg_options + "amgx_config").c_str (), "");
   energy_method = g2 ( (alg_options + "energy_method").c_str (), 0);
   fmm_mac = g2 ( (alg_options + "fmm_mac").c_str (), 0.4);
   fmm_multipole_order = g2 ( (alg_options + "fmm_multipole_order").c_str (), 6);
