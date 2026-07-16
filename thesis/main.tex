@@ -1,0 +1,102 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
+
+% Dynamic bibliography: entries come from references.bib.
+% Add new sources there and cite them with \cite{key} anywhere in the text.
+\usepackage[backend=biber,style=numeric,sorting=none]{biblatex}
+\addbibresource{references.bib}
+
+% ---- Title page fields: edit these ----
+\newcommand{\thesistitle}{Your Thesis Title Here}
+\newcommand{\thesisauthor}{Your Name}
+\newcommand{\thesisdegree}{Master of Science}
+\newcommand{\thesisdate}{\today}
+% ----------------------------------------
+
+\begin{document}
+
+% ============================================================
+% TITLE PAGE
+% ============================================================
+\begin{titlepage}
+    \centering
+
+    % --- TU logo placeholder ---
+    % Replace this framed box with:
+    %   \includegraphics[width=4cm]{tu_logo}
+    % once you have the actual logo file (e.g. tu_logo.pdf/.png)
+    % placed in this same directory.
+    \fbox{\parbox[c][4cm][c]{4cm}{\centering\itshape TU logo\\placeholder}}
+
+    \vspace{1.5cm}
+    {\large Technische Universität Berlin\par}
+    \vspace{0.5cm}
+    {\large Faculty Name\par}
+    \vspace{2cm}
+
+    {\Huge\bfseries \thesistitle\par}
+    \vspace{2cm}
+
+    {\Large \thesisauthor\par}
+    \vspace{1cm}
+
+    {\large Thesis submitted in partial fulfillment of the requirements\\
+    for the degree of \thesisdegree\par}
+    \vspace{2cm}
+
+    {\large \thesisdate\par}
+
+    \vfill
+\end{titlepage}
+
+% ============================================================
+% TABLE OF CONTENTS (regenerates automatically on each compile)
+% ============================================================
+\tableofcontents
+\newpage
+
+% ============================================================
+% CONTENT
+% Copy the section/subsection block below to add more.
+% ============================================================
+\section{Introduction}
+\label{sec:introduction}
+
+Write your section content here. You can cite a source like this~\cite{example2010}.
+
+\subsection{Technical Background}
+\label{sec:introduction-technical-background}
+
+Write your subsection content here.
+
+\subsection{Scientific Background}
+\label{sec:introduction-scientific-background}
+
+Write your subsection content here.
+
+\section{Implementation}
+\label{sec:implementation}
+% ---- copy from here down to add another section ----
+%
+% \section{Next Section}
+% \label{sec:next}
+%
+% \subsection{A Subsection}
+% \label{sec:next-subsection}
+%
+% ------------------------------------------------------
+
+% ============================================================
+% BIBLIOGRAPHY (dynamic — reads from references.bib)
+% ============================================================
+\printbibliography
+
+\end{document}
