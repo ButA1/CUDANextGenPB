@@ -1,0 +1,33 @@
+{
+    "config_version": 2,
+    "exception_handling": 1,
+    "solver": {
+        "scope": "main",
+        "solver": "PCG",
+        "max_iters": 1000,
+        "tolerance": 1e-10,
+        "norm": "L2",
+        "convergence": "RELATIVE_INI_CORE",
+        "monitor_residual": 1,
+        "print_solve_stats": 1,
+        "obtain_timings": 1,
+        "preconditioner": {
+            "scope": "amg",
+            "solver": "AMG",
+            "algorithm": "AGGREGATION",
+            "selector": "SIZE_2",
+            "cycle": "V",
+            "max_iters": 1,
+            "max_levels": 24,
+            "min_coarse_rows": 32,
+            "smoother": "MULTICOLOR_DILU",
+            "relaxation_factor": 0.9,
+            "presweeps": 1,
+            "postsweeps": 1,
+            "coarsest_sweeps": 2,
+            "coarse_solver": "DENSE_LU_SOLVER",
+            "max_uncolored_percentage": 0.05,
+            "print_grid_stats": 1
+        }
+    }
+}
