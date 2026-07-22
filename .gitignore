@@ -85,6 +85,7 @@ test/*.o
 test/*.out
 *.ncu-rep
 *.zst
+*.csv
 exposed.xyz
 exposedIndices.txt
 
