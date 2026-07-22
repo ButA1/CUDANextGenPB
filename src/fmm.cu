@@ -1123,7 +1123,7 @@ static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, i
 
   if (N > 1) {
     // 4. internal nodes + bottom-up AABB
-    int in_blocks = (N - 1 + tpb - 1) / tpb;
+    int in_blocks = (N - 1 + tpb - 1) / tpb; // with N leaves you always get N-1 internal nodes (full binary tree)
     build_internal_kernel<<<in_blocks, tpb>>>(N, d_codes_sorted,
                                               tt->d_left, tt->d_right, tt->d_parent,
                                               tt->d_first, tt->d_last);
