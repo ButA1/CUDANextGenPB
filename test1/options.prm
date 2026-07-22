@@ -21,7 +21,8 @@ calc_coulombic = 1
 [../]
 
 [algorithm]
-linear_solver = amgx
+linear_solver       = amgx
+amgx_config         = amgx_pcgf_amg_poly_cluster.json
 energy_method       = 2
 fmm_mac             = 0.4
 fmm_multipole_order = 10
