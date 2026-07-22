@@ -14,7 +14,7 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
 # left = host path, right = path inside the container.
 %files
     /usr/local/nextgenPB                              /usr/local/nextgenPB
-    /home/leirex/Documents/bimpp-NextGenPB-v0.0.01    /opt/bimpp-src
+    /home/leirex/Documents/bimpp                      /opt/bimpp-src
     /home/leirex/Documents/AMGX                       /opt/amgx-src
 
 %environment
