@@ -28,194 +28,14 @@
 #include <algorithm>
 #include <utility>
 
-static void check_cuda(cudaError_t err, const char *msg, int line) {
-  if (err != cudaSuccess) {
-    fprintf(stderr, "CUDA error at line %d (%s): %s\n",
-            line, msg, cudaGetErrorString(err));
-  }
-}
-#define CUDA_CHECK(call) check_cuda((call), #call, __LINE__)
+#include "fmm.h"   // public C API + (under __CUDACC__) the shared FMM types,
+                   // defines, operators, CUDA_CHECK, and small device helpers
 
 // ====================================================================
-//  FMM Stage 2: complex spherical-harmonic multipole moments (CGR'99,
-//  J. Comput. Phys. 155:468). FMM_MAX_P is the largest multipole order
-//  supported. Moments M_n^m are stored for the m>=0 half only (0<=m<=n<=p);
-//  the m<0 half is recovered by M_n^{-m} = conj(M_n^m) (Eq. 4 convention,
-//  no (-1)^m). The field (gradient) is obtained by forward-mode automatic
-//  differentiation of the potential expansion (see solid_harmonics / dual),
-//  so it needs no expansion above order p.
-// ====================================================================
-#define FMM_MAX_P        10
-#define FMM_MAX_2P       (2 * FMM_MAX_P)        // 20; M2L builds irregular harmonics to order 2p
-// Highest factorial index needed. M2L (Eq.17) and the order-2p solid harmonics both touch
-// (l+|q|) with l <= 2p, |q| <= l, hence up to 4p:  A_{j+n}^{m-k} and sqrt((n-m)!/(n+m)!) at n=2p.
-#define FMM_FACT_MAX     (4 * FMM_MAX_P)        // 40
-
-// # complex moments per node for orders 0..p, m in [0,n] (the stored m>=0 half).
-__host__ __device__ constexpr int nmom_sph(int p) { return (p + 1) * (p + 2) / 2; }
-// # doubles per node = 2 * complex count (interleaved re,im at slot s -> [2s],[2s+1]).
-__host__ __device__ constexpr int comp_sph(int p) { return (p + 1) * (p + 2); }
-#define FMM_NMOM_MAX   nmom_sph(FMM_MAX_P)    // 66  (order-p harmonic buffer)
-#define FMM_NMOM_2MAX  nmom_sph(FMM_MAX_2P)   // 231 (order-2p harmonic buffer, M2L only)
-
-// runtime doubles-per-node for a given order (host alloc / fmm_tree.comp)
-__host__ __device__ __forceinline__ int comp_of(int p) { return comp_sph(p); }
-
-// linear slot for (n,m) with 0 <= m <= n :  s = n(n+1)/2 + m
-__host__ __device__ constexpr int sph_slot(int n, int m) { return n * (n + 1) / 2 + m; }
-
-// ====================================================================
-//  Arithmetic types for the spherical-harmonic path.
-//  - dual: forward-mode AD scalar (value + d/dx,d/dy,d/dz). Used to obtain
-//    the field as the exact gradient of the potential expansion, so no
-//    hand-derived solid-harmonic gradient recurrence is required.
-//  - cT<T>: complex number over scalar T (T = double for the potential,
-//    T = dual for the field). cmplx is the plain double-complex alias.
-// ====================================================================
-struct dual {
-  double v, dx, dy, dz;
-  __host__ __device__ dual() : v(0.0), dx(0.0), dy(0.0), dz(0.0) {}
-  __host__ __device__ dual(double a) : v(a), dx(0.0), dy(0.0), dz(0.0) {}
-  __host__ __device__ dual(double a, double bx, double by, double bz)
-      : v(a), dx(bx), dy(by), dz(bz) {}
-};
-__host__ __device__ __forceinline__ dual operator+(dual a, dual b) {
-  return dual(a.v + b.v, a.dx + b.dx, a.dy + b.dy, a.dz + b.dz);
-}
-__host__ __device__ __forceinline__ dual operator-(dual a, dual b) {
-  return dual(a.v - b.v, a.dx - b.dx, a.dy - b.dy, a.dz - b.dz);
-}
-__host__ __device__ __forceinline__ dual operator*(dual a, dual b) {
-  return dual(a.v * b.v, a.dx * b.v + a.v * b.dx,
-              a.dy * b.v + a.v * b.dy, a.dz * b.v + a.v * b.dz);
-}
-__host__ __device__ __forceinline__ dual operator*(double s, dual a) {
-  return dual(s * a.v, s * a.dx, s * a.dy, s * a.dz);
-}
-__host__ __device__ __forceinline__ dual operator*(dual a, double s) { return s * a; }
-__host__ __device__ __forceinline__ dual operator/(dual a, dual b) {
-  double inv = 1.0 / b.v, v = a.v * inv;
-  return dual(v, (a.dx - v * b.dx) * inv, (a.dy - v * b.dy) * inv, (a.dz - v * b.dz) * inv);
-}
-__host__ __device__ __forceinline__ dual operator/(dual a, double s) {
-  double inv = 1.0 / s;
-  return dual(a.v * inv, a.dx * inv, a.dy * inv, a.dz * inv);
-}
-__host__ __device__ __forceinline__ dual operator/(double a, dual b) {
-  double inv = 1.0 / b.v, v = a * inv;
-  return dual(v, -v * b.dx * inv, -v * b.dy * inv, -v * b.dz * inv);
-}
-// scalar sqrt, overloaded so the templated harmonic builder works for both T.
-__host__ __device__ __forceinline__ double tsqrt(double a) { return sqrt(a); }
-__host__ __device__ __forceinline__ dual   tsqrt(dual a) {
-  double s = sqrt(a.v), h = (s > 0.0) ? 0.5 / s : 0.0;
-  return dual(s, a.dx * h, a.dy * h, a.dz * h);
-}
-
-template<class T> struct cT {
-  T re, im;
-  __host__ __device__ cT() {}
-  __host__ __device__ cT(T r, T i) : re(r), im(i) {}
-};
-template<class T> __host__ __device__ __forceinline__ cT<T> operator+(const cT<T>& a, const cT<T>& b) {
-  return cT<T>(a.re + b.re, a.im + b.im);
-}
-template<class T> __host__ __device__ __forceinline__ cT<T> operator*(const cT<T>& a, const cT<T>& b) {
-  return cT<T>(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
-}
-template<class T> __host__ __device__ __forceinline__ cT<T> operator*(const T& s, const cT<T>& a) {
-  return cT<T>(s * a.re, s * a.im);
-}
-typedef cT<double> cmplx;
-__host__ __device__ __forceinline__ cmplx conjc(cmplx a) { return cmplx(a.re, -a.im); }
-
-// ====================================================================
-//  Tree handle (device-resident). Combined node array of size 2N-1:
-//    index 0 .. N-2     : internal nodes
-//    index N-1 .. 2N-2  : leaf nodes  (leaf k at index (N-1)+k)
-//  "is leaf" test: idx >= N-1 (also correct for N==1).
-// ====================================================================
-struct fmm_tree {
-  int     N;          // number of atoms (leaves)
-  int     n_nodes;    // 2N - 1
-  int     p;          // multipole order in [1, FMM_MAX_P]
-  int     comp;       // moments per node = COMP(p)
-  int     leaf_size;  // max atoms per terminal cluster (P2P cutoff)
-  double  theta;
-
-  // sorted source atoms (Morton order)
-  double *d_pos;      // 3N
-  double *d_q;        // N
-
-  // node geometry (AABB) and topology
-  double *d_min;      // 3 * n_nodes
-  double *d_max;      // 3 * n_nodes
-  int    *d_left;     // n_nodes
-  int    *d_right;    // n_nodes
-  int    *d_parent;   // n_nodes
-
-  // contiguous Morton-sorted atom range [d_first, d_last] covered by each node
-  int    *d_first;    // n_nodes
-  int    *d_last;     // n_nodes
-
-  // per-node complex spherical-harmonic moments M_n^m, m>=0 half, interleaved
-  // re,im at slot s=sph_slot(n,m): d_moments[node*comp + 2s], [..+2s+1].
-  double *d_moments;  // n_nodes * comp   (comp = comp_sph(p) doubles)
-};
-
-// ====================================================================
-//  Target tree (geometry only) for the FMM energy path. Same 2N-1 LBVH
-//  layout as fmm_tree but carries no charges or multipole moments -- targets
-//  are only grouped into cells so one CUDA block can serve a whole leaf.
-//  d_orig[sorted] -> original (caller) point index, so per-point weights
-//  (flux / norms / phi_sup / area[i/3]) are read in the caller's order and
-//  results scatter back to the original layout.
-// ====================================================================
-struct fmm_target_tree {
-  int     N;          // number of target points (leaves)
-  int     n_nodes;    // 2N - 1
-  int     leaf_size;  // max points per terminal cluster
-  int     n_leaves;   // # frontier (block-assigned) leaf cells
-
-  double *d_pos;      // 3N, Morton-sorted target positions
-  int    *d_orig;     // N,  original index of each sorted point
-
-  double *d_min;      // 3 * n_nodes
-  double *d_max;      // 3 * n_nodes
-  int    *d_left;     // n_nodes
-  int    *d_right;    // n_nodes
-  int    *d_parent;   // n_nodes
-  int    *d_first;    // n_nodes
-  int    *d_last;     // n_nodes
-
-  int    *d_leaf_nodes; // n_leaves, node indices of the leaf-size frontier
-
-  // ---- FMM Stage 3.2 (downward pass) ----
-  // Local expansions live only on "box" nodes: the leaf-size frontier and its ancestors
-  // (~2*n_leaves nodes), NOT the ~N sub-frontier/single-point radix nodes. d_box_slot maps
-  // a node id -> compact local-expansion slot (-1 if not a box node). This keeps d_local
-  // O(n_leaves*comp) instead of O(N*comp) -- the difference between ~35 MB and ~9 GB on a
-  // 10^7-vertex molecular surface.
-  int     p;          // multipole order (matches the source tree)
-  int     comp;       // doubles per local expansion = comp_sph(p)
-  int    *d_box_slot; // n_nodes : box-node -> [0,n_box) local slot, else -1
-  int     n_box;      // number of box nodes (frontier + ancestors)
-  double *d_local;    // n_box * comp : per-box local expansion L_n^m (m>=0 half)
-  int    *d_depth;    // n_nodes : tree depth (root = 0), for the top-down L2L sweep
-  int     max_depth;  // deepest BOX-node depth (host copy; bounds the L2L level loop)
-
-  // ---- near-field P2P interaction lists (CSR, grouped by target-leaf node A) ----
-  // The pair traversal emits near (leaf,leaf) pairs; a counting sort by A groups them so the
-  // fused L2P+P2P kernel walks each leaf's near source leaves directly -- no per-leaf
-  // BFS descent, no shared frontier. d_p2p_off is indexed by node id (target leaf A);
-  // d_p2p_val[off[A] .. off[A+1]) are that leaf's near SOURCE leaf node ids.
-  int     n_p2p;      // total near (leaf,leaf) pairs
-  int    *d_p2p_off;  // n_nodes + 1 : CSR row offsets, indexed by target node id
-  int    *d_p2p_val;  // n_p2p       : source-leaf node ids, grouped by target leaf
-};
-
-// ====================================================================
-//  Constant-memory tables (populated once on first build):
+//  Constant-memory tables (populated once on first build). Kept here (not in
+//  fmm.h) because nvcc whole-program mode -- no -rdc, to preserve cross-function
+//  device inlining -- rejects an extern __constant__ decl + definition as a
+//  redefinition, so the tables and their fact_dev/A_nm accessors stay TU-local:
 //    c_fact[k] = k!                      (k up to (2p)! ; doubles)
 //    c_A[idx]  = A_n^m = (-1)^n / sqrt((n-m)!(n+m)!)   (CGR'99 Eq. 14)
 //                idx = n*n + (m+n), m in [-n, n]
@@ -247,10 +67,6 @@ static void init_constant_tables() {
   CUDA_CHECK(cudaMemcpyToSymbol(c_A,    h_A,    sizeof(h_A)));
   initialized = true;
 }
-
-// scalar value extractor (for value-only branch guards inside the AD path)
-__host__ __device__ __forceinline__ double val(double a) { return a; }
-__host__ __device__ __forceinline__ double val(dual a)   { return a.v; }
 
 // ====================================================================
 //  Solid harmonics of a vector (x,y,z) in CGR'99 normalization (Eq. 4):
@@ -340,40 +156,6 @@ __device__ void solid_harmonics(int maxn, T x, T y, T z, cT<T>* out) {
       T a = c * (P[sph_slot(n, m)] * rad[n]);
       out[sph_slot(n, m)] = a * eim[m];
     }
-}
-
-// Fetch M_n^m / R_n^m for any m in [-n,n] from the stored m>=0 half (conj for m<0).
-__device__ __forceinline__ cmplx get_M(const double* M, int n, int m) {
-  if (m >= 0) { int s = sph_slot(n, m);  return cmplx(M[2 * s], M[2 * s + 1]); }
-  int s = sph_slot(n, -m);               return cmplx(M[2 * s], -M[2 * s + 1]);
-}
-__device__ __forceinline__ cmplx get_R(const cmplx* R, int n, int m) {
-  if (m >= 0) return R[sph_slot(n, m)];
-  cmplx r = R[sph_slot(n, -m)];          return cmplx(r.re, -r.im);
-}
-
-// ====================================================================
-//  double atomic min/max (no native FP64 min/max atomic on sm_86)
-// ====================================================================
-__device__ __forceinline__ double atomicMinDouble(double *addr, double val) {
-  unsigned long long *a = (unsigned long long *)addr;
-  unsigned long long old = *a, assumed;
-  do {
-    assumed = old;
-    if (__longlong_as_double(assumed) <= val) break;
-    old = atomicCAS(a, assumed, __double_as_longlong(val));
-  } while (assumed != old);
-  return __longlong_as_double(old);
-}
-__device__ __forceinline__ double atomicMaxDouble(double *addr, double val) {
-  unsigned long long *a = (unsigned long long *)addr;
-  unsigned long long old = *a, assumed;
-  do {
-    assumed = old;
-    if (__longlong_as_double(assumed) >= val) break;
-    old = atomicCAS(a, assumed, __double_as_longlong(val));
-  } while (assumed != old);
-  return __longlong_as_double(old);
 }
 
 // ====================================================================
@@ -871,10 +653,6 @@ __device__ __forceinline__ T l2p_contract(const double* __restrict__ L, T x, T y
 //  (P2P). Targets != sources, so no self-exclusion. Weights and the final
 //  scatter use the original (caller) point order via tgt.d_orig.
 // ====================================================================
-
-// Leaf-kernel block width = launch blockDim. Target leaves hold <= 256 points, so 256
-// threads always cover a leaf (one target point per thread in the fused L2P+P2P kernel).
-constexpr int FMM_BDIM      = 256;
 
 // P2P drain: each active thread direct-sums the terminal-leaf list into its point.
 template<bool FIELD>
