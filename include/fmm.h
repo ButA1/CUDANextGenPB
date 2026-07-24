@@ -310,7 +310,7 @@ __device__ __forceinline__ cmplx get_R(const cmplx* R, int n, int m) {
 }
 
 // ====================================================================
-//  double atomic min/max (no native FP64 min/max atomic on sm_86)
+//  double atomic min/max (CUDA has no native FP64 min/max atomic)
 // ====================================================================
 __device__ __forceinline__ double atomicMinDouble(double *addr, double val) {
   unsigned long long *a = (unsigned long long *)addr;

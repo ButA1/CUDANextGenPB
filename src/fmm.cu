@@ -77,9 +77,10 @@ static void init_constant_tables() {
 //  Templated on scalar T: T=double for the potential, T=dual for the field
 //  (the gradient falls out by forward-mode AD, no derivative recurrence).
 // ====================================================================
-// NMOMCAP / DEGCAP size the per-thread scratch; defaults cover order p (the hot M2P/M2M
-// path). M2L passes the order-2p caps (FMM_NMOM_2MAX / FMM_MAX_2P) so only that call pays for
-// the larger scratch -- the order-p instantiations keep their small stack frames.
+// NMOMCAP / DEGCAP size the per-thread scratch; every caller passes explicit caps (the
+// FMM_NMOM_MAX / FMM_MAX_P defaults are just a fallback). M2M and L2L instantiate at order p;
+// M2L at order 2p, so only the M2L instantiation carries the larger buffer -- the order-p
+// instantiations keep their small stack frames.
 template<class T, bool REGULAR, int NMOMCAP = FMM_NMOM_MAX, int DEGCAP = FMM_MAX_P>
 __device__ void solid_harmonics(int maxn, T x, T y, T z, cT<T>* out) {
   if constexpr (REGULAR) {
