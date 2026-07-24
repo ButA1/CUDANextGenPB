@@ -1039,38 +1039,15 @@ __global__ void box_slot_kernel(int n_nodes, const int *__restrict__ flag,
   box_depth[v] = box ? depth[v] : -1;
 }
 
-static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, int p,
-                              fmm_target_tree *tt) {
-  tt->N         = num_pts;
-  tt->n_nodes   = (num_pts > 0) ? (2 * num_pts - 1) : 0;
-  tt->leaf_size = (leaf_size < 1) ? 1 : leaf_size;
-  tt->n_leaves  = 0;
-  tt->p         = p;
-  tt->comp      = comp_sph(p);
-  tt->max_depth = 0;
-  tt->n_box     = 0;
-  tt->n_p2p     = 0;
-  tt->d_pos = tt->d_min = tt->d_max = tt->d_local = nullptr;
-  tt->d_orig = tt->d_left = tt->d_right = tt->d_parent = nullptr;
-  tt->d_first = tt->d_last = tt->d_leaf_nodes = tt->d_depth = tt->d_box_slot = nullptr;
-  tt->d_p2p_off = tt->d_p2p_val = nullptr;
-  if (num_pts <= 0) return;
-
-  const int N  = num_pts;
-  const int nn = tt->n_nodes;
-
-  CUDA_CHECK(cudaMalloc(&tt->d_pos,    3 * N  * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&tt->d_orig,       N  * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&tt->d_min,    3 * nn * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&tt->d_max,    3 * nn * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&tt->d_left,       nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&tt->d_right,      nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&tt->d_parent,     nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&tt->d_first,      nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&tt->d_last,       nn * sizeof(int)));
-
-  const int tpb = 256;
-
+// ====================================================================
+//  Shared LBVH build stages 1-2, used by BOTH the source (fmm_build_atom_tree)
+//  and target (build_target_tree) builders: scene AABB -> Morton codes ->
+//  radix sort. Allocates and returns the Morton-sorted codes and the
+//  original->sorted permutation; the caller owns and frees BOTH. All bbox/scale
+//  temporaries are internal (h_min/scale are consumed only by morton_kernel).
+// ====================================================================
+static void lbvh_morton_sort(int N, const double *d_pts, int tpb,
+                             uint64_t **d_codes_sorted_out, int **d_idx_sorted_out) {
   // 1. bounding box
   double *d_gmin, *d_gmax;
   CUDA_CHECK(cudaMalloc(&d_gmin, 3 * sizeof(double)));
@@ -1113,36 +1090,67 @@ static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, i
                                   d_idx, d_idx_sorted, N);
   cudaFree(d_tmp); cudaFree(d_codes); cudaFree(d_idx);
 
-  // 3. reorder into Morton order (geometry only) + leaf init + permutation
-  reorder_geom_kernel<<<mt_blocks, tpb>>>(N, d_idx_sorted, d_pts,
+  *d_codes_sorted_out = d_codes_sorted;
+  *d_idx_sorted_out   = d_idx_sorted;
+}
+
+// ---- target-tree build stages (see build_target_tree for the top-level flow) ----
+
+// Allocate the geometry + topology node arrays (uses tt->N, tt->n_nodes).
+static void tt_alloc_nodes(fmm_target_tree *tt) {
+  const int N  = tt->N;
+  const int nn = tt->n_nodes;
+  CUDA_CHECK(cudaMalloc(&tt->d_pos,    3 * N  * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&tt->d_orig,       N  * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt->d_min,    3 * nn * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&tt->d_max,    3 * nn * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&tt->d_left,       nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt->d_right,      nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt->d_parent,     nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt->d_first,      nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&tt->d_last,       nn * sizeof(int)));
+}
+
+// Stage 3: reorder into Morton order (geometry only) + leaf init + permutation.
+static void tt_reorder(fmm_target_tree *tt, int tpb,
+                       const int *d_idx_sorted, const double *d_pts) {
+  int mt_blocks = (tt->N + tpb - 1) / tpb;
+  reorder_geom_kernel<<<mt_blocks, tpb>>>(tt->N, d_idx_sorted, d_pts,
                                           tt->d_pos, tt->d_orig,
                                           tt->d_min, tt->d_max,
                                           tt->d_parent, tt->d_first, tt->d_last);
   CUDA_CHECK(cudaGetLastError());
-  cudaFree(d_idx_sorted);
+}
 
-  if (N > 1) {
-    // 4. internal nodes + bottom-up AABB
-    int in_blocks = (N - 1 + tpb - 1) / tpb; // with N leaves you always get N-1 internal nodes (full binary tree)
-    build_internal_kernel<<<in_blocks, tpb>>>(N, d_codes_sorted,
-                                              tt->d_left, tt->d_right, tt->d_parent,
-                                              tt->d_first, tt->d_last);
-    CUDA_CHECK(cudaGetLastError());
+// Stage 4: internal nodes (Karras) + bottom-up AABB. Caller guards on tt->N > 1.
+static void tt_internal_aabb(fmm_target_tree *tt, int tpb,
+                             const uint64_t *d_codes_sorted) {
+  const int N  = tt->N;
+  const int nn = tt->n_nodes;
+  int in_blocks = (N - 1 + tpb - 1) / tpb; // with N leaves you always get N-1 internal nodes (full binary tree)
+  int mt_blocks = (N + tpb - 1) / tpb;
+  build_internal_kernel<<<in_blocks, tpb>>>(N, d_codes_sorted,
+                                            tt->d_left, tt->d_right, tt->d_parent,
+                                            tt->d_first, tt->d_last);
+  CUDA_CHECK(cudaGetLastError());
 
-    int *d_flags;
-    CUDA_CHECK(cudaMalloc(&d_flags, nn * sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_flags, 0, nn * sizeof(int)));
-    summarize_aabb_kernel<<<mt_blocks, tpb>>>(N, tt->d_left, tt->d_right, tt->d_parent,
-                                              tt->d_min, tt->d_max, d_flags);
-    CUDA_CHECK(cudaGetLastError());
-    cudaFree(d_flags);
-  }
-  cudaFree(d_codes_sorted);
+  int *d_flags;
+  CUDA_CHECK(cudaMalloc(&d_flags, nn * sizeof(int)));
+  CUDA_CHECK(cudaMemset(d_flags, 0, nn * sizeof(int)));
+  summarize_aabb_kernel<<<mt_blocks, tpb>>>(N, tt->d_left, tt->d_right, tt->d_parent,
+                                            tt->d_min, tt->d_max, d_flags);
+  CUDA_CHECK(cudaGetLastError());
+  cudaFree(d_flags);
+}
 
-  // 5. mark + compact the leaf-size frontier -> d_leaf_nodes
+// Stage 5: mark + compact the leaf-size frontier -> tt->d_leaf_nodes (+ tt->n_leaves).
+static void tt_frontier(fmm_target_tree *tt, int tpb) {
+  const int N  = tt->N;
+  const int nn = tt->n_nodes;
+  int fr_blocks = (nn + tpb - 1) / tpb;
+
   int *d_frontier;
   CUDA_CHECK(cudaMalloc(&d_frontier, nn * sizeof(int)));
-  int fr_blocks = (nn + tpb - 1) / tpb;
   mark_frontier_kernel<<<fr_blocks, tpb>>>(nn, N, tt->leaf_size,
                                            tt->d_first, tt->d_last, tt->d_parent,
                                            d_frontier);
@@ -1164,9 +1172,14 @@ static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, i
                              tt->d_leaf_nodes, d_num, nn);
   CUDA_CHECK(cudaMemcpy(&tt->n_leaves, d_num, sizeof(int), cudaMemcpyDeviceToHost));
   cudaFree(d_sel_tmp); cudaFree(d_num); cudaFree(d_frontier); cudaFree(d_ids);
+}
 
-  // 6. FMM downward-pass storage. Local expansions live ONLY on box nodes (frontier +
-  //    ancestors), kept compact via d_box_slot, so memory is O(n_box*comp) not O(N*comp).
+// Stage 6: FMM downward-pass storage. Local expansions live ONLY on box nodes (frontier +
+// ancestors), kept compact via d_box_slot, so memory is O(n_box*comp) not O(N*comp).
+static void tt_downward_storage(fmm_target_tree *tt, int tpb) {
+  const int nn = tt->n_nodes;
+  int fr_blocks = (nn + tpb - 1) / tpb;
+
   CUDA_CHECK(cudaMalloc(&tt->d_depth,    nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&tt->d_box_slot, nn * sizeof(int)));
   node_depth_kernel<<<fr_blocks, tpb>>>(nn, tt->d_parent, tt->d_depth);
@@ -1201,6 +1214,39 @@ static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, i
   cudaFree(d_flag); cudaFree(d_pref); cudaFree(d_bdepth);
 
   CUDA_CHECK(cudaMalloc(&tt->d_local, (size_t)tt->n_box * tt->comp * sizeof(double)));
+}
+
+static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, int p,
+                              fmm_target_tree *tt) {
+  tt->N         = num_pts;
+  tt->n_nodes   = (num_pts > 0) ? (2 * num_pts - 1) : 0;
+  tt->leaf_size = (leaf_size < 1) ? 1 : leaf_size;
+  tt->n_leaves  = 0;
+  tt->p         = p;
+  tt->comp      = comp_sph(p);
+  tt->max_depth = 0;
+  tt->n_box     = 0;
+  tt->n_p2p     = 0;
+  tt->d_pos = tt->d_min = tt->d_max = tt->d_local = nullptr;
+  tt->d_orig = tt->d_left = tt->d_right = tt->d_parent = nullptr;
+  tt->d_first = tt->d_last = tt->d_leaf_nodes = tt->d_depth = tt->d_box_slot = nullptr;
+  tt->d_p2p_off = tt->d_p2p_val = nullptr;
+  if (num_pts <= 0) return;
+
+  const int tpb = 256;
+  tt_alloc_nodes(tt);
+
+  uint64_t *d_codes_sorted; int *d_idx_sorted;
+  lbvh_morton_sort(tt->N, d_pts, tpb, &d_codes_sorted, &d_idx_sorted);  // stages 1-2
+
+  tt_reorder(tt, tpb, d_idx_sorted, d_pts);                            // stage 3
+  cudaFree(d_idx_sorted);
+
+  if (tt->N > 1) tt_internal_aabb(tt, tpb, d_codes_sorted);            // stage 4
+  cudaFree(d_codes_sorted);
+
+  tt_frontier(tt, tpb);                                                // stage 5
+  tt_downward_storage(tt, tpb);                                        // stage 6
 
   CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -1481,6 +1527,71 @@ static void fmm_build_local(const fmm_tree &src, fmm_target_tree &tt, double the
   cudaFree(d_m2l);
 }
 
+// ---- source-tree build stages (see fmm_build_atom_tree for the top-level flow) ----
+
+// Allocate geometry, topology, and per-node moment arrays (uses t->N, t->n_nodes, t->comp).
+static void src_alloc_nodes(fmm_tree *t) {
+  const int N    = t->N;
+  const int nn   = t->n_nodes;
+  const int comp = t->comp;
+  CUDA_CHECK(cudaMalloc(&t->d_pos,     3 * N  * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&t->d_q,           N  * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&t->d_min,     3 * nn * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&t->d_max,     3 * nn * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&t->d_left,        nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_right,       nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_parent,      nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_first,       nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_last,        nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_moments,
+                        (size_t)nn * comp * sizeof(double)));
+}
+
+// Stage 3: reorder atoms into Morton order + initialize leaf nodes (incl. moments).
+static void src_reorder(fmm_tree *t, int tpb, const int *d_idx_sorted,
+                        const double *d_atoms, const double *d_charges) {
+  int mt_blocks = (t->N + tpb - 1) / tpb;
+  reorder_kernel<<<mt_blocks, tpb>>>(t->N, t->comp, d_idx_sorted, d_atoms, d_charges,
+                                     t->d_pos, t->d_q,
+                                     t->d_min, t->d_max,
+                                     t->d_moments, t->d_parent,
+                                     t->d_first, t->d_last);
+  CUDA_CHECK(cudaGetLastError());
+}
+
+// Stages 4-5: internal nodes (Karras) + bottom-up multipole summarize (M2M).
+// Caller guards on t->N > 1.
+static void src_internal_m2m(fmm_tree *t, int tpb, const uint64_t *d_codes_sorted, int p) {
+  const int N  = t->N;
+  const int nn = t->n_nodes;
+  int in_blocks = (N - 1 + tpb - 1) / tpb;
+  int mt_blocks = (N + tpb - 1) / tpb;
+  // 4. Build internal nodes (Karras)
+  build_internal_kernel<<<in_blocks, tpb>>>(N, d_codes_sorted,
+                                            t->d_left, t->d_right, t->d_parent,
+                                            t->d_first, t->d_last);
+  CUDA_CHECK(cudaGetLastError());
+
+  // 5. Bottom-up multipole summarize
+  int *d_flags;
+  CUDA_CHECK(cudaMalloc(&d_flags, nn * sizeof(int)));
+  CUDA_CHECK(cudaMemset(d_flags, 0, nn * sizeof(int)));
+  switch (p) {
+    case 1: summarize_kernel<1 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+    case 2: summarize_kernel<2 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+    case 3: summarize_kernel<3 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+    case 4: summarize_kernel<4 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+    case 5: summarize_kernel<5 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+    case 6: summarize_kernel<6 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+    case 7: summarize_kernel<7 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+    case 8: summarize_kernel<8 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+    case 9: summarize_kernel<9 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+    default: summarize_kernel<10><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
+  }
+  CUDA_CHECK(cudaGetLastError());
+  cudaFree(d_flags);
+}
+
 // ========================== public C API ==========================
 extern "C" {
 
@@ -1517,105 +1628,18 @@ void fmm_build_atom_tree(int num_atoms,
     return;
   }
 
-  const int N    = num_atoms;
-  const int nn   = t->n_nodes;
-  const int comp = t->comp;
-
-  CUDA_CHECK(cudaMalloc(&t->d_pos,     3 * N  * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_q,           N  * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_min,     3 * nn * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_max,     3 * nn * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&t->d_left,        nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&t->d_right,       nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&t->d_parent,      nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&t->d_first,       nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&t->d_last,        nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&t->d_moments,
-                        (size_t)nn * comp * sizeof(double)));
-
   const int tpb = 256;
+  src_alloc_nodes(t);
 
-  // 1. bounding box
-  double *d_gmin, *d_gmax;
-  CUDA_CHECK(cudaMalloc(&d_gmin, 3 * sizeof(double)));
-  CUDA_CHECK(cudaMalloc(&d_gmax, 3 * sizeof(double)));
-  { double init_min[3] = { DBL_MAX,  DBL_MAX,  DBL_MAX};
-    double init_max[3] = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
-    CUDA_CHECK(cudaMemcpy(d_gmin, init_min, 3*sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_gmax, init_max, 3*sizeof(double), cudaMemcpyHostToDevice)); }
-  int bb_blocks = std::min(1024, (N + tpb - 1) / tpb);
-  bbox_kernel<<<bb_blocks, tpb>>>(N, d_atoms, d_gmin, d_gmax);
-  CUDA_CHECK(cudaGetLastError());
+  uint64_t *d_codes_sorted; int *d_idx_sorted;
+  lbvh_morton_sort(t->N, d_atoms, tpb, &d_codes_sorted, &d_idx_sorted);  // stages 1-2
 
-  double h_min[3], h_max[3];
-  CUDA_CHECK(cudaMemcpy(h_min, d_gmin, 3*sizeof(double), cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaMemcpy(h_max, d_gmax, 3*sizeof(double), cudaMemcpyDeviceToHost));
-  cudaFree(d_gmin); cudaFree(d_gmax);
-
-  double sx = h_max[0] - h_min[0]; if (sx <= 0) sx = 1.0;
-  double sy = h_max[1] - h_min[1]; if (sy <= 0) sy = 1.0;
-  double sz = h_max[2] - h_min[2]; if (sz <= 0) sz = 1.0;
-
-  // 2. Morton codes + radix sort
-  uint64_t *d_codes, *d_codes_sorted;
-  int *d_idx, *d_idx_sorted;
-  CUDA_CHECK(cudaMalloc(&d_codes,        N * sizeof(uint64_t)));
-  CUDA_CHECK(cudaMalloc(&d_codes_sorted, N * sizeof(uint64_t)));
-  CUDA_CHECK(cudaMalloc(&d_idx,          N * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&d_idx_sorted,   N * sizeof(int)));
-
-  int mt_blocks = (N + tpb - 1) / tpb;
-  morton_kernel<<<mt_blocks, tpb>>>(N, d_atoms, h_min[0], h_min[1], h_min[2],
-                                    1.0/sx, 1.0/sy, 1.0/sz, d_codes, d_idx);
-  CUDA_CHECK(cudaGetLastError());
-
-  void *d_tmp = nullptr; size_t tmp_bytes = 0;
-  cub::DeviceRadixSort::SortPairs(d_tmp, tmp_bytes, d_codes, d_codes_sorted,
-                                  d_idx, d_idx_sorted, N);
-  CUDA_CHECK(cudaMalloc(&d_tmp, tmp_bytes));
-  cub::DeviceRadixSort::SortPairs(d_tmp, tmp_bytes, d_codes, d_codes_sorted,
-                                  d_idx, d_idx_sorted, N);
-  cudaFree(d_tmp);
-  cudaFree(d_codes);
-  cudaFree(d_idx);
-
-  // 3. Reorder atoms into Morton order + initialize leaf nodes (incl. moments)
-  reorder_kernel<<<mt_blocks, tpb>>>(N, comp, d_idx_sorted, d_atoms, d_charges,
-                                     t->d_pos, t->d_q,
-                                     t->d_min, t->d_max,
-                                     t->d_moments, t->d_parent,
-                                     t->d_first, t->d_last);
-  CUDA_CHECK(cudaGetLastError());
+  src_reorder(t, tpb, d_idx_sorted, d_atoms, d_charges);                 // stage 3
   cudaFree(d_idx_sorted);
 
-  if (N > 1) {
-    // 4. Build internal nodes (Karras)
-    int in_blocks = (N - 1 + tpb - 1) / tpb;
-    build_internal_kernel<<<in_blocks, tpb>>>(N, d_codes_sorted,
-                                              t->d_left, t->d_right, t->d_parent,
-                                              t->d_first, t->d_last);
-    CUDA_CHECK(cudaGetLastError());
-
-    // 5. Bottom-up multipole summarize
-    int *d_flags;
-    CUDA_CHECK(cudaMalloc(&d_flags, nn * sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_flags, 0, nn * sizeof(int)));
-    switch (p) {
-      case 1: summarize_kernel<1 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-      case 2: summarize_kernel<2 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-      case 3: summarize_kernel<3 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-      case 4: summarize_kernel<4 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-      case 5: summarize_kernel<5 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-      case 6: summarize_kernel<6 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-      case 7: summarize_kernel<7 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-      case 8: summarize_kernel<8 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-      case 9: summarize_kernel<9 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-      default: summarize_kernel<10><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-    }
-    CUDA_CHECK(cudaGetLastError());
-    cudaFree(d_flags);
-  }
+  if (t->N > 1) src_internal_m2m(t, tpb, d_codes_sorted, p);             // stages 4-5
   cudaFree(d_codes_sorted);
+
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 
