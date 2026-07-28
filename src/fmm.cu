@@ -22,6 +22,7 @@
 #include <cub/cub.cuh>
 #include <vector>
 #include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cfloat>
 #include <cmath>
@@ -84,20 +85,20 @@ static void init_constant_tables() {
 template<class T, bool REGULAR, int NMOMCAP = FMM_NMOM_MAX, int DEGCAP = FMM_MAX_P>
 __device__ void solid_harmonics(int maxn, T x, T y, T z, cT<T>* out) {
   if constexpr (REGULAR) {
-    // Regular solid harmonics G_n^m = r^n Y_n^m (CGR'99 Eq.4 normalization), m>=0 half,
+    // Regular solid harmonics R_n^m = r^n Y_n^m (CGR'99 Eq.4 normalization), m>=0 half,
     // built by a POLE-FREE Cartesian recurrence -- every step is polynomial in (x,y,z), so
     // the forward-mode AD (T=dual) stays well-conditioned at r=0. The spherical build
     // (below) divides by r and rxy; its 1/r,1/rxy intermediates are fine for the VALUE but
     // wreck the GRADIENT near the expansion center, which is exactly where the L2P field is
     // evaluated (target points inside their own leaf). This recurrence reproduces the very
     // same quantity the spherical build does (verified order-by-order):
-    //   diagonal: G_m^m = -sqrt((2m-1)/(2m)) (x+iy) G_{m-1}^{m-1},   G_0^0 = 1
-    //   vertical: G_n^m = (2n-1)/sqrt((n-m)(n+m)) · z · G_{n-1}^m
-    //                   - sqrt((n+m-1)(n-m-1)/((n+m)(n-m))) · r^2 · G_{n-2}^m.
+    //   diagonal: R_m^m = -sqrt((2m-1)/(2m)) (x+iy) R_{m-1}^{m-1},   R_0^0 = 1
+    //   vertical: R_n^m = (2n-1)/sqrt((n-m)(n+m)) · z · R_{n-1}^m
+    //                   - sqrt((n+m-1)(n-m-1)/((n+m)(n-m))) · r^2 · R_{n-2}^m.
     T r2 = x * x + y * y + z * z;
     cT<T> w(x, y);                                   // x + i y
     out[sph_slot(0, 0)] = cT<T>(T(1.0), T(0.0));
-    for (int m = 1; m <= maxn; ++m) {                // diagonal seeds G_m^m
+    for (int m = 1; m <= maxn; ++m) {                // diagonal seeds R_m^m
       double c = -sqrt((2.0 * m - 1.0) / (2.0 * m));
       out[sph_slot(m, m)] = T(c) * (w * out[sph_slot(m - 1, m - 1)]);
     }
@@ -545,65 +546,9 @@ __global__ void iota_kernel(int n, int *__restrict__ out) {
   if (i < n) out[i] = i;
 }
 
-// ====================================================================
-//  Multipole evaluation (M2P) in the complex spherical-harmonic basis.
-//  Both evaluators contract the stored moments {M_n^m, m>=0} against the
-//  irregular solid harmonics S_n^m of the target-relative vector, using
-//  M_n^{-m}=conj(M_n^m), S_n^{-m}=conj(S_n^m) to fold the m<0 half:
-//     Σ_{m=-n}^{n} M_n^m S_n^m = M_n^0 S_n^0 + 2·Re Σ_{m=1}^{n} M_n^m S_n^m.
-// ====================================================================
-
-// Potential Φ (CGR'99 Thm 2.1, Eq. 5). S = irregular solid harmonics (double).
-__device__ double mp_potential_eval_sph(int p, const double *__restrict__ M,
-                                                        const cmplx *__restrict__ S) {
-  double phi = 0.0;
-  for (int n = 0; n <= p; ++n) {
-    int s0 = sph_slot(n, 0);
-    phi += M[2 * s0] * S[s0].re;                                   // m = 0 (real)
-    for (int m = 1; m <= n; ++m) {
-      int s = sph_slot(n, m);
-      phi += 2.0 * (M[2 * s] * S[s].re - M[2 * s + 1] * S[s].im);  // 2 Re(M_n^m S_n^m)
-    }
-  }
-  return phi;
-}
-
-// Field E = -∇Φ. S is built in dual arithmetic (S_n^m carries d/dx,d/dy,d/dz),
-// so contracting it with the moments yields Φ together with its exact gradient
-// (forward-mode AD); the field is the negated gradient. No expansion above p.
-__device__ void mp_field_eval_sph(int p, const double *__restrict__ M,
-                                                  const cT<dual> *__restrict__ S,
-                                                  double &gx, double &gy, double &gz) {
-  dual phi;
-  for (int n = 0; n <= p; ++n) {
-    int s0 = sph_slot(n, 0);
-    phi = phi + M[2 * s0] * S[s0].re;
-    for (int m = 1; m <= n; ++m) {
-      int s = sph_slot(n, m);
-      dual termre = M[2 * s] * S[s].re - M[2 * s + 1] * S[s].im;   // Re(M_n^m S_n^m)
-      phi = phi + 2.0 * termre;
-    }
-  }
-  gx -= phi.dx; gy -= phi.dy; gz -= phi.dz;
-}
-
-// L2P (CGR'99 Thm 2.2, Eq. 8): a local expansion {L} evaluated at a target point is the
-// same m>=0-folded contraction as M2P, but against the REGULAR solid harmonics
-// R_j^k = r^j·Y_j^k of (target - expansion center) instead of the irregular S_j^k. Hence
-// L2P reuses the M2P evaluators verbatim, with R substituted for S and {L} for {M}.
-__device__ __forceinline__ double l2p_potential(int p, const double *__restrict__ L,
-                                                       const cmplx *__restrict__ R) {
-  return mp_potential_eval_sph(p, L, R);
-}
-__device__ __forceinline__ void l2p_field(int p, const double *__restrict__ L,
-                                                  const cT<dual> *__restrict__ R,
-                                                  double &gx, double &gy, double &gz) {
-  mp_field_eval_sph(p, L, R, gx, gy, gz);
-}
-
 // Fused L2P: build the regular solid harmonics R_n^m of (x,y,z) by the pole-free Cartesian
 // recurrence (same one as solid_harmonics<T,true>) and contract them against the local
-// expansion L on the fly, in the same m>=0-folded form as mp_*_eval_sph. Walked column-major
+// expansion L on the fly, in the same m>=0-folded form (the M_n^0 term + 2*Re over m>0). Walked column-major
 // (m outer, n inner) so the live set is O(P) -- a diagonal seed plus a 2-deep vertical window,
 // held in NAMED scalars -- never the full O(P^2) array. That keeps everything in registers
 // instead of spilling the harmonic buffer to local memory. T=double: potential (returns Phi).
@@ -613,11 +558,11 @@ template<int P, class T>
 __device__ __forceinline__ T l2p_contract(const double* __restrict__ L, T x, T y, T z) {
   T r2 = x*x + y*y + z*z;
   cT<T> w(x, y);                       // x + i y
-  cT<T> diag(T(1.0), T(0.0));          // G_0^0
+  cT<T> diag(T(1.0), T(0.0));          // R_0^0
   T phi = T(0.0);
   #pragma unroll
   for (int m = 0; m <= P; ++m) {
-    if (m > 0) {                        // advance diagonal seed G_m^m = c*(x+iy)*G_{m-1}^{m-1}
+    if (m > 0) {                        // advance diagonal seed R_m^m = c*(x+iy)*R_{m-1}^{m-1}
       double c = -sqrt((2.0*m - 1.0) / (2.0*m));
       diag = T(c) * (w * diag);
     }
@@ -626,7 +571,7 @@ __device__ __forceinline__ T l2p_contract(const double* __restrict__ L, T x, T y
     for (int n = m; n <= P; ++n) {
       cT<T> g;
       if (n == m) g = diag;
-      else {                            // vertical climb G_n^m = a*z*G_{n-1}^m - b*r^2*G_{n-2}^m
+      else {                            // vertical climb R_n^m = a*z*R_{n-1}^m - b*r^2*R_{n-2}^m
         double a = (2.0*n - 1.0) / sqrt((double)(n-m)*(double)(n+m));
         g = T(a) * (z * g1);
         if (n - 2 >= m) {
@@ -725,7 +670,7 @@ __global__ void l2p_p2p_kernel(fmm_tree src, fmm_target_tree tgt,
       dual phi_l = l2p_contract<P, dual>(L, dual(Rxp, 1.0, 0.0, 0.0),
                                             dual(Ryp, 0.0, 1.0, 0.0),
                                             dual(Rzp, 0.0, 0.0, 1.0));
-      gx -= phi_l.dx; gy -= phi_l.dy; gz -= phi_l.dz;   // E = -grad Phi (matches mp_field_eval)
+      gx -= phi_l.dx; gy -= phi_l.dy; gz -= phi_l.dz;   // E = -grad Phi (forward-mode AD)
     } else {
       phi += l2p_contract<P, double>(L, Rxp, Ryp, Rzp);
     }
@@ -1114,7 +1059,7 @@ __global__ void m2l_accumulate_kernel(fmm_tree src, fmm_target_tree tgt,
   double Bcx=0.5*(src.d_min[3*B]+src.d_max[3*B]), Bcy=0.5*(src.d_min[3*B+1]+src.d_max[3*B+1]),
          Bcz=0.5*(src.d_min[3*B+2]+src.d_max[3*B+2]);
   cmplx S[nmom_sph(2 * P)];
-  // t = (source center) - (target center)  (Eq.17 sign convention)
+  // t = (source center) - (target center)  (Eq.17 sign convention) wdym sign convention Eq 17?
   solid_harmonics<double, false, nmom_sph(2*P), 2*P>(2*P, Bcx-Acx, Bcy-Acy, Bcz-Acz, S);
   const double *O = src.d_moments + (size_t)B * COMP_DBL;
   double *L = tgt.d_local + (size_t)tgt.d_box_slot[A] * COMP_DBL;   // A is always a box node
@@ -1148,9 +1093,12 @@ __global__ void l2l_level_kernel(fmm_target_tree tgt, int lvl) {
                tgt.d_local + (size_t)sv * COMP_DBL);
 }
 
-// Pair-BFS host loop. Returns the M2L pair count and the near P2P pair count, handing back both
-// raw device pair arrays (caller frees). The P2P pairs are unsorted (A,B); fmm_build_p2p_csr
-// groups them by target.
+// Level-synchronous dual-tree traversal (expands the whole (A,B) pair frontier per launch --
+// NOT the Bonsai single-tree shared-memory BFS discovery, which we dropped; that walked the
+// source tree per target group and needed a separate near-field pass. Here one sweep emits both
+// far (M2L) and near (P2P) pairs). Returns the M2L pair count and the near P2P pair count, handing
+// back both raw device pair arrays (caller frees). The P2P pairs are unsorted (A,B);
+// fmm_build_p2p_csr groups them by target.
 //
 // Two distinct overflow regimes, handled separately (at small theta the interaction lists are
 // large -- O(theta^-3) -- so naive doubling restarts the whole O(N) traversal many times):
@@ -1178,8 +1126,8 @@ static int fmm_pair_traverse(const fmm_tree &src, fmm_target_tree &tt, double th
     CUDA_CHECK(cudaMemcpy(d_cur, &seed, sizeof(int2), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemset(&d_cnt[1], 0, 2 * sizeof(int)));   // zero n_m2l and n_p2p
 
-    int n_cur = 1; bool front_overflow = false;
-    while (n_cur > 0) {
+    int n_cur = 1; bool front_overflow = false;   // n_cur = number of pairs in the current frontier
+    while (n_cur > 0) {   // BFS level loop (loop until no more pairs)
       CUDA_CHECK(cudaMemset(&d_cnt[0], 0, sizeof(int)));
       int tpb = 128, g = (n_cur + tpb - 1) / tpb;
       fmm_pair_kernel<<<g, tpb>>>(src, tt, theta, d_cur, n_cur,

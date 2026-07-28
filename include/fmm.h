@@ -299,7 +299,9 @@ struct fmm_target_tree {
 __host__ __device__ __forceinline__ double val(double a) { return a; }
 __host__ __device__ __forceinline__ double val(dual a)   { return a.v; }
 
-// Fetch M_n^m / R_n^m for any m in [-n,n] from the stored m>=0 half (conj for m<0).
+// Fetch one coefficient for any m in [-n,n] from the stored m>=0 half (conj folds m<0).
+// get_M reads interleaved-double moments {M_n^m}; get_R reads a cmplx harmonic buffer --
+// either the regular R_n^m or the irregular S_n^m (the m<0 conjugate fold is identical).
 __device__ __forceinline__ cmplx get_M(const double* M, int n, int m) {
   if (m >= 0) { int s = sph_slot(n, m);  return cmplx(M[2 * s], M[2 * s + 1]); }
   int s = sph_slot(n, -m);               return cmplx(M[2 * s], -M[2 * s + 1]);
