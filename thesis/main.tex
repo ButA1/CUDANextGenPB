@@ -5,6 +5,7 @@
 \usepackage[english]{babel}
 \usepackage{graphicx}
 \usepackage{amsmath,amssymb}
+\usepackage{booktabs}
 \usepackage{geometry}
 \geometry{margin=2.5cm}
 \usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
@@ -92,22 +93,51 @@ Write your subsection content here.
 \subsection{Experimental Setup}
 \label{sec:evaluation-experimental-setup}
 
-In this section, I will describe the experimental setup used to evaluate the performance of the various optimizations and compare them against the baseline implementation and analytical results, but before that I want to go over the relevant parameters inside my experimental setup.
+In this section, I will describe the experimental setup used to evaluate the performance of the various optimizations and compare them against the baseline implementation and analytical results, but before that I want to go over the test systems and the relevant parameters inside my experimental setup and how they impacted the result.
+
+\subsubsection{Test Systems}
+\label{sec:evaluation-experimental-setup-test-systems}
+
+Testing was done both locally on my own machine, and on specific nodes of the TU Berlin HPC. The specifications of both systems can be seen in Table~\ref{tab:test-systems}. As already mentioned in the %TODO reference implementation
+FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compared to the A100. On the other hand, the INTEL Xeon E5-2630v4 are quite old, and are handily beaten by my R7 5800X3D in both single-core and multi-core performance, which makes comparing performance a little awkward.
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{lccc}
+        \toprule
+         & Local & gpu[022,025,026] & gpu[023,024,027] \\
+        \midrule
+        CPU & AMD R7 5800X3D & \multicolumn{2}{c}{2xINTEL Xeon E5-2630v4} \\
+        RAM & 32 GB DDR4 & \multicolumn{2}{c}{512 GB DDR4} \\
+        GPU & RTX 3080 & Tesla A100 & 2xTesla A100 \\
+        VRAM & 10GB & 40GB & 80GB \\
+        FP64:FP32 & 64:1 & \multicolumn{2}{c}{2:1} \\
+        Driver / CUDA & 580.173.02 / 13.0 & \multicolumn{2}{c}{570.86.10 / 12.8} \\
+        \bottomrule
+    \end{tabular}
+    \caption{Specifications of the systems used for testing.}
+    \label{tab:test-systems}
+\end{table}
 
 \subsubsection{NGPB Parameters}
 \label{sec:evaluation-experimental-setup-ngpb-parameters}
 
-One important parameter is \texttt{perfil}, which is short for "percentage fill". The documentation for NGPB \cite{example2010} 
-% TODO add citation here
-describes it as the "fraction of the fine/coarse domain size occupied by the molecule", where \texttt{perfil1} controls the fraction for the fine domain, and \texttt{perfil2} the coarse domain. They can be thought of as controlling two bounding boxes around the molecule. Logically, you want the molecule to be fully inside the fine grid domain. Perfil1 is set to 0.8 by default, however the in the NGPB paper \cite{diflorio2025nextgenpb}, the authors showed that a \texttt{perfil1} of 90\%-95\% is perfectly sufficient. This is something I also observed.
+NGPB offers various different mesh types, on which the remaining mesh parameters depend \cite{nextgenpb_docs}. The first and default option being \texttt{mesh\_shape = 0} which is a de-refined mesh with a fine and coarse region, controlled by \texttt{perfil1} and \texttt{perfil2} respectively. \texttt{perfil} (short for "percentage fill") set the fraction of the fine/coarse domain size occupied by the molecule. Resolution with this mesh type is controlled through \texttt{scale}, which is equal to the inverse resolution in Ångström, meaning at a value of 2 is equal to a resolution of \texttt{0.5Å}.
+% TODO not sure if I should add SI units. I won't have a lot of of units in this thesis
+\texttt{mesh\_shape = 1} is a uniform cubic mesh, whose resolution isn't set by \texttt{scale}, but rather by \texttt{unilevel}. This lead to some initial confusion, and a transition to using \texttt{mesh\_shape = 0} exclusively. The remaining two types were uninteresting for my testcases.
+Perfil1 is set to 0.8 by default, however the in the NGPB paper \cite{diflorio2025nextgenpb}, the authors showed that a \texttt{perfil1} of 90\%-95\% is perfectly sufficient, and would reduce the runtime significantly. I could also confirm this through my own observations. Logically, one would want the molecule to be fully inside the fine grid domain, but also leave enough room for the de-refinement transition, due to p8est restricting neighboring quadrants to be only one refinement level apart. Because of this, a \texttt{perfil1} of 1 is not feasible. \texttt{perfil2} is kept at its default value of 0.2. \texttt{scale} is also kept at its default value of 2, which was also proven to be sufficient in the paper.
+Lastly, there was also the undocumented parameter \texttt{loc\_refinement}, which could basically force the mesh to be refined regardless of \texttt{mesh\_shape}, and thus route the energy calculation through the \texttt{energy} function instead of \texttt{energy\_fast}. To my surprise, this yielded worse results in my testing, and served only to test \texttt{energy\_cuda}.
 
-\subsubsection{MPI Parameters}
-\label{sec:evaluation-experimental-setup-mpi-parameters}
+\subsubsection{MPI Rank}
+\label{sec:evaluation-experimental-setup-mpi-ranks}
+
+The number of ranks for MPI is set through the \texttt{-n} or \texttt{-np}. As already explained %TODO add the chapter for distributed sparse matrices here
+, the total memory consumption of all nodes increases slightly with the number of ranks, as each one needs to keep track of ghost- and halo elements. However, it can also slightly influence of the result itself, as the reduction of the individual result of the ranks may calculate in a different order. The magnitude of this error is at FP64 noise level, but can impact smaller molecules like 1CCM, where I discovered that the flux charge varied wildly with \texttt{-n}. Most local testing was performed using an \texttt{-n} of 4, while testing on the cluster was performed using an \texttt{-n} of 16.
 
 \subsubsection{Compiler Flags}
 \label{sec:evaluation-experimental-setup-compiler-flags}
 
-Aside from the additional compiler flags added due to inclusion of CUDA, I largely used the same flags from the original makefile and \texttt{local\_settings}. Although initially I changed the optimization flag from \texttt{-o2} to \texttt{-o0} due to fears of catastrophic cancellations during floating point calculations, it quickly proved more trouble than it was worth. It made the code extremely slow, which over-exaggerated the speedup achieved by the GPU and the need to optimize other parts of the code. I reverted back to \texttt{-o2}, but purposefully stayed away from the \texttt{-Ofast -mtune=native -march=native} lingering inside the \texttt{local\_settings}, which would've provided even faster baseline performance, but unlike \texttt{-o2} legitimately ran the risk of altering the results. Additionally, the dependencies of NGPB as also compiled using \texttt{-o2}.
+Aside from the additional compiler flags added due to inclusion of CUDA, I largely used the same flags from the original makefile and \texttt{local\_settings}. Although initially I changed the optimization flag from \texttt{-o2} to \texttt{-o0} due to fears of catastrophic cancellations during floating point calculations, spawned by the \texttt{-n} discovery, it quickly proved more trouble than it was worth. It made the code extremely slow, which over-exaggerated the speedup achieved by the GPU and the need to optimize other parts of the code. I reverted back to \texttt{-o2}, but purposefully stayed away from the commented out \texttt{-Ofast -mtune=native -march=native} setting lingering inside the \texttt{local\_settings}, which would've provided even faster baseline performance, but unlike \texttt{-o2} legitimately ran the risk of altering the results significantly. Additionally, the dependencies of NGPB as also compiled using \texttt{-o2}.
 
 \subsubsection{Testing}
 \label{sec:evaluation-experimental-setup-testing}
