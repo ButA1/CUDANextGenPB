@@ -79,6 +79,7 @@ ehthumbs.db
 *.tmp
 *.bak
 *.backup
+*.log
 
 # Test outputs and temporary files
 test/*.o
