@@ -142,19 +142,42 @@ Aside from the additional compiler flags added due to inclusion of CUDA, I large
 \subsubsection{Testing}
 \label{sec:evaluation-experimental-setup-testing}
 
-The main two metrics used for evaluation were the execution time, accuracy of the results and also in some instances, memory usage. For this I created a handful of test cases using mostly different PQR files. Those generally fall into two categories: analytical test cases and comparative test cases. 
+The main two metrics used for evaluation were the execution time, accuracy of the results and also in some instances, memory usage. For this I created a handful of test cases using different PQR models. Those generally fall into two categories: analytical test cases and comparative test cases. 
 
 The analytical test cases were used to verify the correctness of the results with respect to the known analytical results taken from the NGPB paper \cite{diflorio2025nextgenpb}. Those allowed me to verify the error magnitudes independent of actually running NGPB locally, as well as the correctness of the parameters used to achieve the results from the paper. They were not used to compare speed, as they are fairly small and thus not very computationally expensive.
 
-Comparative test cases were used to compare the results of the optimized implementation against the baseline. The baseline isn't formed by the completely unmodified version of NGPB, as the slightly altered result due to the triangulation fix is assumed to be more correct. Unlike the analytical benchmarks, these were used to compare both speed and accuracy, as they are much larger than the analytical models. 
+Comparative test cases were used to compare the results of the optimized implementation against the baseline. The baseline isn't formed by the completely unmodified version of NGPB, as the slightly altered result due to the triangulation fix is assumed to be more correct. Unlike the analytical benchmarks, these were used to compare both speed and accuracy, as they are much larger than the analytical models.
 
-The version of the dependencies had to be kept the static. Using NanoShaper Version 0.8 instead of the official 1.5 altered the result. Similarly, I needed switch to the unmodified version of BIMPP, sine it was partially optimized as part of this thesis in a private fork. The versions of the remaining dependencies were kept according to the Dockerfile within the NGPB repository.
+Naturally, the versions of the dependencies had to be kept static. Using NanoShaper Version 0.8 instead of the official 1.5 altered the result. Similarly, I needed switch to the unmodified version of BIMPP, sine it was partially optimized as part of this thesis in a private fork. The versions of the remaining dependencies were kept according to the Dockerfile within the NGPB repository.
 
 \subsubsection{Comparing performance}
 \label{sec:evaluation-experimental-setup-comparing-speed}
+
 Thankfully, NGPB already prints out the time that each stage took. This is done using two helper macros called TIC() and TOC(), which are portable throughout the code base. Those rough timings are enough to show whether an optimization is faster, since the computation time for the larger molecules are way bigger than small timer randomness, or other run-to-run-variances. 
 
-For more exact timings in the GPU specific optimizations, I profiled the kernels using Nvidia Nsight Compute, which runs kernels multiple times, eliminating variances. Additionally it provides detailed information about the utilization of resources and gives suggestions on how to optimize them. I avoided profiling the linear solvers running on the GPU by running the built in solvers like LIS.
+For more exact timings in the GPU specific optimizations, I profiled the kernels using Nvidia Nsight Compute, which runs kernels multiple times, eliminating variances. Additionally it provides detailed information about the utilization of resources and gives suggestions on how to optimize them. I avoided profiling the linear solvers running on the GPU, because I made no code changes to them, by selecting the built in solvers like LIS instead.
+
+\subsubsection{Comparing accuracy}
+\label{sec:evaluation-experimental-setup-comparing-accuracy}
+
+One of the goals of this thesis was to maintain NGPB's level of accuracy measured in relative error magnitude, as seen in table \ref{tab:ngpb-error-magnitudes}.
+% TODO I really don't know whether to move the explanation for analytical and comparative tests here
+All modifications I made combined must not increase those magnitudes for these two specific cases, meaning the magnitude of their error contributions must be at least on the same level. At the same time 
+Comparing the accuracy between the linear solvers is basically unnecessary, since all linear solvers aim to converge towards a set residual/accuracy value, which is completely independent of the solver or preconditioning.
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{lccc}
+        \toprule
+         & Polarization & Ionic & Total \\
+        \midrule
+        Kirkwood sphere & 7.38e-10 & 3.39e-02 & 1.72e-04 \\
+        30-sphere       & 4.16e-05 & 1.39e-02 & 7.46e-04 \\
+        \bottomrule
+    \end{tabular}
+    \caption{NGPB relative error magnitudes for the Kirkwood sphere and 30-sphere test systems.}
+    \label{tab:ngpb-error-magnitudes}
+\end{table}
 
 % ============================================================
 % BIBLIOGRAPHY (dynamic — reads from references.bib)
