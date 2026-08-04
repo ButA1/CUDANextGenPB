@@ -8,7 +8,6 @@ mesh_shape = 0
 perfil1 = 0.15
 perfil2 = 0.15
 scale   = 2.0
-loc_refinement = 1
 [../]
 
 [model]
@@ -22,8 +21,8 @@ calc_coulombic = 1
 [../]
 
 [algorithm]
-linear_solver       = lis
-energy_method       = 1
+linear_solver       = amgx
+energy_method       = 2
 fmm_mac             = 0.4
 fmm_multipole_order = 10
 fmm_leaf_size       = 256
