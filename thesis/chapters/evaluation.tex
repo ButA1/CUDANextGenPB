@@ -10,7 +10,8 @@ In this section, I will describe the experimental setup used to evaluate the per
 \label{sec:evaluation-experimental-setup-test-systems}
 
 Testing was done both locally on my own machine, and on specific nodes of the TU Berlin HPC. The specifications of both systems can be seen in Table~\ref{tab:test-systems}. As already mentioned in the %TODO reference implementation
-FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compared to the A100. On the other hand, the INTEL Xeon E5-2630v4 are quite old, and are handily beaten by my R7 5800X3D in both single-core and multi-core performance, which makes comparing performance a little awkward.
+, FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compared to the A100, despite both chips being part of one architecture generation, so an FP64-intensive kernel might obscure other performance bottlenecks while running on the RTX 3080. On the other hand, the INTEL Xeon E5-2630v4 of the cluster are quite old, and are handily beaten by the R7 5800X3D in both single-core and multi-core performance, which makes comparing performance a little awkward.
+% TODO actually separate the CPU and GPU times within one stage.
 
 \begin{table}[htbp]
     \centering
@@ -30,7 +31,9 @@ FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compar
     \label{tab:test-systems}
 \end{table}
 
-Locally I simple ran it using the \texttt{mpirun -n <number or ranks> ngpb --prmfile options.prm} command. The HPC uses Slurm, an open-source scalable cluster management and job scheduling system for large and small Linux clusters \cite{slurm_overview}. I used Claude to create small scripts to launch NGPB on it, which all generally followed the same scheme as the example shown in Listing~\ref{lst:run-slurm}. I also used it to create a Singularity recipe \cite{kurtzer2017singularity} to create a portable container including all the necessary dependencies and NGPB itself, so it could run on the cluster without the need to separately installing everything, which is not allowed to be begin with. I built the image locally using \texttt{apptainer build --fakeroot}, and copied it to the cluster using \texttt{scp} together with the Slurm script, where I ran it using the \texttt{sbatch} command.
+Locally, I simply ran NGPB using the \texttt{mpirun -n <number or ranks> ngpb --prmfile options.prm} command.
+% I wanted to remove "simply" but the the command overflows
+The TU HPC uses Slurm, an open-source scalable cluster management and job scheduling system for large and small Linux clusters \cite{slurm_overview}. I used Claude to create small scripts to launch NGPB on it, which all generally followed the same scheme as the example shown in Listing~\ref{lst:run-slurm}. I also used it to create a Singularity recipe \cite{kurtzer2017singularity} to create a portable container including all the necessary dependencies and NGPB itself, so it could run on the cluster without the need to separately install everything, which of course would not be allowed to be begin with. I built the image locally using \texttt{apptainer build --fakeroot}, and copied it to the cluster using \texttt{scp} together with the Slurm script, where I ran it using the \texttt{sbatch} command.
 % omitting the sweeping script for now
 
 \lstinputlisting[style=bashstyle, caption={Example Slurm submission script (\texttt{run.slurm}) used to launch NGPB on the TU Berlin HPC.}, label={lst:run-slurm}]{../test5/run.slurm}
@@ -38,25 +41,30 @@ Locally I simple ran it using the \texttt{mpirun -n <number or ranks> ngpb --prm
 \subsection{NGPB Parameters}
 \label{sec:evaluation-experimental-setup-ngpb-parameters}
 
-NGPB offers various different mesh types, on which the remaining mesh parameters depend \cite{nextgenpb_docs}. The first and default option being \texttt{mesh\_shape = 0} which is a de-refined mesh with a fine and coarse region, controlled by \texttt{perfil1} and \texttt{perfil2} respectively. \texttt{perfil} (short for "percentage fill") set the fraction of the fine/coarse domain size occupied by the molecule. Resolution with this mesh type is controlled through \texttt{scale}, which is equal to the inverse resolution in Ångström, meaning at a value of 2 is equal to a resolution of 0.5 \,\AA{}.
+NGPB offers four different mesh types, on which the remaining mesh parameters depend \cite{nextgenpb_docs}. The first and default option is \texttt{mesh\_shape = 0}, which is a de-refined mesh with a fine and coarse region, controlled by \texttt{perfil1} and \texttt{perfil2} respectively. Both \texttt{perfil} parameters (short for "percentage fill") set the fraction of the fine/coarse domain size occupied by the molecule, so the higher the value, the tighter the corresponding region wraps around it. Perfil1 is set to 0.8 by default. Logically, one would want the molecule to be fully inside the fine grid domain, but also leave enough room for the de-refinement transition. They exist due to p8est's restrictions, allowing neighboring quadrants to be only one refinement level apart, making an instant transition from fine to coarse and thus a \texttt{perfil1} of 1 is not feasible. % TODO not the reason why you can't use 1
+
+Resolution with this mesh type is controlled through \texttt{scale}. Its value is equal to the inverse resolution in Ångström, meaning at a value of 2 is equal to a resolution of 0.5 \,\AA{}.
 % not sure if I should add SI units. I won't have a lot of of units in this thesis
-\texttt{mesh\_shape = 1} is a uniform cubic mesh, whose resolution isn't set by \texttt{scale}, but rather by \texttt{unilevel}. This lead to some initial confusion, and a transition to using \texttt{mesh\_shape = 0} exclusively. The remaining two types were uninteresting for my testcases.
-Perfil1 is set to 0.8 by default, however the in the NGPB paper \cite{diflorio2025nextgenpb}, the authors showed that a \texttt{perfil1} of 90\%-95\% is perfectly sufficient, and would reduce the runtime significantly. I could also confirm this through my own observations. Logically, one would want the molecule to be fully inside the fine grid domain, but also leave enough room for the de-refinement transition, due to p8est restricting neighboring quadrants to be only one refinement level apart. Because of this, a \texttt{perfil1} of 1 is not feasible. \texttt{perfil2} is kept at its default value of 0.2. \texttt{scale} is also kept at its default value of 2, which was also proven to be sufficient in the paper.
+\texttt{mesh\_shape = 1} is a uniform cubic mesh, whose resolution isn't set by \texttt{scale}, but rather by a different parameter called \texttt{unilevel}, and works very differently from \texttt{scale}. This lead to some initial confusion, and a transition to using \texttt{mesh\_shape = 0} exclusively. The remaining two mesh types were uninteresting for my test cases.
+
+In the NGPB paper \cite{diflorio2025nextgenpb}, the authors showed that a \texttt{perfil1} of 90\%-95\% or 0.9-0.95 is perfectly sufficient, and would reduce the runtime and memory footprint significantly compared to 0.8. I could also confirm this through my own observations.
+% TODO actually add observations!
+\texttt{perfil2} is kept at its default value of 0.2, as the coarse region has a much lower impact on performance. \texttt{scale} is also kept at its default value of 2, which was also proven to be sufficient in the paper.
 Lastly, there was also the undocumented parameter \texttt{loc\_refinement}, which could basically force the mesh to be refined regardless of \texttt{mesh\_shape}, and thus route the energy calculation through the \texttt{energy} function instead of \texttt{energy\_fast}. To my surprise, this yielded worse results in my testing, and served only to test \texttt{energy\_cuda}.
 
 \subsection{MPI Rank}
 \label{sec:evaluation-experimental-setup-mpi-ranks}
 
-The number of ranks for MPI is set through the \texttt{-n} or \texttt{-np}. As already explained 
+The number of ranks for MPI is set through the \texttt{-n} or \texttt{-np} flags. As already explained in
 % TODO add the chapter for distributed sparse matrices here
 , the total memory consumption of all nodes increases slightly with the number of ranks, as each one needs to keep track of ghost- and non-local elements.
 % omitting the "measured" values as I don't think they're a good metric
-However, it can also slightly influence of the result itself, as the reduction of the individual result of the ranks may calculate in a different order. The magnitude of this error is at FP64 noise level, but can impact smaller molecules like 1CCM, where I discovered that the flux charge varied wildly with \texttt{-n}. Most local testing was performed using an \texttt{-n} of 4, while testing on the cluster was performed using an \texttt{-n} of 16.
+However, it can also slightly influence of the result itself, as the reduction of the individual result of the ranks may calculate in a different order. The magnitude of this error is at FP64 noise level, but can impact smaller molecules like 1CCM, where I discovered that the flux charge varied wildly with \texttt{-n}, though this behavior is expected. Most local testing was performed using an \texttt{-n} of 4, while testing on the cluster was performed using an \texttt{-n} of 16.
 
 \subsection{Compiler Flags}
 \label{sec:evaluation-experimental-setup-compiler-flags}
 
-Aside from the additional compiler flags added due to inclusion of CUDA, I largely used the same flags from the original makefile and \texttt{local\_settings}. Although initially I changed the optimization flag from \texttt{-o2} to \texttt{-o0} due to fears of catastrophic cancellations during floating point calculations, spawned by the \texttt{-n} discovery, it quickly proved more trouble than it was worth. It made the code extremely slow, which over-exaggerated the speedup achieved by the GPU and the need to optimize other parts of the code. I reverted back to \texttt{-o2}, but purposefully stayed away from the commented out \texttt{-Ofast -mtune=native -march=native} setting lingering inside the \texttt{local\_settings}, which would've provided even faster baseline performance, but unlike \texttt{-o2} legitimately ran the risk of altering the results significantly. Additionally, the dependencies of NGPB as also compiled using \texttt{-o2}.
+Aside from the additional compiler flags added due to inclusion of CUDA, I largely used the same flags from the original makefile and \texttt{local\_settings}. Although initially I changed the optimization flag from \texttt{-o2} to \texttt{-o0} due to fears of catastrophic cancellations during floating point calculations, spawned by the "\texttt{-n} discovery", it quickly proved more trouble than it was worth. It made the code extremely slow, which over-exaggerated the speedup achieved by the GPU and the need to optimize other parts of the code. Besides that, the dependencies of NGPB were also compiled using \texttt{-o2}. So I reverted back to \texttt{-o2}, but purposefully stayed away from the commented out \texttt{-Ofast -mtune=native -march=native} setting lingering inside the \texttt{local\_settings}, which would've provided even faster baseline performance, but unlike \texttt{-o2} legitimately ran the risk of altering the results significantly. % TODO include some proof
 
 \subsection{Testing}
 \label{sec:evaluation-experimental-setup-testing}
@@ -80,18 +88,22 @@ The main two metrics used for evaluation were the execution time, accuracy of th
     \label{tab:test-molecules}
 \end{table}
 
-The analytical test cases were used to verify the correctness of the results with respect to the known analytical results taken from the NGPB paper \cite{diflorio2025nextgenpb}. Those allowed me to verify the error magnitudes independent of actually running NGPB locally, as well as the correctness of the parameters used to achieve the results from the paper. They were not used to compare speed, as they are fairly small and thus not very computationally expensive.
+The analytical test cases were used to verify the correctness of the results with respect to the known analytical results taken from the NGPB paper \cite{diflorio2025nextgenpb}. Those allowed me to verify the error magnitudes without having to rely on the objective correctness of the baseline, and verify the parameters used to achieve the results from the paper. They were not used to compare speed, as they are fairly small and thus not very computationally expensive.
 
-Comparative test cases were used to compare the results of the optimized implementation against the baseline. The baseline isn't formed by the completely unmodified version of NGPB, as the slightly altered result due to the triangulation fix is assumed to be more correct. Unlike the analytical benchmarks, these were used to compare both speed and accuracy, as they are much larger than the analytical models.
+Comparative test cases were used to compare the results of the optimized implementation against the baseline, which isn't actually formed by the results of the completely unmodified version of NGPB, as the slightly altered result due to the triangulation fix is assumed to be more correct. Unlike the analytical benchmarks, these were used to compare both speed and accuracy, as they are much larger than the analytical models.
 
-Naturally, the versions of the dependencies had to be kept static. Using NanoShaper Version 0.8 instead of the official 1.5 altered the result. Similarly, I needed switch to the unmodified version of BIMPP, sine it was partially optimized as part of this thesis in a private fork. The versions of the remaining dependencies were kept according to the Dockerfile within the NGPB repository.
+Naturally, the versions of the dependencies had to be kept static. I settled on using NanoShaper version 1.5 taken from the master branch instead of 0.8 as the latter significantly altered the result. Similarly, I needed switch to the unmodified version of BIMPP, since it was partially optimized as part of this thesis in a private fork. The versions of the remaining dependencies were kept according to the Dockerfile within the NGPB repository.
 
 \subsection{Comparing performance}
 \label{sec:evaluation-experimental-setup-comparing-speed}
 
 Thankfully, NGPB already prints out the time that each stage took. This is done using two helper macros called TIC() and TOC(), which are portable throughout the code base. Those rough timings are enough to show whether an optimization is faster, since the computation time for the larger molecules are way bigger than small timer randomness, or other run-to-run-variances. 
 
-For more exact timings in the GPU specific optimizations, I profiled the kernels using Nvidia Nsight Compute (NCU), which runs kernels multiple times, eliminating variances. Additionally it provides detailed information about the utilization of resources and gives suggestions on how to optimize them. I was able to simply wrap it around the \texttt{mpirun} command, though it recorded the separate kernel launches of each rank, which wasn't really a problem. I avoided profiling the linear solvers running on the GPU, because I made no code changes to them, by selecting the built in solvers like LIS instead.
+For more exact timings in the GPU specific optimizations, I profiled the kernels using Nvidia Nsight Compute (NCU), which runs them multiple times, and eliminating variances. Additionally it provides detailed information about their utilization of GPU resources and gives suggestions on how to optimize them. 
+
+I was able to simply wrap it around the \texttt{mpirun} command, though it recorded the separate kernel launches of each rank, which wasn't really a problem. I avoided profiling the linear solvers running on the GPU, because I made no code changes to them, by selecting the built in solvers like LIS instead. This way I could avoid putting 
+% TODO include avoiding the profile flags (I forgot what they're called)
+% TODO mention how you needed big molecules to stress the GPU
 
 \subsection{Comparing accuracy}
 \label{sec:evaluation-experimental-setup-comparing-accuracy}
