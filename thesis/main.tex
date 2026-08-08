@@ -6,6 +6,7 @@
 \usepackage{graphicx}
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
+\usepackage{multirow}
 \usepackage{geometry}
 \geometry{margin=2.5cm}
 \usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
@@ -84,21 +85,12 @@
 % CONTENT
 % Copy the section/subsection block below to add more.
 % ============================================================
-\chapter{Introduction}
-\label{sec:introduction}
 
-Write your section content here. You can cite a source like this~\cite{example2010}.
+\input{chapters/introduction}
 
-\section{Technical Background}
-\label{sec:introduction-technical-background}
+\input{chapters/background}
 
-Write your subsection content here.
-
-\subsection{Poisson Boltzmann Equation}
-\label{sec:introduction-technical-background-poisson-boltzmann-equation}
-
-\section{NextGenBP}
-\label{sec:introduction-nextgenbp}
+\input{chapters/ngpb.tex}
 
 \input{chapters/implementation}
 

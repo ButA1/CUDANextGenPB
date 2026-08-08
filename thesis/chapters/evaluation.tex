@@ -11,8 +11,7 @@ In this section, I will describe the experimental setup used to evaluate the per
 
 Testing was done both locally on my own machine, and on specific nodes of the TU Berlin HPC. 
 The specifications of both systems can be seen in Table~\ref{tab:test-systems}. 
-As already mentioned in \ref{sec:implementation-energy-calculation}, FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compared to the A100, despite both chips being part of one architecture generation. 
-An FP64-intensive kernel running on the RTX 3080 might obscure other performance bottlenecks.
+As already mentioned in \ref{sec:implementation-energy-calculation}, FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compared to the A100, despite both chips being part of the same architecture generation. 
 On the other hand, the INTEL Xeon E5-2630v4 of the cluster are quite old, and are handily beaten by the R7 5800X3D in both single-core and multi-core performance, which makes comparing performance a little awkward.
 % TODO actually separate the CPU and GPU times within the energy calculation stage
 
@@ -89,7 +88,7 @@ So I reverted back to \texttt{-o2}, but purposefully stayed away from the commen
 \subsection{Testing}
 \label{sec:evaluation-experimental-setup-testing}
 
-The main two metrics used for evaluation were the execution time, accuracy of the results and also in some instances, memory usage. For this I created a handful of test cases using different PQR models as seen in table \ref{tab:test-molecules}. 
+The main two metrics used for evaluation were the execution time, accuracy of the results and also in some instances, memory usage. For this I created a handful of test cases using different PQR models as seen in table \ref{tab:test-molecules}.
 Those generally fall into two categories: analytical test cases and comparative test cases.
 
 \begin{table}[htbp]
@@ -107,6 +106,28 @@ Those generally fall into two categories: analytical test cases and comparative 
     \end{tabular}
     \caption{Selection of PQR test molecules used for evaluation.}
     \label{tab:test-molecules}
+\end{table}
+
+Table~\ref{tab:test-cases} lists the resulting test cases together with the NGPB configuration used for each. Model settings were kept identical across all of them.
+
+\begin{table}[htbp]
+    \centering
+    \footnotesize
+    \begin{tabular}{p{0.9cm}p{2.8cm}p{2.0cm}p{2.8cm}p{4.7cm}}
+        \toprule
+        Test & PQR File & Category & Mesh Settings & Model Settings \\
+        \midrule
+        test0 & 1CCM.pqr & Comparative & \texttt{mesh\_shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 &
+        \multirow{6}{4.7cm}{\texttt{bc\_type}=1\newline$\varepsilon_m$=2, $\varepsilon_s$=80\newline\texttt{ionic\_strength}=0.145\,mol/L\newline$T$=298.15\,K\newline\texttt{calc\_energy}=2\newline\texttt{calc\_coulombic}=1} \\
+        test1 & 6VYB.pqr & Comparative & \texttt{mesh\_shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 & \\
+        test2 & 1vsz.pqr & Comparative & \texttt{mesh\_shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 & \\
+        test3 & UNITSPHERE\_-\newline DISC\_2.pqr & Analytical & \texttt{mesh\_shape}=0, \texttt{perfil1}=0.15,\newline\texttt{perfil2}=0.15, \texttt{scale}=2.0 & \\
+        test4 & 30sfere.pqr & Analytical & \texttt{mesh\_shape}=0, \texttt{perfil1}=0.20,\newline\texttt{perfil2}=0.20, \texttt{scale}=2.0 & \\
+        test5 & 6VYB.pqr (cluster) & Comparative & \texttt{mesh\_shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 & \\
+        \bottomrule
+    \end{tabular}
+    \caption{Test cases and their NGPB configuration parameters.}
+    \label{tab:test-cases}
 \end{table}
 
 The analytical test cases were used to verify the correctness of the results with respect to the known analytical results taken from the NGPB paper \cite{diflorio2025nextgenpb}. 
@@ -127,26 +148,30 @@ Thankfully, NGPB already prints out the time that each stage took.
 This is done using two helper macros called TIC() and TOC(), which are portable throughout the code base. 
 Those rough timings are enough to show whether an optimization is faster, since the computation time for the larger molecules are way bigger than small timer randomness, or other run-to-run-variances. 
 
-For more exact timings in the GPU specific optimizations, I profiled the kernels using Nvidia Nsight Compute (NCU), which runs them multiple times, and eliminating variances. 
+For more exact timings in the GPU specific optimizations, I profiled the kernels using NCU, which runs them multiple times, and eliminating variances.
 Additionally it provides detailed information about their utilization of GPU resources and gives suggestions on how to optimize them. 
-Unfortunately, I could only use NCU locally. Combined with the limited FP64 performance I was not able to get the full picture needed to optimize the CUDA code in a way that would be reflected on the cluster.
-
 I was able to simply wrap it around the \texttt{mpirun} command, though it recorded the separate kernel launches of each rank, which wasn't really a problem. 
-I avoided profiling the linear solvers running on the GPU, because I made no code changes to them, by selecting the built in solvers like LIS instead. This way I could avoid putting 
-% TODO include avoiding the profile flags (I forgot what they're called)
-% TODO mention how you needed big molecules to stress the GPU
+Unfortunately, I could only use NCU locally since it requires \texttt{NVreg\_RestrictProfilingToAdminUsers} to be disabled.
+On top of that, an FP64-intensive kernel running on the RTX 3080 might obscure other performance bottlenecks.
+Due to this, I was not able to get the full picture needed to optimize the CUDA code to the fullest extend.
+I avoided profiling the linear solvers running on the GPU, because I made no code changes to them, by selecting the built in solvers like LIS instead. 
+This way I could avoid putting profiler start and stop flags into the code.
 
 \subsection{Comparing accuracy}
 \label{sec:evaluation-experimental-setup-comparing-accuracy}
 
-One of the goals of this thesis was to maintain NGPB's level of accuracy measured in relative error magnitude of the various energies, as seen in table \ref{tab:ngpb-error-magnitudes}. 
-The analytical reference values were graciously provided to me by the authors of NGPB, as the ones in the paper are truncated too early to be useful. Those can be seen in table \ref{tab:ngpb-analytical-values}.
+One of the goals of this thesis was to maintain NGPB's level of accuracy measured by the relative error magnitude of the various energies, as shown in table \ref{tab:ngpb-error-magnitudes}. 
+The analytical reference values were graciously provided to me by the authors of NGPB, as the decimal places of the ones in the paper are truncated too much to be useful. Those can be seen in table \ref{tab:ngpb-analytical-values}.
 % I am not sure if I should include the formulas for calculating the analytical values.
 % also, the usage of mesh_shape = 0 was already explained in the NGPB parameter section. I don't see the need in including all the trouble I've had before that.
-All modifications I made combined must not increase those magnitudes for these two specific cases, meaning the magnitude of their error contributions must be on the same level or lower. 
-On the other hand, error magnitudes smaller or equal $e^{-12}$ are considered FP64 machine level noise, so aiming for those is pretty much pointless, giving me a wiggle room between $e^{-10}$ and $e^{-12}$ for possible approximations. 
+
+The combination of my modifications to NGPB and its subsystems must not increase those magnitudes for all analytical test cases, meaning the magnitude of their error contributions must be on the same level or lower. 
+On the other hand, error magnitudes smaller or equal $e^{-12}$ are considered FP64 machine level noise, so aiming for those is not necessary, giving me some wiggle room between $e^{-10}$ and $e^{-12}$ for possible approximations. 
+
 Comparing the accuracy between the linear solvers is also unnecessary, since all linear solvers aim to converge towards a set residual or accuracy value, which is completely independent of the solver or preconditioning. 
-The accuracy of the energy calculation can be verified independently. Since it is supposed to follow the follow the math exactly and the triangulation between the baseline and GPU optimization didn't change, the result should ideally not deviate, as long as the intermediate result of the linear solve stayed the same.
+
+The accuracy of the energy calculation can be verified independently using the comparative test cases.
+Since it is supposed to follow the math exactly and the triangulation between the baseline and GPU optimization didn't change, both results should only deviate by the aforementioned error magnitudes, as long as the intermediate results of the previous stages stayed the same.
 
 \begin{table}[htbp]
     \centering
@@ -179,12 +204,12 @@ The accuracy of the energy calculation can be verified independently. Since it i
 \subsection{Comparing memory utilization}
 \label{sec:evaluation-experimental-setup-comparing-memory-utilization}
 
-RAM utilization wasn't the main focus during testing, as most of it was caused by BIMPP, which I profiled using Heaptrack. 
+I used Heaptrack to profile the RAM utilization, which wasn't the main focus during testing, as most of it was caused by BIMPP, not NGPB itself.
 Unlike NCU, wrapping Heaptrack around \texttt{mpirun} produced useless data, probably from the MPI code itself. 
 Instead it had to be called between \texttt{mpirun} and \texttt{ngpb} which produced one profile for each rank. 
-Since rank 0 is a sort of a master rank, which performs important coordination work, it can be easily identified as it will use more memory than the other ranks.
+Since rank 0 is a sort-of a master rank, which performs important coordination work, it can be easily identified, as it uses more memory than the other ranks.
 
-Register spills and cache utilization of the CUDA kernels directly ties into performance and were given higher priority. 
+Register spills and cache utilization of the CUDA kernels directly ties into performance and were given higher priority.
 The former can identified at compile time without using NCU using the \texttt{--ptxas-options=-v} flag of \texttt{nvcc}.
 
 Outside of the cuDSS experiment, VRAM utilization was basically dwarfed by the RAM usage, especially during the energy calculation. 
