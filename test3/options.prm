@@ -6,7 +6,7 @@ filename = /usr/local/nextgenPB/data/UNITSPHERE_DISC_2.pqr
 [mesh]
 mesh_shape = 0
 perfil1 = 0.15
-perfil2 = 0.15
+perfil2 = 0.4
 scale   = 2.0
 [../]
 
