@@ -152,6 +152,7 @@ For more exact timings in the GPU specific optimizations, I profiled the kernels
 Additionally it provides detailed information about their utilization of GPU resources and gives suggestions on how to optimize them. 
 I was able to simply wrap it around the \texttt{mpirun} command, though it recorded the separate kernel launches of each rank, which wasn't really a problem. 
 Unfortunately, I could only use NCU locally since it requires \texttt{NVreg\_RestrictProfilingToAdminUsers} to be disabled.
+% TODO it's poking out, what do I do?
 On top of that, an FP64-intensive kernel running on the RTX 3080 might obscure other performance bottlenecks.
 Due to this, I was not able to get the full picture needed to optimize the CUDA code to the fullest extend.
 I avoided profiling the linear solvers running on the GPU, because I made no code changes to them, by selecting the built in solvers like LIS instead. 
