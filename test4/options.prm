@@ -5,8 +5,8 @@ filename = /usr/local/nextgenPB/data/30sfere.pqr
 
 [mesh]
 mesh_shape = 0
-perfil1 = 0.20
-perfil2 = 0.20
+perfil1 = 0.2
+perfil2 = 0.8
 scale   = 2.0
 [../]
 
@@ -22,7 +22,7 @@ calc_coulombic = 1
 
 [algorithm]
 linear_solver       = amgx
-energy_method       = 2
+energy_method       = 1
 fmm_mac             = 0.4
 fmm_multipole_order = 10
 fmm_leaf_size       = 256
