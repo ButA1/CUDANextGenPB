@@ -90,7 +90,7 @@ Although initially I changed the optimization flag from \texttt{-O2} to \texttt{
 It made the code extremely slow, which exaggerated the speedup achieved by the GPU and the perceived need to optimize other parts of the code. 
 Besides that, the dependencies of NGPB were also compiled using \texttt{-O2}. 
 
-So I reverted to \texttt{-O2}, but purposefully stayed away from the commented-out \texttt{-Ofast -mtune=native -march=native} setting lingering inside the \texttt{local\_settings}. While it would have provided even faster baseline performance, \texttt{-Ofast} in particular implies \texttt{-ffast-math}, which permits reassociation of floating point sums, assumes finite arithmetic, and on x86 links \texttt{crtfastmath.o} that enables flush-to-zero and denormals-are-zero process-wide, thereby affecting the linked dependencies as well.
+I reverted to \texttt{-O2}, but purposefully stayed away from the commented-out \texttt{-Ofast -mtune=native -march=native} setting lingering inside the \texttt{local\_settings}. While it would have provided even faster baseline performance, \texttt{-Ofast} in particular implies \texttt{-ffast-math}, which permits reassociation of floating point sums, assumes finite arithmetic, and on x86 links \texttt{crtfastmath.o} that enables flush-to-zero and denormals-are-zero process-wide, thereby affecting the linked dependencies as well.
 This is a notable relaxation of the IEEE semantics and could compromise the CPU baseline against which the GPU was compared.
 The other two flags \texttt{-mtune=native} and \texttt{-march=native} are more benign. They change instruction scheduling and enable FMA contraction, the latter being enabled by default on \texttt{nvcc}.
 
