@@ -1,0 +1,41 @@
+[input]
+filetype = pqr
+filename = H1N1.pqr      # full virion: 14,442,610 atoms (6,439,366 heavy + 8,003,244 H)
+[../]
+
+[mesh]
+mesh_shape = 0
+perfil1 = 0.95
+perfil2 = 0.2
+scale   = 0.769231       # h = 1.3 A (scale = 1/h). Paper used 1.3 A for H1N1.
+                         # scale 2.0 (h=0.5) is ~17x more grid points -- do NOT start there.
+[../]
+
+[surface]
+# NanoShaper runs on rank 0 ONLY (poisson_boltzmann.cpp:130) and defaults to 1 thread.
+# Left at the default this is a long serial phase: NS v1.5 needs ~140 s multithreaded
+# for the 6.4M-atom heavy subset, and this run has 2.2x that atom count.
+# Must be <= --cpus-per-task, since rank 0's cgroup is what bounds these threads.
+number_of_threads = 5
+[../]
+
+[model]
+bc_type = 1
+molecular_dielectric_constant = 2
+solvent_dielectric_constant   = 80
+ionic_strength                = 0.145
+T                             = 298.15
+calc_energy    = 2
+calc_coulombic = 0       # O(N^2) all-pairs FP64 kernel (pb_class.cpp:3592, "atom count is
+                         # small"). At 14.4M atoms that is 1.0e14 pairs, ~10-30 min on one
+                         # A100, and it is a vacuum self-energy term that largely cancels.
+                         # Set back to 1 once the run is known to complete.
+[../]
+
+[algorithm]
+linear_solver = amgx
+energy_method       = 2
+fmm_mac             = 0.4
+fmm_multipole_order = 6
+fmm_leaf_size       = 256
+[../]
