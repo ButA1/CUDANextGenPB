@@ -15,8 +15,10 @@ scale   = 0.769231       # h = 1.3 A (scale = 1/h). Paper used 1.3 A for H1N1.
 # NanoShaper runs on rank 0 ONLY (poisson_boltzmann.cpp:130) and defaults to 1 thread.
 # Left at the default this is a long serial phase: NS v1.5 needs ~140 s multithreaded
 # for the 6.4M-atom heavy subset, and this run has 2.2x that atom count.
-# Must be <= --cpus-per-task, since rank 0's cgroup is what bounds these threads.
-number_of_threads = 5
+# Set to 16, above --cpus-per-task=2: the other 15 ranks are blocked in MPI_Barrier during
+# this phase and mpirun runs --bind-to none, so these threads spread over the whole node's
+# cgroup rather than sharing two cores. Keep equal to OMP_NUM_THREADS in the slurm script.
+number_of_threads = 16
 [../]
 
 [model]
@@ -33,9 +35,10 @@ calc_coulombic = 0       # O(N^2) all-pairs FP64 kernel (pb_class.cpp:3592, "ato
 [../]
 
 [algorithm]
-linear_solver = amgx
+linear_solver       = amgx
+amgx_config         = amgx_pcgf_amg_poly_cluster.json
 energy_method       = 2
 fmm_mac             = 0.4
-fmm_multipole_order = 6
+fmm_multipole_order = 10
 fmm_leaf_size       = 256
 [../]
