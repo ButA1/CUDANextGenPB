@@ -100,23 +100,6 @@ The other two flags \texttt{-mtune=native} and \texttt{-march=native} are more b
 The main two metrics used for evaluation were the execution time and accuracy of the results, while memory usage served a secondary role. 
 I created a handful of test cases using different PQR models as seen in Table~\ref{tab:test-molecules}.
 
-\begin{table}[htbp]
-    \centering
-    \begin{tabular}{lcp{8cm}}
-        \toprule
-        File & Atoms & Description \\
-        \midrule
-        1CCM.pqr & 642 & Crambin, small plant seed protein (46 residues) from \textit{Crambe hispanica}, NMR solution structure \\
-        1vsz.pqr & 180{,}443 & Crystal structure of human adenovirus at 3.5\,\AA{}, obsolete PDB entry, superseded by 4CWU, then by 6CGV \\
-        6VYB.pqr & 44{,}495 & SARS-CoV-2 spike ectodomain structure (open state), homotrimer, cryo-EM at 3.20\,\AA{} \\
-        UNITSPHERE\_DISC\_2.pqr & 7 & Kirkwood Unit sphere with 6 near-zero-radius ghost atoms along ±z at ±0.01 Å \\
-        30sfere.pqr & 30 & Many body evolution of the Kirkwood sphere taken from the NGPB paper, with 30 spheres positioned to ensure lack of any symmetry \\
-        \bottomrule
-    \end{tabular}
-    \caption{Selection of PQR test molecules used for evaluation.}
-    \label{tab:test-molecules}
-\end{table}
-
 The test cases generally fell into two categories: analytical test cases and comparative test cases.
 The analytical test cases were used to verify the correctness of the results with respect to the known analytical results taken from the NGPB paper \cite{diflorio2025nextgenpb}. 
 Those allowed me to verify the error magnitudes without having to rely on the objective correctness of the baseline, and also sanity-check the parameters used to achieve the original results.

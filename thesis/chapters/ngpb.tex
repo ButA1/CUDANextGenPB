@@ -45,21 +45,110 @@ The total energy is then simply the sum of all three contributions:
 \section{Libraries}
 \label{sec:nextgenpb-libraries}
 
-\subsection{P4est}
-\label{sec:nextgenpb-libraries-p4est}
-
-P4est \cite{carsten_burstedde_2024_10839051} is a library for dynamic management of adaptive quadtrees, while octrees are taken care of by its submodule p8est.
-It is designed for parallel work and scales well on many-core systems, though unfortunately, it has not been officially adapted to work on GPUs.
-
 \subsection{NanoShaper}
 \label{sec:nextgenpb-libraries-nanoshaper}
 
 NanoShaper \cite{abate2025nanoshaperweb} is a surface reconstruction and pocket detection tool aimed at biomolecular systems.
 It is compatible with patch-based, implicit surfaces or triangulated surfaces and works by casting rays in a grid pattern, computing both surface intersections and normals. 
-The authors leverage this by aligning the grid of their problem space with that of NanoShaper.
+The authors leverage this by aligning the grid of their problem space with that of NanoShaper, giving them the necessary surface information essentially for free.
+
+\subsection{P4est}
+\label{sec:nextgenpb-libraries-p4est}
+
+P4est \cite{carsten_burstedde_2024_10839051} is a library for dynamic management of adaptive quadtrees, while octrees are taken care of by its submodule p8est.
+It is designed for parallel work and scales well on many-core systems, though unfortunately, it has not been officially adapted to work on GPUs.
+NGPB uses it for creating and adapting octrees by refining, coarsening, and enforcing 2:1 conditions between neighbors. It also uses it to partition the octree between MPI processes and handle the communication between them.
+
+\subsection{BIMPP}
+\label{sec:nextgenpb-libraries-bimpp}
+
+BIMPP \cite{defalco_bimpp} is a very obscure library written by one of the co-authors of NGPB, Carlo de Falco. 
+NGPB does not use the standard version of it, but rather a special ``NextGenPB-v0.0.01'' release, which contains additional operators meant specifically for NGPB.
+Due to the lack of documentation, it is difficult to get an overview of all its features.
+I would describe it as library that enables distributed vector- and sparse matrix operations on quad- and octrees.
+It itself is based on p4est, and it too handles the communication of non-local elements between the MPI processes.
+
+It leans towards being sparsity-aware, but the current implementation is known to be memory inefficient. 
+The main culprit is the way BIMPP stores non-local values. 
+For every rank, BIMPP tracks which non-local values of a distributed vector need to be communicated to other ranks using a \texttt{std::map}.
+In the case of its sparse matrix, it is a \texttt{std::vector} of \texttt{std::map}, where the \texttt{std::vector} is sized to the global amount of rows.
+This means that matrix rows, that don't even need to track any non-locals still initialize an empty \texttt{std::map}.
+This is particularly painful in the \texttt{bim3a\_laplacian\_frac} operator.
+
+\subsubsection{bim3a\_laplacian\_frac}
+\label{sec:nextgenpb-libraries-bimpp-bim3a-laplacian-frac}
+
+This is one of the proprietary functions only found in the NGPB-specific release I mentioned, and a critical step in the numeric solution.
+Its purpose is to build the laplacian matrix operator by mapping a function to compute the intersection point $\alpha$, to then evaluate the effective electric permittivity $\varepsilon_{eff}$ using the weighted harmonic average of the permittivity of the solute and the molecule $\varepsilon_{1}$ and $\varepsilon_{2}$.
+
+\begin{equation}
+    \varepsilon^{eff} = \frac{1}{\dfrac{\alpha}{\varepsilon_1} + \dfrac{(1-\alpha)}{\varepsilon_2}}
+    \label{eq:effective-permittivity}
+\end{equation}
+
+It allocates a new distributed sparse matrix, which was the largest recorded allocation during the entire run.
+
+\subsubsection{bim3a\_solution\_with\_ghosts}
+\label{sec:nextgenpb-libraries-bimpp-bim3a-solution-with-ghosts}
+
+This is the function that handles the communication of non-locals of distributed vectors computed from the octree mesh, between the ranks and is used many times throughout NGPB.
+
+During my work on the thesis, it became increasingly obvious that this function took way longer than it should.
+Turns out this function rediscovers non-local and ghost quadrants of the octree, by updating every quadrant and its neighbors, without skipping it on those that have been already updated.
+On top of that, it computes the physical vertex positions for every update, which aren't used at all.
+
+It then finally calls \texttt{remap()}, which collects all the non-local values from the other ranks, and \texttt{assemble()} which distributes the updated values.
+
 
 \section{Submodules}
 \label{sec:nextgenpb-submodules}
 
-\subsection{Energy Calculation}
+The flow of NGPB can be roughly summarized by the following stages:
+\begin{itemize}
+    \item Reading inputs
+    \item Grid construction
+    \item Surface construction
+    \item Matrix assembly
+    \item Linear system solve
+    \item Energy calculation
+\end{itemize}
+
+\subsection{Input}
+
+NGPB reads in settings and parameters via PRM files, which are given as an argument to the \texttt{ngpb} command.
+These settings include the path to the molecule, mesh settings, simulation parameters and algorithmic settings.
+
+\subsubsection{PQR files}
+
+PQR is the standard file format used by NGPB and also APBS for describing biomolecular structures.
+They contain the position of the atoms (p), partial charges (q) and atomic radii (r), hence the name.
+These is all the necessary information required for the computation.
+% not sure if I should move the PQR file table form the experimental setup to here
+Table~\ref{tab:test-molecules} shows the molecules used in this thesis.
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{lcp{8cm}}
+        \toprule
+        File & Atoms & Description \\
+        \midrule
+        1CCM.pqr & 642 & Crambin, small plant seed protein (46 residues) from \textit{Crambe hispanica}, NMR solution structure \\
+        1vsz.pqr & 180{,}443 & Crystal structure of human adenovirus at 3.5\,\AA{}, obsolete PDB entry, superseded by 4CWU, then by 6CGV \\
+        6VYB.pqr & 44{,}495 & SARS-CoV-2 spike ectodomain structure (open state), homotrimer, cryo-EM at 3.20\,\AA{} \\
+        UNITSPHERE\_DISC\_2.pqr & 7 & Kirkwood Unit sphere with 6 near-zero-radius ghost atoms along ±z at ±0.01 Å \\
+        30sfere.pqr & 30 & Many body evolution of the Kirkwood sphere taken from the NGPB paper, with 30 spheres positioned to ensure lack of any symmetry \\
+        \bottomrule
+    \end{tabular}
+    \caption{Selection of PQR test molecules used for evaluation.}
+    \label{tab:test-molecules}
+\end{table}
+
+\subsubsection{PDB files}
+
+PDB is a legacy file format used by the protein data bank, a data base that catalogues proteins, which gives them their characteristic ID.
+They only contain the atomic coordinates, as well as residue and chain information.
+They're missing the partial charges and atomic radii, and require additional SIZ and CRG files for radii and charges to work inside NGPB.
+PDB have a 5 digit limit for the number of atoms, meaning the largest model it could represent would be 99 999 atoms big.
+
+\subsubsection{Energy Calculation}
 \label{sec:nextgenpb-submodules-energy-calculation}
