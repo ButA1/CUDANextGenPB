@@ -99,6 +99,20 @@ On top of that, it computes the physical vertex positions for every update, whic
 
 It then finally calls \texttt{remap()}, which collects all the non-local values from the other ranks, and \texttt{assemble()} which distributes the updated values.
 
+\subsection{Parameters}
+\label{sec:nextgenpb-parameters}
+
+NGPB offers four different mesh types, on which the remaining mesh parameters depend \cite{nextgenpb_docs}. 
+The first and default option is \texttt{mesh\_shape = 0}, which is a de-refined mesh with a fine and coarse region.
+The parameters \texttt{perfil1} and \texttt{perfil2} (short for ``percentage fill'') set the fraction of the fine and coarse domain size occupied by the molecule, so the higher the value, the tighter the corresponding region wraps around it. 
+Their default values are 0.8 and 0.2 respectively.
+
+Logically, one would want the molecule to be fully inside the fine grid domain but also leave enough room for the Stern Layer. This is a thin layer only a few Ångström thick, that exists on the surface of solids submerged in a solution, in which charged particles behave differently.
+The inclusion of the Stern Layer is optional, and controlled through the \texttt{stern\_layer\_surf} parameter and its thickness with \texttt{stern\_layer\_thickness}.
+
+Resolution with this mesh type is controlled through \texttt{scale}. Its value is equal to the inverse resolution in Ångström, meaning that a value of 2 corresponds to a resolution of 0.5 \,\AA{}.
+
+Lastly, there was also the undocumented parameter \texttt{loc\_refinement}, which could basically force the mesh to be refined regardless of \texttt{mesh\_shape}, and thus route the energy calculation through the \texttt{energy} function instead of \texttt{energy\_fast}.
 
 \section{Submodules}
 \label{sec:nextgenpb-submodules}
@@ -106,14 +120,14 @@ It then finally calls \texttt{remap()}, which collects all the non-local values 
 The flow of NGPB can be roughly summarized by the following stages:
 \begin{itemize}
     \item Reading inputs
-    \item Grid construction
-    \item Surface construction
+    \item Grid \& Surface construction
     \item Matrix assembly
     \item Linear system solve
     \item Energy calculation
 \end{itemize}
 
 \subsection{Input}
+\label{sec:nextgenpb-submodules-input}
 
 NGPB reads in settings and parameters via PRM files, which are given as an argument to the \texttt{ngpb} command.
 These settings include the path to the molecule, mesh settings, simulation parameters and algorithmic settings.
@@ -143,12 +157,26 @@ Table~\ref{tab:test-molecules} shows the molecules used in this thesis.
     \label{tab:test-molecules}
 \end{table}
 
-\subsubsection{PDB files}
+\subsubsection{PDB and mmCIF files}
 
 PDB is a legacy file format used by the protein data bank, a data base that catalogues proteins, which gives them their characteristic ID.
 They only contain the atomic coordinates, as well as residue and chain information.
 They're missing the partial charges and atomic radii, and require additional SIZ and CRG files for radii and charges to work inside NGPB.
+Alternatively, they can be converted to PQR using \texttt{pdb2pqr} from the APBS toolset.
+
 PDB have a 5 digit limit for the number of atoms, meaning the largest model it could represent would be 99 999 atoms big.
+To solve this limitation, a new file mmCIF or PDBx type was introduced.
+As of now, \texttt{pdb2pqr} is not capable of converting this new file type correctly. 
+Researchers work around this by converting to mmCIF to PDB first, which means that for structures larger than 99 999 atoms like 1vsz all indices after that lose their last digit.
+Fortunately NGPB does not care about these indices and simply gives them their own as it goes through the file line by line.
+
+\subsection{Grid \& Surface Construction}
+\label{sec:nextgenpb-submodules-grid-surface-construction}
+
+As mentioned in \ref{sec:nextgenpb-parameters}, I will focus solely on the derefined mesh (\texttt{mesh\_shape = 0}).
+NGPB uses p8est to construct the octree, where the fine region is nested inside the corse region.
+It places the molecule inside the fine region so that
+so the longest  \texttt{perfil1} 
 
 \subsubsection{Energy Calculation}
 \label{sec:nextgenpb-submodules-energy-calculation}

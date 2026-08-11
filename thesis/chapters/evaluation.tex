@@ -47,29 +47,12 @@ I built the image locally using \texttt{apptainer build --fakeroot}, and copied 
 \subsection{NGPB Parameters}
 \label{sec:evaluation-experimental-setup-ngpb-parameters}
 
-% now that I think about it, this might belong into the NGPB chapter, at least the first 2 paragraphs
-% for now I am leaving this here unless I need this explanation in the implementation
-NGPB offers four different mesh types, on which the remaining mesh parameters depend \cite{nextgenpb_docs}. 
-The first and default option is \texttt{mesh\_shape = 0}, which is a de-refined mesh with a fine and coarse region.
-The parameters \texttt{perfil1} and \texttt{perfil2} (short for ``percentage fill'') set the fraction of the fine and coarse domain size occupied by the molecule, so the higher the value, the tighter the corresponding region wraps around it. 
-Their default values are 0.8 and 0.2 respectively.
-
-Logically, one would want the molecule to be fully inside the fine grid domain but also leave enough room for the Stern Layer. This is a thin layer only a few Ångström thick, that exists on the surface of solids submerged in a solution, in which charged particles behave differently.
-The inclusion of the Stern Layer is optional, and controlled through the \texttt{stern\_layer\_surf} parameter and its thickness with \texttt{stern\_layer\_thickness}.
-
-Resolution with this mesh type is controlled through \texttt{scale}. Its value is equal to the inverse resolution in Ångström, meaning that a value of 2 corresponds to a resolution of 0.5 \,\AA{}.
-% not sure if I should add SI units. I won't have a lot of units in this thesis
-\texttt{mesh\_shape = 1} is a uniform cubic mesh, whose resolution isn't set by \texttt{scale}, but rather by a different parameter called \texttt{unilevel}, and works very differently from \texttt{scale}. 
-This led to some initial confusion, and a transition to using \texttt{mesh\_shape = 0} exclusively. 
-The remaining two mesh types were uninteresting for my test cases.
-
 % the third paragraph can stay here as it explains why I picked which parameter values
 In the NGPB paper \cite{diflorio2025nextgenpb}, the authors showed that a \texttt{perfil1} of 90\%-95\% or 0.9-0.95 is perfectly sufficient, and would reduce the runtime and memory footprint significantly compared to 0.8.
 Out of curiosity, I did run a couple of tests using a \texttt{perfil1} of 1. It didn't change the result all that much, and it also didn't make the tests run any faster, so I stuck with the author-approved values.
 \texttt{perfil2} is kept at its default value of 0.2, as the coarse region has a much lower impact on performance. 
 \texttt{scale} is also kept at its default value of 2, which was proven to be sufficient in the paper.
-
-Lastly, there was also the undocumented parameter \texttt{loc\_refinement}, which could basically force the mesh to be refined regardless of \texttt{mesh\_shape}, and thus route the energy calculation through the \texttt{energy} function instead of \texttt{energy\_fast}. To my surprise, this yielded worse results in my testing, and served only to test \texttt{energy\_cuda}.
+To my surprise, \texttt{loc\_refinement} yielded worse results in my testing, and served only to test \texttt{energy\_cuda}.
 
 \subsection{MPI Rank}
 \label{sec:evaluation-experimental-setup-mpi-ranks}
