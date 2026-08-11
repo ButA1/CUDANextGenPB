@@ -110,7 +110,7 @@ Their default values are 0.8 and 0.2 respectively.
 Logically, one would want the molecule to be fully inside the fine grid domain but also leave enough room for the Stern Layer. This is a thin layer only a few Ångström thick, that exists on the surface of solids submerged in a solution, in which charged particles behave differently.
 The inclusion of the Stern Layer is optional, and controlled through the \texttt{stern\_layer\_surf} parameter and its thickness with \texttt{stern\_layer\_thickness}.
 
-Resolution with this mesh type is controlled through \texttt{scale}. Its value is equal to the inverse resolution in Ångström, meaning that a value of 2 corresponds to a resolution of 0.5 \,\AA{}.
+Resolution with this mesh type is controlled through \texttt{scale}. Its value is equal to the inverse resolution in Ångström, meaning that a value of 2 corresponds to a resolution of 0.5 \,\AA{}. This resolution only applies to the fine region.
 
 Lastly, there was also the undocumented parameter \texttt{loc\_refinement}, which could basically force the mesh to be refined regardless of \texttt{mesh\_shape}, and thus route the energy calculation through the \texttt{energy} function instead of \texttt{energy\_fast}.
 
@@ -175,8 +175,53 @@ Fortunately NGPB does not care about these indices and simply gives them their o
 
 As mentioned in \ref{sec:nextgenpb-parameters}, I will focus solely on the derefined mesh (\texttt{mesh\_shape = 0}).
 NGPB uses p8est to construct the octree, where the fine region is nested inside the corse region.
-It places the molecule inside the fine region so that
-so the longest  \texttt{perfil1} 
+It places the molecule inside the fine region so that \texttt{perfil1}
+is satisfied for every dimension.
+In a sense this fine region retains the aspect ratio of the molecule.
+The coarse region on the other hand cannot always satisfy \texttt{perfil2} exactly, because the octree can only bisect.
+The finest cell size has to be $1/scale$.
+An octree can only bisect, so at level-L the size equals to $2^L/scale$.
+This is why the size gets doubled until $l_{max}/size < perfil2$ is satisfied, where $l_{max}$ is the longest side of the molecule.
+This also means that the coarse region is always cubic.
+P4est maintains a 2:1 level ratio between the fine region and the coarse region, resulting in a transition region, which is always situated outside the fine region.
+This is standard practice with octrees an avoids quadrants that share no vertices with their immediate neighbors.
 
-\subsubsection{Energy Calculation}
+\subsubsection{Ray Cache}
+
+This is central component that gets used throughout multiple stages.
+As its name suggests it holds the information about the rays.
+It stores a list of intersections and normals as an object \texttt{crossing\_t} under coordinates on an axis plane. 
+The first index for the outmost array is the axis, so in a 3D environment those are the axes x,y and z. 
+The next two for the binary tree map are the coordinates on the perpendicular plane along said axis.
+The intersections are then the coordinates along the axis, which together with the coordinates on the plane gives you the point of each intersection.
+Normals are triplets ordered by the intersection.
+Lastly, \texttt{crossing\_t} also have an \texttt{init} flag, symbolizing whether the ray has to be recast.
+This is a very efficient representation that is unfortunately not portable to the GPU, due to the binary tree map, whose values are complex structs, not simple types.
+
+It is initialized in the method \texttt{init\_analytical\_surf\_ns}, where NanoShaper is used to cast rays in the fine region using the same $1/scale$ grid and finally stored in the cache.
+This happens only on rank 0, leaving the ray cache of the other ranks initially empty.
+
+Casting additional rays recast individually using \texttt{compute\_ns\_inters} or in a batch using \texttt{compute\_pending\_rays}.
+The latter goes through the cached rays and uses the \texttt{init} flag of \texttt{crossing\_t} to determine, whether they should be recomputed.
+
+The method \texttt{fill\_cache} then scatters rays from the rank 0 cache. The necessary rays are computed inside \texttt{create\_markers}. It too can call \texttt{compute\_ns\_inters} implicitly if requested rays are missing from the cache or are uninitialized.
+
+\subsubsection{create\_markers}
+
+This function primarily classifies quadrants as either being inside, outside or on the border of the molecule.
+Its secondary functions are redistribution of ray information to all ranks, and casting additional rays if needed.
+For rank 0, it checks whether rays are present in the ray cache using \texttt{is\_in\_ns\_surf}, which adds casts a new ray on a miss.
+Additional rays may also be cast for refined meshes, which have quadrants that are smaller than $1/scale$.
+For the remaining ranks, it collects a list of rays that it needs.
+Rank 0 then distributes those rays to the corresponding ranks using \texttt{fill\_cache}.
+
+\subsection{Matrix Assembly}
+\label{sec:nextgenpb-submodules-matrix-assembly}
+
+
+
+\subsection{Linear System Solve}
+\label{sec:nextgenpb-submodules-linear-system-solve}
+
+\subsection{Energy Calculation}
 \label{sec:nextgenpb-submodules-energy-calculation}
