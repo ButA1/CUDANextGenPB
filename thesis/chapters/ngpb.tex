@@ -99,7 +99,17 @@ On top of that, it computes the physical vertex positions for every update, whic
 
 It then finally calls \texttt{remap()}, which collects all the non-local values from the other ranks, and \texttt{assemble()} which distributes the updated values.
 
-\subsection{Parameters}
+\subsection{LIS}
+\label{sec:nextgenpb-libraries-lis}
+
+%TODO
+
+\subsection{mumps}
+\label{sec:nextgenpb-libraries-mump}
+
+%TODO
+
+\section{Parameters}
 \label{sec:nextgenpb-parameters}
 
 NGPB offers four different mesh types, on which the remaining mesh parameters depend \cite{nextgenpb_docs}. 
@@ -122,7 +132,7 @@ The flow of NGPB can be roughly summarized by the following stages:
     \item Reading inputs
     \item Grid \& Surface construction
     \item Matrix assembly
-    \item Linear system solve
+    \item Solving Linear Equation
     \item Energy calculation
 \end{itemize}
 
@@ -218,10 +228,14 @@ Rank 0 then distributes those rays to the corresponding ranks using \texttt{fill
 \subsection{Matrix Assembly}
 \label{sec:nextgenpb-submodules-matrix-assembly}
 
+This step produces the matrix operator and the right-hand-side vector needed for the linear equation, computed by \texttt{assemble\_system\_matrix} and \texttt{create\_density\_map} respectively.
 
+\subsubsection{create\_density\_map}
 
-\subsection{Linear System Solve}
-\label{sec:nextgenpb-submodules-linear-system-solve}
+\subsubsection{assemble\_system\_matrix}
+
+\subsection{Solving the Linear Equation}
+\label{sec:nextgenpb-submodules-solve-linear-equation}
 
 \subsection{Energy Calculation}
 \label{sec:nextgenpb-submodules-energy-calculation}
