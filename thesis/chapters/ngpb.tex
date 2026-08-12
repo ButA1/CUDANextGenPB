@@ -70,10 +70,12 @@ It itself is based on p4est, and it too handles the communication of non-local e
 
 It leans towards being sparsity-aware, but the current implementation is known to be memory inefficient. 
 The main culprit is the way BIMPP stores non-local values. 
-For every rank, BIMPP tracks which non-local values of a distributed vector need to be communicated to other ranks using a \texttt{std::map}.
-In the case of its sparse matrix, it is a \texttt{std::vector} of \texttt{std::map}, where the \texttt{std::vector} is sized to the global amount of rows.
+For every rank, BIMPP holds both local and non-local values of a distributed sparse matrix in a \texttt{std::vector} of \texttt{std::map}, where the \texttt{std::vector} is sized to the global amount of rows.
+%For every rank, BIMPP tracks which non-local values of a distributed vector need to be communicated to other ranks using a \texttt{std::map}.
+%In the case of its sparse matrix, it is a \texttt{std::vector} of \texttt{std::map}, where the \texttt{std::vector} is sized to the global amount of rows.
+\texttt{std::vector} initializes an empty map for every entry.
 This means that matrix rows, that don't even need to track any non-locals still initialize an empty \texttt{std::map}.
-This is particularly painful in the \texttt{bim3a\_laplacian\_frac} operator.
+This is particularly painful the global amount is very large.
 
 \subsubsection{bim3a\_laplacian\_frac}
 \label{sec:nextgenpb-libraries-bimpp-bim3a-laplacian-frac}
