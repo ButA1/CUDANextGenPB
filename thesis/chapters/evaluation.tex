@@ -54,6 +54,12 @@ Out of curiosity, I did run a couple of tests using a \texttt{perfil1} of 1. It 
 \texttt{scale} is also kept at its default value of 2, which was proven to be sufficient in the paper.
 To my surprise, \texttt{loc\_refinement} yielded worse results in my testing, and served only to test \texttt{energy\_cuda}.
 
+When it came to the choice between the two solvers I settled on LIS pretty quickly.
+A short test on my local machine showed that mumps takes way longer than LIS for 1CCM with all the settings being the same aside from the solver.
+Running the same test with 6VYB with \texttt{perfil1} set to 0.95 LIS managed to finish, while mumps froze.
+That does not mean mumps is entirely useless. My guess it that it is meant to run on huge clusters, not on a single machine.
+On the other hand this demonstrates again how much more flexible linear solvers are compared to direct solvers.
+
 \subsection{MPI Rank}
 \label{sec:evaluation-experimental-setup-mpi-ranks}
 
@@ -89,7 +95,7 @@ Those allowed me to verify the error magnitudes without having to rely on the ob
 They were not used to compare speed, as they are fairly small and thus not very computationally expensive.
 
 Comparative test cases, on the other hand, were used to compare the results of the optimized implementation against the baseline, which isn't actually formed by the results of the completely unmodified version of NGPB. 
-Instead it's the result produced by the version containing the triangulation fix described in \ref{sec:nextgenbp-submodules-energy-calculation}, as it is more accurate than the result produced by the original code.
+Instead it's the result produced by the version containing the triangulation fix described in \ref{sec:nextgenpb-submodules-energy-calculation}, as it is more accurate than the result produced by the original code.
 Unlike the analytical benchmarks, these were used to compare both speed and accuracy, as they their models were much larger.
 
 Table\ref{tab:test-cases} lists the test cases together with the NGPB configuration used for each. 
