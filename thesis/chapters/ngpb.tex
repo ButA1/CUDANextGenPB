@@ -20,7 +20,7 @@ Thus the total electrostatic energy NGPB computes is a sum of the Coulomb, polar
 
 NanoShaper \cite{abate2025nanoshaperweb} is a surface reconstruction and pocket detection tool aimed at biomolecular systems.
 It is compatible with patch-based, implicit surfaces or triangulated surfaces and works by casting rays in a grid pattern, computing both surface intersections and normals. 
-The authors leverage this by aligning the grid of their problem space with that of NanoShaper, giving them the necessary surface information essentially for free.
+The authors of NGPB leverage this by aligning the grid of their problem space with that of NanoShaper, giving them the necessary surface information essentially for free.
 
 \subsection{P4est}
 \label{sec:nextgenpb-libraries-p4est}
@@ -319,6 +319,7 @@ In very rare cases, NanoShaper and marching cubes disagree on where the surface 
 Marching cube can only find triangles, whose corners always lay in the middle of the quadrant's edges.
 In theory, NanoShaper's rays are aligned with those edges and should thus find the intersections along them.
 However, if marching cubes finds a triangle where NanoShaper has not found any intersections, it also will not have any normal vector for it.
+% not sure if the fix goes here
 
 The total energy is then simply the sum of all three contributions:
 
@@ -326,6 +327,8 @@ The total energy is then simply the sum of all three contributions:
     E_{tot} = E_{coul} + E_{pol} + E_{ion}
     \label{eq:total-energy}
 \end{equation}
+
+All three energies are essentially sums of many interactions between electric charges, a classic example of the N-body problem.
 
 \subsubsection{classifyCube(\_fast)}
 

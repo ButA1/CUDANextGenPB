@@ -16,6 +16,87 @@
 \section{Message Pipeline Interface}
 \label{sec:background-mpi}
 
+\section{CUDA}
+\label{sec:background-cuda}
+
+At this point it is common knowledge that GPUs offer many more, albeit less capable compute units than CPUs.
+Intended for rendering 3D graphics, GPUs specialized on handling many vector and matrix operations in parallel.
+Nvidia's CUDA API was born out the desire to leverage the highly parallel architecture for applications outside of graphics rendering.
+Stanford researcher Ian Buck exploited graphics APIs to do scientific math calculations, before being picked up by Nvidia in 2004 to work on what would become CUDA \cite{nemire2015gpuevolution}.
+However, it was not just the software that changed.
+GPU architectures themselves changed as well to handle general-purpose compute rather than focusing solely on graphics.
+After its introduction in 2007, CUDA had quickly become an important part of Nvidia's business strategy, as it became dominant in the space of massively-parallel computing.
+
+It is important to point out that CUDA is a proprietary API, which only works with Nvidia's GPUs.
+Luckily this applies to both gaming or consumer grade, and workstation GPUs, although there are slight differences.
+General-purpose GPU computing is not a silver bullet.
+A problem needs to be parallelizable to really take advantage of the architecture.
+Strictly sequential problems, and those that are very limited in how much they can be parallelized, are still better served on the CPU. 
+
+\subsection{Basic Overview}
+\label{sec:background-cuda-basic-overview}
+
+In the context of the API the CPU and GPU are referred to as the host and the device.
+The API allows users to program custom programs called kernels, which are launched on one or more devices.
+Device memory is separate from the host memory.
+Due to this, host data cannot be directly passed to the kernels, and kernels cannot return values directly, and thus needs to be copied back and forth between those.
+The basic flow of a CUDA program is typically structured like this \cite{nvidia_cuda_programming_guide}:
+
+\begin{itemize}
+    \item Allocation of device memory, both for input and output
+    \item Copying of host memory into the allocated device input memory
+    \item Launching of the kernel
+    \item Copying of the device output memory
+\end{itemize}
+
+\subsection{Compiling}
+\label{sec:background-cuda-compiling}
+
+CUDA source files, signified by \texttt{*.cu}, are compiled using the \texttt{nvcc} compiler, which wraps around an existing c++ compiler \cite{nvidia_cuda_programming_guide}.
+It automatically differentiates between host and device code, so both code types can live in the same file.
+The host code is compiled using the c++ compiler, while the device code is compiled with \texttt{nvcc}.
+
+Though CUDA and MPI each use their own compilers, combining CUDA with MPI is possible with a couple of extra steps.
+A guide on the RWTH web page \cite{rwth_cuda} details, that one needs to compile the CUDA source files to object files using \texttt{nvcc} first, before linking them during the compilation of the remaining code with \texttt{mpicxx}.
+The necessary CUDA libraries need to be linked as well.
+This not only enables parallelism on the CPU side, but also scaling across multiple compute nodes, unlocking the power of GPU enabled computer clusters.
+% omitting OpenMP because its not relevant to my thesis
+
+\subsection{Library Eco System}
+\label{sec:background-cuda-libraries}
+
+Nvidia offers a whole suite of libraries based on CUDA, from optimized low-level templates, to high-level implementations.
+Many of those come packaged with the CUDA toolset, and do not have to be installed separately.
+While using those doesn't require writing custom kernels, it does not eliminate the need to write custom kernels.
+% dunno kinda ran out of steam here
+
+\subsection{Performance Evaluation}
+\label{sec:background-cuda-performance-evaluation}
+
+GPUs have essentially two major performance limits, those being the compute and memory throughput.
+People often think of theoretical peak performance as just the compute throughput in the measure of floating point operations per second, or $FLOP/s$, but performance can only be realized if the data can be supplied fast enough to saturate it.
+This is the memory throughput and it is measured in $Bytes/s$.
+When plotting both metrics against each other, we get was is called a ``roofline model'', which symbolizes the limit on the theoretical performance.
+The exactly values of the diagram vary with the capability of the GPU, but the shape always stays the same.
+Kernels always lie underneath the roofline and its position gives us an indication of how well optimized it is, and what its main limit is.
+Kernels to the left of the ridge are bound by memory-throughput, while kernels to the right are bound by the compute-throughput.
+The close a kernel is to the roofline, the more optimized it is.
+
+The roofline, as well as, many more performance metrics can be easily evaluated thanks to Nsight Compute software (NCU), Nvidia's own profiler.
+To record a profile, one must simply run the application through the \texttt{ncu} command line tool.
+It automatically recognizes the CUDA kernels, but there also options to flag which kernels should be profiled inside the code.
+The profiles can then be inspected in the GUI application.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/roofline_model.pdf}
+    \caption[Example of a roofline model]{Example of a roofline model, showing the performance bound imposed by memory bandwidth (diagonal) and peak compute throughput (horizontal), with three applications of increasing operational intensity plotted against it. Image by Giu.natale, licensed under CC BY-SA 4.0 \url{https://creativecommons.org/licenses/by-sa/4.0/}, sourced from Wikimedia Commons \url{https://en.wikipedia.org/wiki/File:Example_of_a_Roofline_model.svg}, converted from SVG to PDF for typesetting.}
+    \label{fig:roofline-model}
+\end{figure}
+
+\section{N-Body}
+\label{sec:background-nbody}
+
 \section{Sparse Matrices}
 \label{sec:background-sparse-matrices}
 
