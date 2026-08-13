@@ -64,7 +64,7 @@ On the other hand this demonstrates again how much more flexible linear solvers 
 \label{sec:evaluation-experimental-setup-mpi-ranks}
 
 The number of ranks for MPI is set through the \texttt{-n} or \texttt{-np} flags. 
-As already explained in \ref{sec:background-sparse-matrices-distributed}, the total memory consumption of all nodes increases slightly with the number of ranks, as each one needs to keep track of ghost- and non-local elements.
+As already explained in \ref{sec:nextgenpb-libraries-bimpp}, the total memory consumption of all nodes increases slightly with the number of ranks, as each one needs to keep track of ghost- and non-local elements.
 % omitting the "measured" values as I don't think they're a good metric
 However, it can also slightly influence the result itself, as the individual results of the ranks may be reduced in a different order.
 The magnitude of this error is at FP64 noise level, but can impact smaller molecules like 1CCM, where I discovered that the flux charge varied wildly with \texttt{-n}, though this behavior is unfortunately to be expected.
