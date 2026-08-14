@@ -1,0 +1,68 @@
+\begin{tikzpicture}[
+    box/.style={draw, minimum width=7mm, minimum height=7mm, inner sep=0pt, font=\small},
+    zero/.style={box, text=black!65, draw=black!60},
+    nz/.style={box, very thick},
+    idx/.style={font=\scriptsize, text=black!65},
+    rowlbl/.style={font=\scriptsize, text=black!65},
+    ptr/.style={-{Latex[length=1.8mm]}, thick, black!60}
+]
+
+% Dense matrix
+\matrix (M) [matrix of nodes, nodes={box}, row sep=-\pgflinewidth,
+             column sep=-\pgflinewidth, anchor=north west] at (0,0) {
+    |[nz]| 10 & |[zero]| 0  & |[zero]| 0  & |[zero]| 0  \\
+    |[zero]| 0  & |[zero]| 0  & |[nz]| 20 & |[zero]| 0  \\
+    |[zero]| 0  & |[nz]| 30 & |[zero]| 0  & |[nz]| 40 \\
+    |[zero]| 0  & |[zero]| 0  & |[zero]| 0  & |[nz]| 50 \\
+};
+\foreach \r/\lbl in {1/row 0, 2/row 1, 3/row 2, 4/row 3}
+    \node[rowlbl, left=2mm of M-\r-1] {\lbl};
+
+% values array
+\matrix (V) [matrix of nodes, nodes={box}, row sep=-\pgflinewidth,
+             column sep=-\pgflinewidth, anchor=north west,
+             below=20mm of M.south west] {
+    10 & 20 & 30 & 40 & 50 \\
+};
+\node[left=2mm of V-1-1] {\texttt{values}};
+
+% row-grouping braces over the values array
+\draw[decorate, decoration={brace, amplitude=3pt, raise=1mm}]
+    (V-1-1.north west) -- (V-1-1.north east)
+    node[midway, above=3mm, rowlbl] {r0};
+\draw[decorate, decoration={brace, amplitude=3pt, raise=1mm}]
+    (V-1-2.north west) -- (V-1-2.north east)
+    node[midway, above=3mm, rowlbl] {r1};
+\draw[decorate, decoration={brace, amplitude=3pt, raise=1mm}]
+    (V-1-3.north west) -- (V-1-4.north east)
+    node[midway, above=3mm, rowlbl] {r2};
+\draw[decorate, decoration={brace, amplitude=3pt, raise=1mm}]
+    (V-1-5.north west) -- (V-1-5.north east)
+    node[midway, above=3mm, rowlbl] {r3};
+
+% col_idx array
+\matrix (C) [matrix of nodes, nodes={box}, row sep=-\pgflinewidth,
+             column sep=-\pgflinewidth, anchor=north west,
+             below=6mm of V.south west] {
+    0 & 2 & 1 & 3 & 3 \\
+};
+\node[left=2mm of C-1-1] {\texttt{col\_idx}};
+
+% row_offsets array
+\matrix (R) [matrix of nodes, nodes={box}, row sep=-\pgflinewidth,
+             column sep=-\pgflinewidth, anchor=north west,
+             below=12mm of C.south west] {
+    0 & 1 & 2 & 4 & 5 \\
+};
+\node[left=2mm of R-1-1] {\texttt{row\_offsets}};
+\foreach \lbl/\i in {r0/1, r1/2, r2/3, r3/4, nnz/5}
+    \node[idx, below=1mm of R-1-\i] {\lbl};
+
+% pointer arrows from row_offsets entries to the start of their row's
+% group in col_idx/values (last entry points past the end, i.e. NNZ)
+\draw[ptr] (R-1-1.north) .. controls +(0,10mm) and +(0,-10mm) .. (C-1-1.south);
+\draw[ptr] (R-1-2.north) .. controls +(0,10mm) and +(0,-10mm) .. (C-1-2.south);
+\draw[ptr] (R-1-3.north) .. controls +(0,10mm) and +(0,-10mm) .. (C-1-3.south);
+\draw[ptr] (R-1-4.north) .. controls +(0,10mm) and +(0,-10mm) .. (C-1-5.south);
+
+\end{tikzpicture}

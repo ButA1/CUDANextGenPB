@@ -116,8 +116,32 @@ The profiles can then be inspected in the GUI application.
 \section{Sparse Matrices}
 \label{sec:background-sparse-matrices}
 
+Often times matrices describing 2D or 3D systems have a lot of zeroes in them.
+In a dense matrix all of the values are stored, meaning those zeroes contribute to the memory footprint.
+This severely limits the matrix size that could realistically computed.
+Sparse matrices mitigate this problem by storing only non-zero values.
+There are several techniques to store them.
+
+One way would be to use a map or dictionary data type, which are very easy to mutate.
+However they are not as memory efficient as the Compressed Sparse Row format or the lesser know Compressed Sparse Column.
+They utilize 3 arrays: column indices and values with the length of the non-zero-values (NNZ), and row offsets with the length equal to the number of rows plus one.
+
+Figure~\ref{fig:csr-format} shows an example of a small $4\times4$ sparse matrix and its corresponding CSR representation.
+The \texttt{values} array stores the non-zero entries in row-major order, and \texttt{col\_idx} stores the column each of those entries belongs to.
+\texttt{row\_offsets} then stores, for each row, the index into \texttt{values}/\texttt{col\_idx} at which that row's entries begin, with a final trailing entry equal to NNZ so that the length of any row can be computed as \texttt{row\_offsets[i+1] - row\_offsets[i]}.
+Since \texttt{row\_offsets} depends on the number of values per row, it needs to be recomputed every time values are added or removed.
+
+\begin{figure}[htbp]
+    \centering
+    \input{figures/csr_format.tex}
+    \caption[Example of the CSR sparse matrix format]{A $4\times4$ sparse matrix (top, non-zero entries outlined in bold) and its Compressed Sparse Row representation (bottom). Each \texttt{row\_offsets} entry points to where that row's data begins in \texttt{col\_idx}/\texttt{values}; the trailing entry equals NNZ. Own illustration, following the array layout described in \cite{nvidia_nvpl_sparse_storage}.}
+    \label{fig:csr-format}
+\end{figure}
+
 \subsection{Distributed Sparse Matrices}
 \label{sec:background-sparse-matrices-distributed}
+
+% not sure if this will stay here
 
 \section{Linear Equation Solvers}
 \label{sec:background-linear-eq-solvers}
@@ -131,20 +155,57 @@ $b$ is commonly referred to as the right-hand-side (RHS) which is known, as it i
 One main type of solver is the direct solver.
 They compute the exact solution in a predictable sequence of steps.
 They utilize methods like LU- or Cholesky decomposition to break the matrix $A$ down into triangular matrix components in order to simplify the computation.
+
 The have one very big downside though: high memory usage.
 They need to store the matrices resulting from the factorization.
 Even using sparse matrices this increases the storage complexity from \(\mathcal{O}(n)\) to \(\mathcal{O}(n^{4/3})\) where $n$ is the number of unknowns in a 3D mesh.
+On the other hand they scale very well on highly parallel architectures.
 
 \subsection{Iterative Solvers}
 \label{sec:background-linear-eq-solvers-iterative-solvers}
 
 The other main type of solver is the iterative solver.
-Their basic idea is to start with a basic approximation and which each iteration converge towards the solution until the desired accuracy is reached.
-The largest family of iterative solver methods are the so called Krylov methods.
+Their basic idea is to start with an approximation and converges towards the solution with each iteration, until the desired accuracy or residual error is reached.
+
+The largest family of iterative solver methods are the so called Krylov methods, which use the name-giving Krylov subspace to appropriate the solution \cite{anzt2015gpukrylov}.
+With a starting vector $x_0$ they compute the initial residual $r_0$ with:
+
+\begin{equation}
+    r_0 = b - A x_0
+    \label{eq:initial-residual}
+\end{equation}
+
+They then construct the Krylov subspace through projections of a vector $r_0$ through increasing powers of the matrix $A$.
+
+\begin{equation}
+    \mathcal{K}_i(A, r_0) = \mathrm{span}\{r_0, A r_0, A^2 r_0, \dots, A^{i-1} r_0\}
+    \label{eq:krylov-subspace}
+\end{equation}
+
+In which the look for a vector $z_i$, which is added to $x_0$, which is then used to compute the next residual.
+It is proven that outside of rounding errors, this method terminates at a finite number of steps \cite{saad2003iterative}.
+
 Accuracy does not depend on the choice of iterative solver.
 This only influences the amount of iterations.
+Naturally their performance is governed by the number of iterations needed multiplied by the time each iteration takes.
+Although they do not provide an exact solution like the direct solvers, they utilizes a lot less memory, needing little more or with some methods, no extra memory other than the original matrix itself.
+
+Traditional Krylov methods suffer from a strong-scaling wall, due to a global reduction step present at either the construction of the Krylov space, or computation of $z_i$.
+For this purpose there exist so called ``communication-avoidant'' Krylov methods.
 
 \section{N-Body}
 \label{sec:background-nbody}
 
 % might move to "related work" or something
+Many scientific calculations, from electric forces between electron to gravitational forces between astral bodies, consist of sums of pairwise interaction between a large number of bodies.
+This class of problems is called ``N-Body''.
+The function describing the individual interaction is called the ``kernel''.
+Kernels do not depend on each other and can be computed in any order.
+Naturally a problem, where $n$ elements are interacting with each other, is going to have a time complexity of \(\mathcal{O}(n^2)\), meaning that computing interactions for large $n$'s becomes really expensive.
+
+One the one hand, many approximation techniques have been developed, which are all roughly based on the following idea:
+Kernels generally have an inverse dependency on distance.
+The further the distance between the bodies, the less individual interactions matter.
+
+On the other hand, the nature of the kernels means that N-Body problems are perfect for highly-parallel architectures, primarily GPUs.
+This works so well in fact that naively running kernels in parallel often beats intricate optimizations.
