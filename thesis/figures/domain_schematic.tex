@@ -1,0 +1,56 @@
+\begin{tikzpicture}[
+    dot/.style={circle, fill=black, inner sep=0pt, minimum size=2.2pt},
+    lbl/.style={font=\small}
+]
+
+% atom spheres whose union forms the molecular surface Gamma.
+% Each circle is drawn twice (radius r+t, then radius r) as ONE path
+% per layer so the nonzero winding rule fuses all overlaps into a
+% single seamless region; filling the two layers black-then-white
+% leaves a clean ring of width t as the outline, without ever
+% stroking a self-intersecting path (which produces rendering
+% artifacts where three or more spheres overlap). Centers/radii are
+% chosen dense enough (spacing well under r*sqrt(3)) so the union has
+% no interior gaps.
+\def\moleculeOuter{
+    (0,0)         circle (8.85mm)
+    (9mm,4.5mm)   circle (8.35mm)
+    (16.5mm,-1mm) circle (7.85mm)
+    (11mm,-9.5mm) circle (7.85mm)
+    (1.5mm,-9mm)  circle (7.85mm)
+    (-8mm,-1.5mm) circle (7.85mm)
+    (2mm,8mm)     circle (7.35mm)
+}
+\def\moleculeInner{
+    (0,0)         circle (8.5mm)
+    (9mm,4.5mm)   circle (8mm)
+    (16.5mm,-1mm) circle (7.5mm)
+    (11mm,-9.5mm) circle (7.5mm)
+    (1.5mm,-9mm)  circle (7.5mm)
+    (-8mm,-1.5mm) circle (7.5mm)
+    (2mm,8mm)     circle (7mm)
+}
+
+\path[fill=black] \moleculeOuter;
+\path[fill=white] \moleculeInner;
+
+% solute atom locations, marked at every sphere center
+\node[dot] at (0,0) {};
+\node[dot] at (9mm,4.5mm) {};
+\node[dot] at (16.5mm,-1mm) {};
+\node[dot] at (11mm,-9.5mm) {};
+\node[dot] at (1.5mm,-9mm) {};
+\node[dot] at (-8mm,-1.5mm) {};
+\node[dot] at (2mm,8mm) {};
+
+% interior domain label
+\node[lbl] at (2mm,-3mm) {$\Omega_m$};
+
+% exterior domain label
+\node[lbl] at (32mm,-8mm) {$\Omega_s$};
+
+% interface label with pointer touching the boundary from the outside
+\node[lbl] (gammalbl) at (34mm,6mm) {$\Gamma$};
+\draw[-{Latex[length=1.5mm]}] (gammalbl.west) -- (22.9mm,0.5mm);
+
+\end{tikzpicture}
