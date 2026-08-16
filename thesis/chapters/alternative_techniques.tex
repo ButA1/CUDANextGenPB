@@ -1,2 +1,73 @@
 \chapter{Alternative Techniques}
 \label{sec:alternative-techniques}
+
+\section{CUDA optimizations}
+\label{sec:alternative-techniques-cuda-optimizations}
+
+\subsection{Mixed-Precision}
+\label{sec:alternative-techniques-cuda-optimizations-mixed-precision}
+Mixed precision is the practice of using a mix of FP32 and FP64 operations.
+%In the context of the N-body problem, mixed precision is employed to off-load the distance calculation to the FP32 units.
+%cant use that here it I pull it in front
+The error is hard to quantify, but is guaranteed to be at least at the FP32 noise floor, which is around $10^{-7}$.
+This is particularly effective on gaming GPUs, where FP64 performance is severely neutered.
+While workstation GPUs like Nvidia's H100 or A100 have a FP32 to FP64 performance ratio of 2:1, gaming GPUs have a measly 64:1 ratio.
+This is a cost saving measure, as video games, unlike scientific applications, rarely need FP64 operations.
+However, Nvidia also markets GPUs like the RTX Pro series as workstation GPUs, even though they are based on their gaming GPUs, and thus have the same cut-down FP64 performance.
+
+\section{N-Body}
+\label{sec:alternative-techniques-nbody}
+Many scientific calculations, from electric forces between electron to gravitational forces between astral bodies, consist of sums of pairwise interaction between a large number of bodies or particles.
+This class of problems is called ``N-Body''.
+The function describing the individual interaction is called the ``kernel''.
+Kernels do not depend on each other and can be computed in any order.
+Naturally a problem, where $n$ elements are interacting with each other, is going to have a time complexity of \(\mathcal{O}(n^2)\), meaning that computing interactions for large $n$'s becomes really expensive.
+
+Although most FEM solvers avoid N-Body calculations entirely, NGPB has this problem type at least twice as demonstrated in Eq.~\ref{eq:polarization-energy} and \ref{eq:ionic-energy}. BEM type solvers compute the interaction between each boundary element, meaning N-Body is a core part of their solve.
+
+One the one hand, many approximation techniques have been developed, which are all roughly based on the following idea:
+Kernels generally have an inverse dependency on distance.
+The further the distance between the bodies, the less individual interactions matter.
+
+On the other hand, the nature of the kernels means that N-Body problems are perfect for highly-parallel architectures, primarily GPUs.
+This works so well in fact that naively running kernels in parallel often beats intricate optimizations.
+
+\subsection{Cut-Off}
+\label{sec:alternative-techniques-nbody-cut-off}
+This is the least sophisticated optimization technique, that takes the previously mentioned idea to its extreme.
+If to bodies are far enough away it simply aborts the calculation between these two entirely.
+While it does reduce the number of calculations, it leads to a very large, and very hard to control error.
+This technique only makes sense when the result it so small, it lives at the noise floor for floating point numbers.
+This fact relies on the system being very large, which is hardly ever the case.
+
+\subsection{Treecode Barnes-Hut}
+\label{sec:alternative-techniques-nbody-bh}
+If a cluster of bodies is far enough away from a target body, the cluster could be summarized as a single body, that interacts with the target.
+This is the core idea behind Barnes-Hut.
+It walks through a tree of body clusters for all bodies, and decides whether certain clusters are far enough away to calculate the interaction using their summary instead of ever individual interaction of every body within it.
+The distance criterion, commonly denoted as $\theta$, controls the accuracy of the algorithm.
+The higher $\theta$ is, the more summaries of clusters are accepted, and the more the algorithm approaches its theoretical peak completely of \(\mathcal{O}(n log n)\).
+Since these summaries are simple sums of all the bodies in the cluster, increasing $\theta$ also increases the error.
+In contrast, lowering $\theta$ makes the result more accurate as more interactions are computed directly, but also making the complexity approach the original \(\mathcal{O}(n^2)\).
+Traditionally, a cluster is far enough away when $\theta > s/d$, where $s$ is the size of the space, and $d$ is the distance between the cluster and target.
+
+To make higher $\theta$ more acceptable, the simple sum was replaced by multipole expansions, which more are more complex, but also more accurately summarized the interaction with the cluster.
+With that, the acceptance criterion now became the multipole acceptance criterion.
+More sophisticated criteria have been developed in order to help increase $\theta$ even further, but had much less of an impact than multipole expansions.
+
+\subsection{Alternative MACs}
+\label{sec:alternative-techniques-alternative-macs}
+
+\subsection{Multipoles}
+\label{sec:alternative-techniques-nbody-multipoles}
+Multipole is a catch-all term for higher order function expansions.
+Function expansions reformulate a function into an sum of terms following a certain pattern.
+This number of terms is equal to the order $P$ of the expansion.
+
+\subsection{Fast Multipole Method}
+\label{sec:alternative-techniques-nbody-fmm}
+
+\subsection{Related Work}
+\label{sec:alternative-techniques-related-work}
+Treecode Barnes-Hut has already been implemented in a LPBE solver, by W. Geng and R. Krasny \cite{geng2013tabipb}.
+Dubbed TABI-PB 1.0, it is a BEM type solver using cartesian multipole expansions, based of previous work involving Krasny \cite{li2009cartesian}, allowing for an expansion order of up to 10.

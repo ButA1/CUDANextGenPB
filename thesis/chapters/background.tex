@@ -89,12 +89,14 @@ Increase in accuracy is also non-monotonic due to grid-position artifacts.
 Using a uniform grid is often wasteful as high resolution is not needed in the solvent domain $\Omega_s$.
 For this reason, these solvers employ de-refinement of the grid to capture the surface $\Gamma$ and the molecule domain $\Omega_m$, while keeping resource utilization as low as possible.
 They necessarily compute the electrostatic potential for the entire domain $D$, and not just on the surface.
+Their linear equation contains a sparse matrix, which is a differential operator
 The far-field boundary condition is often satisfied approximately.
 
 BEM reformulate the LPBE as boundary integral at the surface $\Gamma$ by applying Green's identities, and discretize over that.
 Thus they can only compute the electrostatic potential at the surface $\Gamma$, but it also reduces the memory utilization when compared to FEM.
 They are also forced to use the LPBE, since the reformulation depends on it.
 Their accuracy depends on the number of triangles used to discretize the surface, making its increase monotonic.
+They solve a linear system with a dense matrix, that is integral operator.
 The far-field boundary condition is exactly satisfied at spatial infinity.
 
 Solvers need to avoid the so called self-energy singularity, which is an artifact of the point charge model, where the electrostatic potential explodes when it is evaluated at the position of the charge.
@@ -207,19 +209,21 @@ The profiles can then be inspected in the GUI application.
 \section{Sparse Matrices}
 \label{sec:background-sparse-matrices}
 
-Often times matrices describing 2D or 3D systems have a lot of zeroes in them.
+Often times matrices describing 2D or 3D systems have many zero-entires in them.
 In a dense matrix all of the values are stored, meaning those zeroes contribute to the memory footprint.
 This severely limits the matrix size that could realistically computed.
 Sparse matrices mitigate this problem by storing only non-zero values.
 There are several techniques to store them.
 
-One way would be to use a map or dictionary data type, which are very easy to mutate.
-However they are not as memory efficient as the Compressed Sparse Row format or the lesser know Compressed Sparse Column.
-They utilize 3 arrays: column indices and values with the length of the non-zero-values (NNZ), and row offsets with the length equal to the number of rows plus one.
+One easily modifiable type is die dictionary of keys (DOK), which stores the non-zero values, keyed by the two coordinates of their position within the dense matrix.
+Entries missing from the dictionary are implicitly considered 0.
+Since they are implemented using hash tables or maps, they have some amount of memory overhead, and the way they store their values is inefficient for matrix multiplications.
 
+Conversely, Compressed Sparse Row format utilize 3 arrays: column indices and values with the length of the non-zero-values (NNZ), and row offsets with the length equal to the number of rows plus one.
 Figure~\ref{fig:csr-format} shows an example of a small $4\times4$ sparse matrix and its corresponding CSR representation.
 The \texttt{values} array stores the non-zero entries in row-major order, and \texttt{col\_idx} stores the column each of those entries belongs to.
 \texttt{row\_offsets} then stores, for each row, the index into \texttt{values}/\texttt{col\_idx} at which that row's entries begin, with a final trailing entry equal to NNZ so that the length of any row can be computed as \texttt{row\_offsets[i+1] - row\_offsets[i]}.
+On the surface this might look more complicated than a DOK but the CSR wins when accessing all row values of a matrix, which is conducive to matrix multiplication.
 Since \texttt{row\_offsets} depends on the number of values per row, it needs to be recomputed every time values are added or removed.
 
 \begin{figure}[htbp]
@@ -287,19 +291,3 @@ Although they do not provide an exact solution like the direct solvers, they uti
 Traditional Krylov methods suffer from a strong-scaling wall, due to a global reduction step present at either the construction of the Krylov space, or computation of $z_i$.
 For this purpose there exist so called ``communication-avoidant'' Krylov methods.
 
-\section{N-Body}
-\label{sec:background-nbody}
-
-% might move to "related work" or something
-Many scientific calculations, from electric forces between electron to gravitational forces between astral bodies, consist of sums of pairwise interaction between a large number of bodies.
-This class of problems is called ``N-Body''.
-The function describing the individual interaction is called the ``kernel''.
-Kernels do not depend on each other and can be computed in any order.
-Naturally a problem, where $n$ elements are interacting with each other, is going to have a time complexity of \(\mathcal{O}(n^2)\), meaning that computing interactions for large $n$'s becomes really expensive.
-
-One the one hand, many approximation techniques have been developed, which are all roughly based on the following idea:
-Kernels generally have an inverse dependency on distance.
-The further the distance between the bodies, the less individual interactions matter.
-
-On the other hand, the nature of the kernels means that N-Body problems are perfect for highly-parallel architectures, primarily GPUs.
-This works so well in fact that naively running kernels in parallel often beats intricate optimizations.

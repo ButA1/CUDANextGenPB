@@ -10,8 +10,8 @@ In this section, I will describe the experimental setup and the methods used to 
 \label{sec:evaluation-experimental-setup-test-systems}
 
 Testing was done both locally on my own machine, and on specific nodes of the TU Berlin HPC. 
-The specifications of both systems can be seen in Table\ref{tab:test-systems}. 
-As already mentioned in \ref{sec:implementation-energy-calculation}, FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compared to the A100, despite both chips being part of the same architecture generation.
+The specifications of both systems can be seen in Table~\ref{tab:test-systems}. 
+As already mentioned in \ref{sec:alternative-techniques-cuda-optimizations-mixed-precision}, FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compared to the A100, despite both chips being part of the same architecture generation.
 On the other hand, the Intel Xeon E5-2630v4 of the cluster is quite old, and is handily beaten by the R7 5800X3D in both single-core and multi-core performance, which makes comparing performance a little awkward.
 To compare both systems fairly I needed to benchmark the pure C++ and CUDA codes separately.
 
@@ -25,7 +25,7 @@ To compare both systems fairly I needed to benchmark the pure C++ and CUDA codes
         RAM & 32 GB DDR4 & \multicolumn{2}{c}{512 GB DDR4} \\
         GPU & RTX 3080 & Tesla A100 & 2xTesla A100 \\
         VRAM & 10GB & 40GB & 80GB \\
-        FP64:FP32 & 64:1 & \multicolumn{2}{c}{2:1} \\
+        FP32:FP64 & 64:1 & \multicolumn{2}{c}{2:1} \\
         Driver / CUDA & 580.173.02 / 13.0 & \multicolumn{2}{c}{570.86.10 / 12.8} \\
         \bottomrule
     \end{tabular}
@@ -180,7 +180,7 @@ The analytical reference values, seen in Table~\ref{tab:ngpb-analytical-values},
 \end{table}
 
 The combination of my modifications to NGPB and its subsystems must not increase those magnitudes for all analytical test cases, meaning the magnitude of their error contributions must be at the same order or lower. 
-On the other hand, error magnitudes smaller than or equal to $10^{-12}$ are considered FP64 machine-level noise, so aiming for those is not necessary, giving me some wiggle room between $10^{-10}$ and $10^{-12}$ for possible approximations. 
+On the other hand, error magnitudes smaller than or equal to $10^{-16}$ are considered FP64 machine-level noise, so aiming for those is not necessary, giving me some wiggle room between $10^{-10}$ and $10^{-16}$ for possible approximations.
 
 Comparing the accuracy between the linear solvers is also unnecessary, since all linear solvers aim to converge towards a set residual or accuracy value, which is completely independent of the solver or preconditioning. 
 

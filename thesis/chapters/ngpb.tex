@@ -2,12 +2,12 @@
 \label{sec:nextgenpb}
 
 At the time of writing, Next Generation Poisson-Boltzmann (NextGenPB or NGPB for short) \cite{diflorio2025nextgenpb} is the most recent innovation in the field of LPBE solvers, aiming to improve accuracy while maximizing computational efficiency. 
-It is part of the family of grid- or FEM-based solvers, featuring local (de)refinement.
+It is part of the family of grid- or FEM-based solvers, featuring local (de)refinement using the p4est library.
 It is purposefully modular and built upon free and open libraries, making improvements to individual steps easier, though, as I will explain later, this has to be taken with a grain of salt.
+Using MPI and BIMPP to handle calculations across distributed nodes, it lends itself well for high performance computing.
 Its main attractions are the use of NanoShaper and an enhanced analytical approach, allowing for much more accurate energy calculation, beating out many older LPBE solvers in both accuracy and speed --- an impressive feat that has gained the attention of biomolecular chemists at our technical university, who seek to replace their T-ABPS with NGPB.
 % yes I actually put that em dash there
 
-%Just like other LPBE solvers, 
 To avoid the self-energy singularity, NGPB computes the electrostatic energies individually, where each of them is never evaluated at the atom's center.
 This is an entirely new approach, which avoids reformulating, doing additional differencing or using a different model other than point charges.
 Thus the total electrostatic energy NGPB computes is a sum of the Coulomb, polarization and ionic energy.
@@ -32,14 +32,14 @@ NGPB uses it for creating and adapting octrees by refining, coarsening, and enfo
 \subsection{BIMPP}
 \label{sec:nextgenpb-libraries-bimpp}
 
-BIMPP \cite{defalco_bimpp} is a very obscure library written by one of the co-authors of NGPB, Carlo de Falco. 
+BIMPP \cite{defalco_bimpp} is a very obscure library written by one of the co-authors of NGPB. 
 NGPB does not use the standard version of it, but rather a special ``NextGenPB-v0.0.01'' release, which contains additional operators meant specifically for NGPB.
-Due to the lack of documentation, it is difficult to get an overview of all its features.
+Due to the lack of documentation, it is difficult to get an overview over all its features.
 I would describe it as library that enables distributed vector- and sparse matrix operations on quad- and octrees.
 It itself is based on p4est, and it too handles the communication of non-local elements between the MPI processes.
 
 It leans towards being sparsity-aware, but the current implementation is known to be memory inefficient. 
-The main culprit is the way BIMPP stores non-local values. 
+The main culprit is the way BIMPP stores its distributed sparse matrix. 
 For every rank, BIMPP holds both local and non-local values of a distributed sparse matrix in a \texttt{std::vector} of \texttt{std::map}, where the \texttt{std::vector} is sized to the global amount of rows.
 \texttt{std::vector} initializes an empty map for every entry.
 This means that matrix rows, that don't even need to track any non-locals still initialize an empty \texttt{std::map}.
@@ -79,7 +79,7 @@ It then finally calls \texttt{remap()}, which collects all the non-local values 
 \label{sec:nextgenpb-libraries-lis}
 
 The library of Iterative Solvers for linear systems \cite{lis_library} is an MPI- and OpenMP-aware (and therefore parallel) software library for solving linear equations and Eigenvalue problems using iterative methods.
-It supports both dense and sparse matrix formats.
+It supports both dense matrices, as well as CSR matrices.
 As is typical for a linear software library, it offers many different solver methods and preconditioners.
 
 \subsection{mumps}
@@ -87,6 +87,8 @@ As is typical for a linear software library, it offers many different solver met
 
 The multifrontal massively parallel sparse direct solver \cite{mumps_solver} is an alternative solver available in NGPB.
 Unlike LIS this is a dense solver.
+It not only accepts dense and CSR matrices, it can also accepts dictionary formats.
+It uses LU factorization to simplify the matrix.
 
 \section{Submodules}
 \label{sec:nextgenpb-submodules}
@@ -195,7 +197,7 @@ This is standard practice with octrees an avoids quadrants that share no vertice
 \subsubsection{Ray Cache}
 
 This is central component that gets used throughout multiple stages.
-As its name suggests it holds the information about the rays.
+As its name suggests it holds the information about the rays cast by NanoShaper.
 It stores a list of intersections and normals as an object \texttt{crossing\_t} under coordinates on an axis plane. 
 The first index for the outmost array is the axis, so in a 3D environment those are the axes x,y and z. 
 The next two for the binary tree map are the coordinates on the perpendicular plane along said axis.
@@ -256,33 +258,28 @@ Libraries like cuDSS and AMGX can be easily implemented here.
 This step finally computes the 3 energies, as well as the total energy of the system.
 Depending on whether the mesh has been refined, NGPB chooses between two sets of methods.
 Methods suffixed by ``fast'' assume that the mesh is unrefined, and as the name implies, skips certain steps that would be needed it were.
-
 The main two methods here are \texttt{energy} and \texttt{energy\_fast}, which compute the energies according to the following formulas:
 
 The Coulomb energy is the typical interaction between two charged particles $q_i$ and $q_j$ without self-interaction, so $\lVert \mathbf{r}_i - \mathbf{r}_j \rVert$ in Equation~\eqref{eq:Coulomb-energy} never equals 0. 
-
 \begin{equation}
     E_{coul} = \sum_{i=1}^{N_{atoms}} \sum_{j<i} \frac{q_i q_j}{4\pi\varepsilon_m \lVert \mathbf{r}_i - \mathbf{r}_j \rVert}
     \label{eq:Coulomb-energy}
 \end{equation}
+This formulation already avoids unnecessary interactions, by essentially evaluating only the triangle of the matrix spanned by the $N \times N$ interaction.
 
 The polarization energy arises from polarization charges at the surface where the dielectric constant jumps. It is always evaluated on the intersection point $r_p$ between the surface and the grid.
 The authors approximate the electric flux along a surface patch with:
-
 \begin{equation}
     D_v^{eff} = - \varepsilon^{eff}(\phi_2 - \phi_1)/h_v
     \label{eq:electric-flux}
 \end{equation}
-
 where $\varepsilon^{eff}$ is the WHA according to Eq.~\ref{eq:effective-permittivity}.
 It uses \texttt{classifyCube\_flux(\_fast)} to gather the necessary values per quadrant.
 The total polarization charge is computed with:
-
 \begin{equation}
     q_p \approx \varepsilon_0 \left( \frac{1}{\varepsilon_s} - \frac{1}{\varepsilon_m} \right) D_v^{eff} h_v^2
     \label{eq:polarization-charge}
 \end{equation}
-
 where $h_v^2$ is the area of the surface patch associated with the intersection point.
 Summing the interaction of every such polarization charge with every atomic charge then gives the polarization energy:
 
@@ -325,8 +322,6 @@ The total energy is then simply the sum of all three contributions:
     E_{tot} = E_{coul} + E_{pol} + E_{ion}
     \label{eq:total-energy}
 \end{equation}
-
-All three energies are essentially sums of many interactions between electric charges, a classic example of the N-body problem.
 
 \subsubsection{classifyCube(\_fast)}
 
