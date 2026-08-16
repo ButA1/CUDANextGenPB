@@ -15,6 +15,9 @@ While workstation GPUs like Nvidia's H100 or A100 have a FP32 to FP64 performanc
 This is a cost saving measure, as video games, unlike scientific applications, rarely need FP64 operations.
 However, Nvidia also markets GPUs like the RTX Pro series as workstation GPUs, even though they are based on their gaming GPUs, and thus have the same cut-down FP64 performance.
 
+\subsection{Linear Bounding Volume Hierarchy}
+\label{sec:alternative-techniques-cuda-optimizations-lbhv}
+
 \section{N-Body}
 \label{sec:alternative-techniques-nbody}
 Many scientific calculations, from electric forces between electron to gravitational forces between astral bodies, consist of sums of pairwise interaction between a large number of bodies or particles.
@@ -49,7 +52,7 @@ The distance criterion, commonly denoted as $\theta$, controls the accuracy of t
 The higher $\theta$ is, the more summaries of clusters are accepted, and the more the algorithm approaches its theoretical peak completely of \(\mathcal{O}(n log n)\).
 Since these summaries are simple sums of all the bodies in the cluster, increasing $\theta$ also increases the error.
 In contrast, lowering $\theta$ makes the result more accurate as more interactions are computed directly, but also making the complexity approach the original \(\mathcal{O}(n^2)\).
-Traditionally, a cluster is far enough away when $\theta > s/d$, where $s$ is the size of the space, and $d$ is the distance between the cluster and target.
+Traditionally, a cluster is far enough away when $\theta > s/d$, where $s$ is the size of the cluster, and $d$ is the distance between the cluster and target.
 
 To make higher $\theta$ more acceptable, the simple sum was replaced by multipole expansions, which more are more complex, but also more accurately summarized the interaction with the cluster.
 With that, the acceptance criterion now became the multipole acceptance criterion.
@@ -61,11 +64,25 @@ More sophisticated criteria have been developed in order to help increase $\thet
 \subsection{Multipoles}
 \label{sec:alternative-techniques-nbody-multipoles}
 Multipole is a catch-all term for higher order function expansions.
-Function expansions reformulate a function into an sum of terms following a certain pattern.
-This number of terms is equal to the order $P$ of the expansion.
+They approximate a function by expanding it into a sum of repetitive terms.
+Generally speaking, the number of terms is equal to the order $P$ of the expansion.
+The higher the order more accurate the expansion becomes to the original function.
+For the expansion to be exact, the order needs to be infinite.
 
 \subsection{Fast Multipole Method}
 \label{sec:alternative-techniques-nbody-fmm}
+%TODO include the origins of FMM
+The Fast Multipole Method (FMM) takes the idea of Barnes-Hut and expands it to the target.
+Instead of evaluating the cluster multipole expansion against a single target body, it now also summarizes the targets into clusters as well, called the local expansion.
+This eliminates the need to traverse the tree for every body.
+Thus FMM does not iterate over each particle, it iterates over each leaf cluster, and computes their multipole expansion.
+%TODO what is a leaf cluster!
+When it then moves to the higher level in the tree, it does not compute the multipole expansion from scratch.
+Instead it uses a M2M operator which computes the multipole expansion of a parent cluster from its children's multipole.
+This is the upward pass, and it continues until it reaches the root of the tree in just \(\mathcal{O}(n)\) steps.
+Next the well-separated clusters convert their multipole expansions into local expansion with the M2L operator.
+Then comes the downward pass, where the local expansions of the parent clusters get passed down to their children using the L2L operator, also in \(\mathcal{O}(n)\) steps.
+Thus the ideal overall time complexity is just \(\mathcal{O}(n)\).
 
 \subsection{Related Work}
 \label{sec:alternative-techniques-related-work}
