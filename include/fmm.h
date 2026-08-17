@@ -313,26 +313,32 @@ __device__ __forceinline__ cmplx get_R(const cmplx* R, int n, int m) {
 
 // ====================================================================
 //  double atomic min/max (CUDA has no native FP64 min/max atomic)
+//
+//  Instead of a CAS retry loop we exploit the fact that IEEE-754 doubles are
+//  ordered by their bit pattern: read as a SIGNED int64 the non-negative ones
+//  sort exactly like the doubles, while read as an UNSIGNED int64 every
+//  negative one outranks every non-negative one and the negatives sort in
+//  reverse. Branching on the sign of the incoming value therefore reduces each
+//  update to a single native 64-bit atomic (CC >= 3.5) -- no retry loop, and no
+//  non-atomic read of a location other threads are writing. Either branch is a
+//  correct min/max against whatever is currently stored, whatever ITS sign, so
+//  mixed-sign callers on one address still reduce correctly. -0.0 takes the
+//  negative branch, which is harmless since -0.0 == 0.0. NaN is not handled
+//  (all callers feed finite coordinates).
 // ====================================================================
 __device__ __forceinline__ double atomicMinDouble(double *addr, double val) {
-  unsigned long long *a = (unsigned long long *)addr;
-  unsigned long long old = *a, assumed;
-  do {
-    assumed = old;
-    if (__longlong_as_double(assumed) <= val) break;
-    old = atomicCAS(a, assumed, __double_as_longlong(val));
-  } while (assumed != old);
-  return __longlong_as_double(old);
+  const long long i = __double_as_longlong(val);
+  return i < 0
+       ? __longlong_as_double((long long)atomicMax((unsigned long long *)addr,
+                                                   (unsigned long long)i))
+       : __longlong_as_double(atomicMin((long long *)addr, i));
 }
 __device__ __forceinline__ double atomicMaxDouble(double *addr, double val) {
-  unsigned long long *a = (unsigned long long *)addr;
-  unsigned long long old = *a, assumed;
-  do {
-    assumed = old;
-    if (__longlong_as_double(assumed) >= val) break;
-    old = atomicCAS(a, assumed, __double_as_longlong(val));
-  } while (assumed != old);
-  return __longlong_as_double(old);
+  const long long i = __double_as_longlong(val);
+  return i < 0
+       ? __longlong_as_double((long long)atomicMin((unsigned long long *)addr,
+                                                   (unsigned long long)i))
+       : __longlong_as_double(atomicMax((long long *)addr, i));
 }
 
 // Leaf-kernel block width = launch blockDim. Target leaves hold <= 256 points, so 256
