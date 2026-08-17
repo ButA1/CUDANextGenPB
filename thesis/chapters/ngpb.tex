@@ -2,9 +2,10 @@
 \label{sec:nextgenpb}
 
 At the time of writing, Next Generation Poisson-Boltzmann (NextGenPB or NGPB for short) \cite{diflorio2025nextgenpb} is the most recent innovation in the field of LPBE solvers, aiming to improve accuracy while maximizing computational efficiency. 
-It is part of the family of grid- or FEM-based solvers, featuring local (de)refinement using the p4est library.
 It is purposefully modular and built upon free and open libraries, making improvements to individual steps easier, though, as I will explain later, this has to be taken with a grain of salt.
-Using MPI and BIMPP to handle calculations across distributed nodes, it lends itself well for high performance computing.
+It is part of the family of grid- or FEM-based solvers, featuring local (de)refinement using the p4est library.
+% TODO I don't like this explanation of how it uses libraries at all
+Using MPI and MPI-aware mathematical libraries like BIMPP and LIS to handle calculations across distributed nodes, it lends itself well for high performance computing.
 Its main attractions are the use of NanoShaper and an enhanced analytical approach, allowing for much more accurate energy calculation, beating out many older LPBE solvers in both accuracy and speed --- an impressive feat that has gained the attention of biomolecular chemists at our technical university, who seek to replace their T-ABPS with NGPB.
 % yes I actually put that em dash there
 

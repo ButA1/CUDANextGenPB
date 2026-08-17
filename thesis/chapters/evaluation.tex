@@ -11,7 +11,7 @@ In this section, I will describe the experimental setup and the methods used to 
 
 Testing was done both locally on my own machine, and on specific nodes of the TU Berlin HPC. 
 The specifications of both systems can be seen in Table~\ref{tab:test-systems}. 
-As already mentioned in \ref{sec:alternative-techniques-cuda-optimizations-mixed-precision}, FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compared to the A100, despite both chips being part of the same architecture generation.
+As already mentioned in \ref{sec:background-cuda-gpu-architecture}, FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compared to the A100, despite both chips being part of the same architecture generation.
 On the other hand, the Intel Xeon E5-2630v4 of the cluster is quite old, and is handily beaten by the R7 5800X3D in both single-core and multi-core performance, which makes comparing performance a little awkward.
 To compare both systems fairly I needed to benchmark the pure C++ and CUDA codes separately.
 

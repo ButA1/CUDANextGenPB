@@ -145,6 +145,43 @@ General-purpose GPU computing is not a silver bullet.
 A problem needs to be parallelizable to really take advantage of the architecture.
 Strictly sequential problems, and those that are very limited in how much they can be parallelized, are still better served on the CPU. 
 
+\subsection{GPU Architecture}
+\label{sec:background-cuda-gpu-architecture}
+I will use Nvidia's Ampere architecture to give a basic overview, as it is the main architecture used for the evaluation of this thesis.
+Other generations might differ in certain areas, especially in the specific number of units, so I will omit them from my explanation.
+
+The Ampere GPU architecture \cite{nvidia_ampere_ga102_whitepaper} is organized in groups of Streaming Multiprocessors (SM) called Graphics Processing Clusters (GPC), connected through the L2-Cache (Figure~\ref{fig:ga102-full-gpu}).
+SMs (Figure~\ref{fig:ga10x-sm}) are then partitioned into processing blocks, each containing multiple CUDA cores, and a register file.
+Each SM also had one L1-Cache and FP64 units, which are absent from diagram.
+
+Even among the same architecture generation the number of FP64 units varies drastically between chips intended for workstations and those intended for gaming.
+While the GA102 chip intended for gaming only has two FP64 units per SM, the ``full scale'' GA100 chip, from which the GA102 is derived, features 32.
+This results in a FP32 to FP64 performance ratio of 2:1 on GA100.
+The GA102 features double the amount of FP32 cores, which does mean its FP32 performance is higher than GA100, but also exacerbates the performance ration even further to 64:1.
+This is a cost saving measure, as video games, unlike scientific applications, rarely need FP64 operations.
+However, Nvidia also markets GPUs like the RTX Pro series as workstation GPUs, even though they are based on the gaming chip, and thus have the same cut-down FP64 performance.
+
+Video memory, or VRAM is absent from the GPU chip, instead being placed around it on the PCB and connected through the memory controllers.
+Ordered by descending transfer speed, the hierarchy of the memory is as follows: First comes the register file of the processing blocks, then the L1-Cache of the SM, then the L2-Cache and finally the VRAM.
+
+From the standpoint of the CUDA API, the architecture appears slightly differently.
+The L2-Cache and VRAM become opaque, and are treated as one ``global memory''.
+The SM is abstracted as a ``block'' and its L1-Cache as the ``shared memory'.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/ga102_full_gpu.png}
+    \caption[GA102 full GPU with 84 SMs]{The full GA102 GPU, comprising seven GPCs with six TPCs each, two SMs per TPC, the shared L2 cache and the twelve memory controllers. Reproduced from the NVIDIA Ampere GA102 GPU architecture whitepaper \cite{nvidia_ampere_ga102_whitepaper}, \textcopyright{} 2021 NVIDIA Corporation.}
+    \label{fig:ga102-full-gpu}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.6\textwidth]{figures/ga10x_sm.png}
+    \caption[GA10x streaming multiprocessor]{A single GA10x streaming multiprocessor, split into four processing partitions. Each partition holds its own register file, warp scheduler and dispatch unit, two FP32 datapaths (one of which doubles as the INT32 datapath) and a third-generation tensor core; all four partitions share the 128\,KB L1 data cache and shared memory. Reproduced from the NVIDIA Ampere GA102 GPU architecture whitepaper \cite{nvidia_ampere_ga102_whitepaper}, \textcopyright{} 2021 NVIDIA Corporation.}
+    \label{fig:ga10x-sm}
+\end{figure}
+
 \subsection{Basic Overview}
 \label{sec:background-cuda-basic-overview}
 
@@ -153,13 +190,15 @@ The API allows users to program custom programs called kernels, which are launch
 Device memory is separate from the host memory.
 Due to this, host data cannot be directly passed to the kernels, and kernels cannot return values directly, and thus needs to be copied back and forth between those.
 The basic flow of a CUDA program is typically structured like this \cite{nvidia_cuda_programming_guide}:
-
 \begin{itemize}
     \item Allocation of device memory, both for input and output
     \item Copying of host memory into the allocated device input memory
     \item Launching of the kernel
     \item Copying of the device output memory
 \end{itemize}
+Data in the allocated device memory lives primarily in the global memory.
+Kernels are launched as a number of threads per block.
+%kinda choppy
 
 \subsection{Compiling}
 \label{sec:background-cuda-compiling}

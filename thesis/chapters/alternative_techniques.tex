@@ -6,14 +6,24 @@
 
 \subsection{Mixed-Precision}
 \label{sec:alternative-techniques-cuda-optimizations-mixed-precision}
+
 Mixed precision is the practice of using a mix of FP32 and FP64 operations.
 %In the context of the N-body problem, mixed precision is employed to off-load the distance calculation to the FP32 units.
 %cant use that here it I pull it in front
 The error is hard to quantify, but is guaranteed to be at least at the FP32 noise floor, which is around $10^{-7}$.
-This is particularly effective on gaming GPUs, where FP64 performance is severely neutered.
-While workstation GPUs like Nvidia's H100 or A100 have a FP32 to FP64 performance ratio of 2:1, gaming GPUs have a measly 64:1 ratio.
-This is a cost saving measure, as video games, unlike scientific applications, rarely need FP64 operations.
-However, Nvidia also markets GPUs like the RTX Pro series as workstation GPUs, even though they are based on their gaming GPUs, and thus have the same cut-down FP64 performance.
+This is particularly effective on gaming GPUs, where FP64 performance is severely neutered, and FP32 performance is better when compared to workstation GPUs.
+
+\subsection{Atomics}
+\label{sec:alternative-techniques-cuda-optimizations-atomics}
+
+Atomic operations such as \texttt{atomicAdd} are operations used to prevent data-races on write operations.
+For instance, when multiple parallel threads add a value to the same memory address, some of them may add their value to the content of the address that has already been updated by that time, meaning they would override the address based on its old value.
+The downside of atomics are that they force the operations on one address to be done sequentially, blocking competing threads from writing in parallel, which naturally leads to performance loss.
+The folklore of ``never use atomics'' is much less relevant today, as atomics have become much more flexible, being usable not only on the global memory, but the shared memory as well.
+The should still be avoided on highly contested global memory addresses though.
+
+Two inconveniently missing atomic operations are \texttt{atomicMin} and \texttt{atomicMax}, which store the minimum and maximum between two numbers.
+A wide spread workaround for this uses \texttt{atomicCAS}:
 
 \subsection{Linear Bounding Volume Hierarchy}
 \label{sec:alternative-techniques-cuda-optimizations-lbhv}
@@ -37,6 +47,7 @@ This works so well in fact that naively running kernels in parallel often beats 
 
 \subsection{Cut-Off}
 \label{sec:alternative-techniques-nbody-cut-off}
+
 This is the least sophisticated optimization technique, that takes the previously mentioned idea to its extreme.
 If to bodies are far enough away it simply aborts the calculation between these two entirely.
 While it does reduce the number of calculations, it leads to a very large, and very hard to control error.
@@ -45,12 +56,14 @@ This fact relies on the system being very large, which is hardly ever the case.
 
 \subsection{Treecode Barnes-Hut}
 \label{sec:alternative-techniques-nbody-bh}
+
 If a cluster of bodies is far enough away from a target body, the cluster could be summarized as a single body, that interacts with the target.
 This is the core idea behind Barnes-Hut.
 It walks through a tree of body clusters for all bodies, and decides whether certain clusters are far enough away to calculate the interaction using their summary instead of ever individual interaction of every body within it.
+Originally these summaries are approximated with simple sums of all the bodies in the cluster concentrated at their center of gravity.
 The distance criterion, commonly denoted as $\theta$, controls the accuracy of the algorithm.
 The higher $\theta$ is, the more summaries of clusters are accepted, and the more the algorithm approaches its theoretical peak completely of \(\mathcal{O}(n log n)\).
-Since these summaries are simple sums of all the bodies in the cluster, increasing $\theta$ also increases the error.
+Since these summaries are approximations, increasing $\theta$ also increases the error.
 In contrast, lowering $\theta$ makes the result more accurate as more interactions are computed directly, but also making the complexity approach the original \(\mathcal{O}(n^2)\).
 Traditionally, a cluster is far enough away when $\theta > s/d$, where $s$ is the size of the cluster, and $d$ is the distance between the cluster and target.
 
@@ -61,18 +74,37 @@ More sophisticated criteria have been developed in order to help increase $\thet
 \subsection{Alternative MACs}
 \label{sec:alternative-techniques-alternative-macs}
 
-\subsection{Multipoles}
-\label{sec:alternative-techniques-nbody-multipoles}
-Multipole is a catch-all term for higher order function expansions.
+In the paper \cite{salmon1994skeletons} John Salmon and Michael Warren investigated the effectiveness between three different MACs: the classic Barnes-Hut criterion, ``minimum distance'' and ``Bmax''.
+They found that none of these reduced the error to a significant degree and concluded that an increase in multipole expansion order is much more effective.
+% TODO what about their more sophisticated MAC?
+% again I am afraid I didn't do something optimally enough, how does it compare to the doubles sided Bmax?
+
+\subsection{Multipole Expansions}
+\label{sec:alternative-techniques-nbody-multipole-expansions}
+Multipole expansions refer to functions higher order function expansions.
+One can imagine them as a lobe patterns originating from a central point.
+% TODO a picture would be nice
 They approximate a function by expanding it into a sum of repetitive terms.
 Generally speaking, the number of terms is equal to the order $P$ of the expansion.
-The higher the order more accurate the expansion becomes to the original function.
-For the expansion to be exact, the order needs to be infinite.
+The higher the order, the more the expansions converges towards the original function, becoming exact if the order is infinite.
+An interesting observation is that the 0-th order is equal to the sum of the bodies, meaning that the original Barnes-Hut technically used a 0-order-expansion.
+There are many ways to formulate multipole expansions, each with their own upsides and downsides.
+
+\subsubsection{Cartesian Taylor}
+The Taylor expansions is perhaps the best known function expansion.
+The cartesian Taylor expansion is the same core concept applied to all 3 dimensions of the cartesian coordinates.
+%TODO brain fog again...
+
+Treecode Barnes-Hut has already been implemented in a LPBE solver, by W. Geng and R. Krasny \cite{geng2013tabipb}.
+Dubbed TABI-PB 1.0, it is a BEM type solver using cartesian multipole expansions, based of previous work involving Krasny \cite{li2009cartesian}, allowing for an expansion order of up to 10.
+
+\subsubsection{Spherical Harmonics}
+
 
 \subsection{Fast Multipole Method}
 \label{sec:alternative-techniques-nbody-fmm}
-%TODO include the origins of FMM
-The Fast Multipole Method (FMM) takes the idea of Barnes-Hut and expands it to the target.
+% IS THIS THE FMM OF 87?
+Introduced in 1987 by Leslie Greengard and Vladimir Rokhlin \cite{greengard1987fmm}, the Fast Multipole Method (FMM) takes the idea of Barnes-Hut and expands on it.
 Instead of evaluating the cluster multipole expansion against a single target body, it now also summarizes the targets into clusters as well, called the local expansion.
 This eliminates the need to traverse the tree for every body.
 Thus FMM does not iterate over each particle, it iterates over each leaf cluster, and computes their multipole expansion.
@@ -84,7 +116,5 @@ Next the well-separated clusters convert their multipole expansions into local e
 Then comes the downward pass, where the local expansions of the parent clusters get passed down to their children using the L2L operator, also in \(\mathcal{O}(n)\) steps.
 Thus the ideal overall time complexity is just \(\mathcal{O}(n)\).
 
-\subsection{Related Work}
-\label{sec:alternative-techniques-related-work}
-Treecode Barnes-Hut has already been implemented in a LPBE solver, by W. Geng and R. Krasny \cite{geng2013tabipb}.
-Dubbed TABI-PB 1.0, it is a BEM type solver using cartesian multipole expansions, based of previous work involving Krasny \cite{li2009cartesian}, allowing for an expansion order of up to 10.
+Classical FMM does not use an MAC, instead controlling the error entirely through the order of the expansion $P$.
+Two clusters were considered well-separated if the target cluster's neighbor's parent's children are not direct neighbors of the target cluster --- truly a mouthful.
