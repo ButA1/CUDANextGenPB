@@ -22,11 +22,62 @@ The downside of atomics are that they force the operations on one address to be 
 The folklore of ``never use atomics'' is much less relevant today, as atomics have become much more flexible, being usable not only on the global memory, but the shared memory as well.
 The should still be avoided on highly contested global memory addresses though.
 
-Two inconveniently missing atomic operations are \texttt{atomicMin} and \texttt{atomicMax}, which store the minimum and maximum between two numbers.
-A wide spread workaround for this uses \texttt{atomicCAS}:
+Two inconveniently missing atomic operations are floating point variants of \texttt{atomicMin} and \texttt{atomicMax}, which store the minimum and maximum between two numbers.
+They do exist for integers, and with the help of typecasting, one can create a workaround for floating point numbers:
 
-\subsection{Linear Bounding Volume Hierarchy}
+\begin{lstlisting}[style=cudastyle,caption={FP64 minimum and maximum atomics assembled from the native 64-bit integer atomics.},label={lst:atomic-min-max-double}]
+typedef long long          i64;  // signed reinterpretation
+typedef unsigned long long u64;  // unsigned reinterpretation
+
+__device__ __forceinline__
+double atomicMinDouble(double *addr, double val) {
+  const i64 i = __double_as_longlong(val);
+  if (i < 0)                     // negative: order reverses
+    return __longlong_as_double(
+             (i64)atomicMax((u64 *)addr, (u64)i));
+  return __longlong_as_double(atomicMin((i64 *)addr, i));
+}
+
+__device__ __forceinline__
+double atomicMaxDouble(double *addr, double val) {
+  const i64 i = __double_as_longlong(val);
+  if (i < 0)
+    return __longlong_as_double(
+             (i64)atomicMin((u64 *)addr, (u64)i));
+  return __longlong_as_double(atomicMax((i64 *)addr, i));
+}
+\end{lstlisting}
+
+The trick rests on the layout of IEEE-754 floating point numbers, which places the sign in the highest bit, followed by the exponent and then the mantissa.
+For non-negative values this layout is monotonic: comparing the bit patterns as integers yields the same ordering as comparing the numbers themselves.
+Two non-negative doubles reinterpreted as signed integers therefore sort exactly like the doubles, and a native integer \texttt{atomicMin} already does the right thing.
+Negative values set the sign bit, which has two consequences.
+Among themselves they sort in reverse, since a larger magnitude means a larger bit pattern, and reinterpreted as unsigned integers they all outrank every non-negative value.
+Both effects are cancelled at once by switching to the opposite operation on the unsigned type, so a single branch on the sign of the incoming value is all that is needed.
+Either branch computes the correct result regardless of the sign of the value currently held at the address, which means that threads contributing values of mixed sign still reduce correctly.
+
+The workaround that circulates most widely takes a different route and wraps \texttt{atomicCAS} in a retry loop: it reads the address, compares in a register, and swaps the new value back in only if no other thread has modified the address in the meantime, retrying until it succeeds.
+That version needs nothing beyond a 64-bit \texttt{atomicCAS}, but it issues at least two memory operations per update and repeats them under contention, whereas the variant above always compiles down to a single atomic instruction.
+
+\subsection{Optimized Tree Construction}
 \label{sec:alternative-techniques-cuda-optimizations-lbhv}
+
+Nvidia Researcher Tero Karras presented a highly optimized linear bounding volume hierarchy implementation in both blog~\cite{karras2012thinkingparallel} and paper~\cite{karras2012lbvh} form.
+It uses morton codes~\cite{morton1966geodetic}, aka the Z-order curve to sort objects in a domain, and then partition them into a tree.
+
+Morton codes are a technique to create a space filling curve, that maps a objects in higher-dimensional space onto a single dimension.
+In case of the LBVH, those are the bounding volumes around the objects.
+It does this by interleaving the binary fixed point representations of their coordinates, as seen in Figure~\ref{fig:morton-z-curve}.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/karras2012_z_curve.png}
+    \caption[Morton code construction and the Z-order curve]{Construction of a Morton code from the fractional binary representation of a 3D point's coordinates by bit interleaving (left), and the resulting Z-order curve in 2D (right). Reproduced from Karras's blog post \cite{karras2012thinkingparallel}, \textcopyright{} 2012 NVIDIA Corporation.}
+    \label{fig:morton-z-curve}
+\end{figure}
+
+\subsection{CUDA linear equation solvers}
+\label{sec:alternative-techniques-cuda-cu-lin-eq-solvers}
 
 \section{N-Body}
 \label{sec:alternative-techniques-nbody}
@@ -36,7 +87,8 @@ The function describing the individual interaction is called the ``kernel''.
 Kernels do not depend on each other and can be computed in any order.
 Naturally a problem, where $n$ elements are interacting with each other, is going to have a time complexity of \(\mathcal{O}(n^2)\), meaning that computing interactions for large $n$'s becomes really expensive.
 
-Although most FEM solvers avoid N-Body calculations entirely, NGPB has this problem type at least twice as demonstrated in Eq.~\ref{eq:polarization-energy} and \ref{eq:ionic-energy}. BEM type solvers compute the interaction between each boundary element, meaning N-Body is a core part of their solve.
+BEM type solvers compute the interaction between each boundary element, meaning N-Body is a core part of their solve.
+Although most FEM solvers avoid N-Body calculations entirely, NGPB has this problem type at least twice as demonstrated in Eq.~\ref{eq:polarization-energy} and \ref{eq:ionic-energy}.
 
 One the one hand, many approximation techniques have been developed, which are all roughly based on the following idea:
 Kernels generally have an inverse dependency on distance.
@@ -76,7 +128,7 @@ More sophisticated criteria have been developed in order to help increase $\thet
 
 In the paper \cite{salmon1994skeletons} John Salmon and Michael Warren investigated the effectiveness between three different MACs: the classic Barnes-Hut criterion, ``minimum distance'' and ``Bmax''.
 They found that none of these reduced the error to a significant degree and concluded that an increase in multipole expansion order is much more effective.
-% TODO what about their more sophisticated MAC?
+% TODO what about their "sum squares MAC"?
 % again I am afraid I didn't do something optimally enough, how does it compare to the doubles sided Bmax?
 
 \subsection{Multipole Expansions}

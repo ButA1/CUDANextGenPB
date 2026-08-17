@@ -30,6 +30,24 @@
     showstringspaces=false,
 }
 
+\lstdefinestyle{cudastyle}{
+    language=C++,
+    alsoletter={_},
+    morekeywords={__device__,__global__,__forceinline__,__shared__,
+                  atomicCAS,atomicMin,atomicMax,atomicAdd,
+                  __double_as_longlong,__longlong_as_double},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{teal},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    tabsize=2,
+    showstringspaces=false,
+}
+
 % Dynamic bibliography: entries come from references.bib.
 % Add new sources there and cite them with \cite{key} anywhere in the text.
 \usepackage[backend=biber,style=numeric,sorting=none]{biblatex}
