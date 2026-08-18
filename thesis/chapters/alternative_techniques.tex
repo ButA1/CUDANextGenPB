@@ -1,84 +1,6 @@
 \chapter{Alternative Techniques}
 \label{sec:alternative-techniques}
 
-\section{CUDA optimizations}
-\label{sec:alternative-techniques-cuda-optimizations}
-
-\subsection{Mixed-Precision}
-\label{sec:alternative-techniques-cuda-optimizations-mixed-precision}
-
-Mixed precision is the practice of using a mix of FP32 and FP64 operations.
-%In the context of the N-body problem, mixed precision is employed to off-load the distance calculation to the FP32 units.
-%cant use that here it I pull it in front
-The error is hard to quantify, but is guaranteed to be at least at the FP32 noise floor, which is around $10^{-7}$.
-This is particularly effective on gaming GPUs, where FP64 performance is severely neutered, and FP32 performance is better when compared to workstation GPUs.
-
-\subsection{Atomics}
-\label{sec:alternative-techniques-cuda-optimizations-atomics}
-
-Atomic operations such as \texttt{atomicAdd} are operations used to prevent data-races on write operations.
-For instance, when multiple parallel threads add a value to the same memory address, some of them may add their value to the content of the address that has already been updated by that time, meaning they would override the address based on its old value.
-The downside of atomics are that they force the operations on one address to be done sequentially, blocking competing threads from writing in parallel, which naturally leads to performance loss.
-The folklore of ``never use atomics'' is much less relevant today, as atomics have become much more flexible, being usable not only on the global memory, but the shared memory as well.
-The should still be avoided on highly contested global memory addresses though.
-
-Two inconveniently missing atomic operations are floating point variants of \texttt{atomicMin} and \texttt{atomicMax}, which store the minimum and maximum between two numbers.
-They do exist for integers, and with the help of typecasting, one can create a workaround for floating point numbers:
-
-\begin{lstlisting}[style=cudastyle,caption={FP64 minimum and maximum atomics assembled from the native 64-bit integer atomics.},label={lst:atomic-min-max-double}]
-typedef long long          i64;  // signed reinterpretation
-typedef unsigned long long u64;  // unsigned reinterpretation
-
-__device__ __forceinline__
-double atomicMinDouble(double *addr, double val) {
-  const i64 i = __double_as_longlong(val);
-  if (i < 0)                     // negative: order reverses
-    return __longlong_as_double(
-             (i64)atomicMax((u64 *)addr, (u64)i));
-  return __longlong_as_double(atomicMin((i64 *)addr, i));
-}
-
-__device__ __forceinline__
-double atomicMaxDouble(double *addr, double val) {
-  const i64 i = __double_as_longlong(val);
-  if (i < 0)
-    return __longlong_as_double(
-             (i64)atomicMin((u64 *)addr, (u64)i));
-  return __longlong_as_double(atomicMax((i64 *)addr, i));
-}
-\end{lstlisting}
-
-The trick rests on the layout of IEEE-754 floating point numbers, which places the sign in the highest bit, followed by the exponent and then the mantissa.
-For non-negative values this layout is monotonic: comparing the bit patterns as integers yields the same ordering as comparing the numbers themselves.
-Two non-negative doubles reinterpreted as signed integers therefore sort exactly like the doubles, and a native integer \texttt{atomicMin} already does the right thing.
-Negative values set the sign bit, which has two consequences.
-Among themselves they sort in reverse, since a larger magnitude means a larger bit pattern, and reinterpreted as unsigned integers they all outrank every non-negative value.
-Both effects are cancelled at once by switching to the opposite operation on the unsigned type, so a single branch on the sign of the incoming value is all that is needed.
-Either branch computes the correct result regardless of the sign of the value currently held at the address, which means that threads contributing values of mixed sign still reduce correctly.
-
-The workaround that circulates most widely takes a different route and wraps \texttt{atomicCAS} in a retry loop: it reads the address, compares in a register, and swaps the new value back in only if no other thread has modified the address in the meantime, retrying until it succeeds.
-That version needs nothing beyond a 64-bit \texttt{atomicCAS}, but it issues at least two memory operations per update and repeats them under contention, whereas the variant above always compiles down to a single atomic instruction.
-
-\subsection{Optimized Tree Construction}
-\label{sec:alternative-techniques-cuda-optimizations-lbhv}
-
-Nvidia Researcher Tero Karras presented a highly optimized linear bounding volume hierarchy implementation in both blog~\cite{karras2012thinkingparallel} and paper~\cite{karras2012lbvh} form.
-It uses morton codes~\cite{morton1966geodetic}, aka the Z-order curve to sort objects in a domain, and then partition them into a tree.
-
-Morton codes are a technique to create a space filling curve, that maps a objects in higher-dimensional space onto a single dimension.
-In case of the LBVH, those are the bounding volumes around the objects.
-It does this by interleaving the binary fixed point representations of their coordinates, as seen in Figure~\ref{fig:morton-z-curve}.
-
-\begin{figure}[htbp]
-    \centering
-    \includegraphics[width=0.8\textwidth]{figures/karras2012_z_curve.png}
-    \caption[Morton code construction and the Z-order curve]{Construction of a Morton code from the fractional binary representation of a 3D point's coordinates by bit interleaving (left), and the resulting Z-order curve in 2D (right). Reproduced from Karras's blog post \cite{karras2012thinkingparallel}, \textcopyright{} 2012 NVIDIA Corporation.}
-    \label{fig:morton-z-curve}
-\end{figure}
-
-\subsection{CUDA linear equation solvers}
-\label{sec:alternative-techniques-cuda-cu-lin-eq-solvers}
-
 \section{N-Body}
 \label{sec:alternative-techniques-nbody}
 Many scientific calculations, from electric forces between electron to gravitational forces between astral bodies, consist of sums of pairwise interaction between a large number of bodies or particles.
@@ -145,13 +67,18 @@ There are many ways to formulate multipole expansions, each with their own upsid
 \subsubsection{Cartesian Taylor}
 The Taylor expansions is perhaps the best known function expansion.
 The cartesian Taylor expansion is the same core concept applied to all 3 dimensions of the cartesian coordinates.
-%TODO brain fog again...
-
-Treecode Barnes-Hut has already been implemented in a LPBE solver, by W. Geng and R. Krasny \cite{geng2013tabipb}.
-Dubbed TABI-PB 1.0, it is a BEM type solver using cartesian multipole expansions, based of previous work involving Krasny \cite{li2009cartesian}, allowing for an expansion order of up to 10.
+They need no complex arithmetic or rotation setup, and lend themselves particularly well for treecoded Barnes-Hut.
+Exactly this combination was already implemented in a BEM LPBE solver by W. Geng and R. Krasny \cite{geng2013tabipb}.
+Dubbed TABI-PB 1.0, it is based of previous work involving Krasny \cite{li2009cartesian}, allowing for an expansion order of up to 10.
+Though the treecode could reach error magnitudes of $e^-6$ with a $theta$ of 0.5, it still need to turn down $theta$ all the way down to 0.2 to reach an error of $e^-10$.
+% TODO I am not sure if it was the number of terms of number of moments
 
 \subsubsection{Spherical Harmonics}
-
+Spherical harmonics use spherical coordinates as opposed to cartesian.
+They are much more compact, needing fewer moments than Cartesian Taylor, which allows for higher orders while using the same amount of storage.
+They require complex numbers and trigonometry, making them more computationally expensive.
+% TODO I think one of Yokota's papers included a table with time complexities
+% HOLD UP I just looked at it and its actually still more complex lol
 
 \subsection{Fast Multipole Method}
 \label{sec:alternative-techniques-nbody-fmm}
@@ -169,4 +96,126 @@ Then comes the downward pass, where the local expansions of the parent clusters 
 Thus the ideal overall time complexity is just \(\mathcal{O}(n)\).
 
 Classical FMM does not use an MAC, instead controlling the error entirely through the order of the expansion $P$.
-Two clusters were considered well-separated if the target cluster's neighbor's parent's children are not direct neighbors of the target cluster --- truly a mouthful.
+Whether two clusters are considered well separated is purely based on whether they are touching, and which tree level they are on, rather than their geometry.
+
+\section{CUDA optimizations}
+\label{sec:alternative-techniques-cuda-optimizations}
+
+\subsection{Mixed-Precision}
+\label{sec:alternative-techniques-cuda-optimizations-mixed-precision}
+
+Mixed precision is the practice of using a mix of FP32 and FP64 operations.
+In the context of the N-body problem, mixed precision is employed to off-load the distance calculation to the FP32 units.
+The error is hard to quantify, but is guaranteed to be at least at the FP32 noise floor, which is around $10^{-7}$.
+This is particularly effective on gaming GPUs, where FP64 performance is severely neutered, and FP32 performance is better when compared to workstation GPUs.
+
+\subsection{Atomics}
+\label{sec:alternative-techniques-cuda-optimizations-atomics}
+
+Atomic operations such as \texttt{atomicAdd} are operations used to prevent data-races on write operations.
+For instance, when multiple parallel threads add a value to the same memory address, some of them may add their value to the content of the address that has already been updated by that time, meaning they would override the address based on its old value.
+The downside of atomics are that they force the operations on one address to be done sequentially, blocking competing threads from writing in parallel, which naturally leads to performance loss.
+The folklore of ``never use atomics'' is much less relevant today, as atomics have become much more flexible, being usable not only on the global memory, but the shared memory as well.
+The should still be avoided on highly contested global memory addresses though.
+
+% TODO I think this might need to move into implementation instead
+Two inconveniently missing atomic operations are floating point variants of \texttt{atomicMin} and \texttt{atomicMax}, which store the minimum and maximum between two numbers.
+They do exist for integers, and with the help of typecasting, one can create a workaround for floating point numbers:
+
+\begin{lstlisting}[style=cudastyle,caption={FP64 minimum and maximum atomics assembled from the native 64-bit integer atomics.},label={lst:atomic-min-max-double}]
+typedef long long          i64;  // signed reinterpretation
+typedef unsigned long long u64;  // unsigned reinterpretation
+
+__device__ __forceinline__
+double atomicMinDouble(double *addr, double val) {
+  const i64 i = __double_as_longlong(val);
+  if (i < 0)                     // negative: order reverses
+    return __longlong_as_double(
+             (i64)atomicMax((u64 *)addr, (u64)i));
+  return __longlong_as_double(atomicMin((i64 *)addr, i));
+}
+
+__device__ __forceinline__
+double atomicMaxDouble(double *addr, double val) {
+  const i64 i = __double_as_longlong(val);
+  if (i < 0)
+    return __longlong_as_double(
+             (i64)atomicMin((u64 *)addr, (u64)i));
+  return __longlong_as_double(atomicMax((i64 *)addr, i));
+}
+\end{lstlisting}
+
+The trick rests on the layout of IEEE-754 floating point numbers, which places the sign in the highest bit, followed by the exponent and then the mantissa.
+For non-negative values this layout is monotonic: comparing the bit patterns as integers yields the same ordering as comparing the numbers themselves.
+Two non-negative doubles reinterpreted as signed integers therefore sort exactly like the doubles, and a native integer \texttt{atomicMin} already does the right thing.
+Negative values set the sign bit, which has two consequences.
+Among themselves they sort in reverse, since a larger magnitude means a larger bit pattern, and reinterpreted as unsigned integers they all outrank every non-negative value.
+Both effects are cancelled at once by switching to the opposite operation on the unsigned type, so a single branch on the sign of the incoming value is all that is needed.
+Either branch computes the correct result regardless of the sign of the value currently held at the address, which means that threads contributing values of mixed sign still reduce correctly.
+
+% The workaround that circulates most widely takes a different route and wraps \texttt{atomicCAS} in a retry loop: it reads the address, compares in a register, and swaps the new value back in only if no other thread has modified the address in the meantime, retrying until it succeeds.
+% That version needs nothing beyond a 64-bit \texttt{atomicCAS}, but it issues at least two memory operations per update and repeats them under contention, whereas the variant above always compiles down to a single atomic instruction.
+
+\subsection{Optimized Tree Construction}
+\label{sec:alternative-techniques-cuda-optimizations-lbhv}
+
+Since both Barnes-Hut and FMM are treecode based, constructing a tree is of course and important first step.
+Nvidia Researcher Tero Karras presented a highly optimized linear bounding volume hierarchy implementation in both blog~\cite{karras2012thinkingparallel} and paper~\cite{karras2012lbvh} form.
+It uses morton codes~\cite{morton1966geodetic}, aka the Z-order curve to sort objects in a domain, and then partition them into a tree.
+
+Morton codes are a technique to create a space filling curve, that maps a objects in higher-dimensional space onto a single dimension.
+In case of the LBVH, those are the bounding volumes (BV) around the objects.
+It does this by interleaving the binary fixed point representations of their coordinates, as seen in Figure~\ref{fig:morton-z-curve}.
+Sorting the BV by those morton codes gives a very advantageous way of iterating over them.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/karras2012_z_curve.png}
+    \caption[Morton code construction and the Z-order curve]{Construction of a Morton code from the fractional binary representation of a 3D point's coordinates by bit interleaving (left), and the resulting Z-order curve in 2D (right). Reproduced from Karras's blog post \cite{karras2012thinkingparallel}, \textcopyright{} 2012 NVIDIA Corporation.}
+    \label{fig:morton-z-curve}
+\end{figure}
+
+Traditional top-down approaches divide this ordered list by the value first most significant bit (MSB) that differs between them, so that one side contains all BVs, whose first uncommon MSB is 0 and those of the other side is 1.
+This is then recursively repeated until the individual objects or leafs are reached.
+Such an approach does not use the GPU's resources optimally, since it starts with one top node and grows by powers of two, meaning that for the upper rows the GPU is severely underutilized.
+
+Karras flipped the algorithm to a bottom-up approach. This is possible because the number of internal nodes --- those that are not the leafs ---
+is always $n-1$ where $n$ is the number of objects in the scene.
+His algorithm then leverages another property of the partitioning: the length of the common prefix shared between the children of a node.
+Descending through the tree, the shared prefix always becomes longer with each level, as can be seen in Figure~\ref{fig:karras-radix-tree}.
+Every internal node can be then thought of covering a range of keys with the same prefix.
+It then determines the range for every internal node in parallel, by first evaluating at which end of the range they sit, by comparing the length of the prefix between the leaf node with the same index as the internal node, and its left and right siblings in the list of leafs.
+If the prefix with the left sibling is longer, it means the internal node sits on the end of the range, and vice-versa.
+This means those leaf nodes are descendants of that internal node.
+The length of the prefix with the other sibling is remembered as the minimum prefix length.
+Then it searches for the opposite end of the range by looking for the furthest leaf node, whose common prefix with the same-index leaf is still greater than the minimum prefix length.
+Finally it does the same division as in the traditional top down approach.
+The final result can then be seen in Figure~\ref{fig:karras-node-layout}.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/karras2012_radix_tree.png}
+    \caption[Ordered binary radix tree]{Ordered binary radix tree. Leaf nodes, numbered 0--7, store a set of 5-bit keys in lexicographical order, and the internal nodes represent their common prefixes. Each internal node covers a linear range of keys, which it partitions into two subranges according to their first differing bit. Reproduced from \cite{karras2012lbvh}, \textcopyright{} 2012 The Eurographics Association.}
+    \label{fig:karras-radix-tree}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/karras2012_node_layout.png}
+    \caption[Node layout for the ordered binary radix tree]{Node layout for the tree of Figure~\ref{fig:karras-radix-tree}. Each internal node has been assigned an index between 0--6, and aligned horizontally with a leaf node of the same index. The range of keys covered by each node is indicated by a horizontal bar, and the split position, corresponding to the first bit that differs between the keys, is indicated by a red circle. Reproduced from \cite{karras2012lbvh}, \textcopyright{} 2012 The Eurographics Association.}
+    \label{fig:karras-node-layout}
+\end{figure}
+
+\subsection{CUDA linear equation solvers}
+\label{sec:alternative-techniques-cuda-cu-lin-eq-solvers}
+
+Among their library eco-system, Nvidia offers two ready-to-use linear equation solvers, those being cuDSS and AMGX.
+
+cuDSS is a direct solver that can use either LU- or Cholesky factorization.
+However, in my limited testing the high memory usage immediately became a problem.
+For \texttt{6VYB} with \texttt{perfil1} of 0.95 and \texttt{scale} of 0.5, the resulting sparse matrix has an $n$ of 28 million and a $nnz$ of almost 200 million, with a total raw size of roughly 2.4 GB.
+With the scaling of dense methods for 3D meshes of \(\mathcal{O}(n^{4/3})\), the size of the solver balloons to 8.4 billion, meaning a size of about 64 GB for double precision float.
+As this is too big even for an Nvidia A100 GPU, which has 40 GB of VRAM, I dropped cuDSS very quickly.
+
+AMGX is Nvidia's latest iterative solver CUDA library, featuring customizable solvers, preconditioners and algorithms, including the name giving ``algebraic multigrid'' methods.
+

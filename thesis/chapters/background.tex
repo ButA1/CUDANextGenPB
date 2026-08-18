@@ -304,21 +304,19 @@ On the other hand they scale very well on highly parallel architectures.
 The other main type of solver is the iterative solver.
 Their basic idea is to start with an approximation and converges towards the solution with each iteration, until the desired accuracy or residual error is reached.
 
+\subsubsection{Krylov Methods}
+
 The largest family of iterative solver methods are the so called Krylov methods, which use the name-giving Krylov subspace to appropriate the solution \cite{anzt2015gpukrylov}.
 With a starting vector $x_0$ they compute the initial residual $r_0$ with:
-
 \begin{equation}
     r_0 = b - A x_0
     \label{eq:initial-residual}
 \end{equation}
-
 They then construct the Krylov subspace through projections of a vector $r_0$ through increasing powers of the matrix $A$.
-
 \begin{equation}
     \mathcal{K}_i(A, r_0) = \mathrm{span}\{r_0, A r_0, A^2 r_0, \dots, A^{i-1} r_0\}
     \label{eq:krylov-subspace}
 \end{equation}
-
 In which the look for a vector $z_i$, which is added to $x_0$, which is then used to compute the next residual.
 It is proven that outside of rounding errors, this method terminates at a finite number of steps \cite{saad2003iterative}.
 
@@ -327,6 +325,32 @@ This only influences the amount of iterations.
 Naturally their performance is governed by the number of iterations needed multiplied by the time each iteration takes.
 Although they do not provide an exact solution like the direct solvers, they utilizes a lot less memory, needing little more or with some methods, no extra memory other than the original matrix itself.
 
-Traditional Krylov methods suffer from a strong-scaling wall, due to a global reduction step present at either the construction of the Krylov space, or computation of $z_i$.
-For this purpose there exist so called ``communication-avoidant'' Krylov methods.
+Two of the most well known Krylov methods are conjugate gradient (CG) and generalized minimal residual (GMRES).
+CG is specialized for symmetric positive matrices, but due to that assumption, it produces less memory overhead.
+Luckily, the differential operators of FEM solvers fall exactly into that category.
+GMRES works on general systems, but produces greater memory overhead, because of its restart parameters.
 
+Traditional Krylov methods suffer from a strong-scaling wall, due to a global reduction step present at either the construction of the Krylov space, or computation of $z_i$.
+For this purpose there exist so called ``communication-avoidant'' Krylov methods \cite{hoemmen2010communication, cornelis2018pipelined}.
+
+\subsubsection{Jacobi Method}
+
+One well known, non-Krylov method is the Jacobi method.
+It starts out by decomposing the matrix $A$ into a diagonal, lower and upper matrix.
+\begin{equation}
+    A = D + L + U
+    \label{eq:jacobi-decomp}
+\end{equation}
+Like the Krylov methods, it also starts out by guessing $x_0$. It then iteratively computes the next best guess using:
+\begin{equation}
+    x_{k+1} = D^{-1}(b-(L+U)x_k)
+    \label{eq:jacobi-iteration}
+\end{equation}
+It only converges when the spectral radius $\rho(D^{-1}(L+U))$ of the matrix is less than 1.
+Such is the case with strictly diagonally dominant matrices, where the magnitude of the diagonal values is greater than those of the off-diagonal ones.
+
+It is not a particularly fast method and is nowadays often relegated to the role of preconditioning.
+
+\subsubsection{Preconditioners}
+
+Since the number of iterations and their 
