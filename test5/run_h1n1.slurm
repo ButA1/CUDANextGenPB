@@ -6,13 +6,19 @@
                                        # of ~150 GB usable. 2 GPUs would be 452.6M rows = 159 GB,
                                        # ~6% over, so 4 is the minimum that fits at h=1.3.
 #SBATCH --nodes=1
-#SBATCH --ntasks=4                     # ONE RANK PER GPU. This is the fix for the energy-stage
-                                       # OOM: fmm_build_atom_tree (pb_class.cpp:3589) has no rank
-                                       # guard, so every rank builds a full private LBVH. At 16
-                                       # ranks that was 4 trees per card. AMGX was unaffected
-                                       # because it only runs on the 4 group leaders.
-                                       # Also drops set_ranges replication: 444 GiB -> 201 GiB.
-#SBATCH --cpus-per-task=16             # 4 x 16 = 64 cores on the EPYC 9555
+#SBATCH --ntasks=8                     # SQUEEZED FROM BOTH SIDES -- do not change without redoing
+                                       # both calculations:
+                                       #  LOWER BOUND (p8est): tmesh_3d.cpp:957 uses
+                                       #   P8EST_CONNECT_EDGE, so p8est allocates 12 x
+                                       #   local_quadrants as int32 p4est_locidx_t. 908,130,224
+                                       #   quadrants over 4 ranks = 227M local -> 12x = 2.72e9 >
+                                       #   INT32_MAX -> malloc NULL -> abort. Needs R >= 6.
+                                       #  UPPER BOUND (FMM energy): fmm_build_atom_tree
+                                       #   (pb_class.cpp:3589) has no rank guard, so every rank
+                                       #   builds a full private LBVH. R=16 meant 4 trees per
+                                       #   card and OOMed. R=8 -> 2 trees per card.
+                                       # set_ranges at R=8: ~549 GB of 1.1 TB, still fine.
+#SBATCH --cpus-per-task=8              # 8 x 8 = 64 cores on the EPYC 9555
 #SBATCH --distribution=block           # REQUIRED: distributed AMGX assumes each GPU group owns a
                                        # CONTIGUOUS global row range. Cyclic returns a silently
                                        # wrong answer; amgx_solver.cu:409 cannot detect it.

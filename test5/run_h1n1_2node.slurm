@@ -5,10 +5,14 @@
                                        # layout that measured 79.7 GB/card. Targets gpu069-072,
                                        # which should queue faster than the single 4-GPU gpu068.
 #SBATCH --nodes=2
-#SBATCH --ntasks=4                     # ONE RANK PER GPU (see run_h1n1.slurm for why: the FMM
-                                       # energy stage builds a full private LBVH on every rank).
-#SBATCH --ntasks-per-node=2            # forces 2+2, not 3+1 -- ranks_per_gpu must come out as 1
-#SBATCH --cpus-per-task=32             # 2 x 32 = 64 cores per node
+#SBATCH --ntasks=8                     # NOT 4. At 4 ranks each holds 227M local quadrants and
+                                       # p8est's 12 x local_quadrants edge array (int32
+                                       # p4est_locidx_t, tmesh_3d.cpp:957) overflows -> malloc
+                                       # NULL -> abort in p8est_mesh_new_ext. That is what killed
+                                       # job 1883234. R >= 6 required; R=8 also keeps the FMM
+                                       # energy stage to 2 trees per GPU instead of 4.
+#SBATCH --ntasks-per-node=4            # forces 4+4 -> 2 ranks per GPU, 4 leaders total
+#SBATCH --cpus-per-task=16             # 4 x 16 = 64 cores per node
 #SBATCH --distribution=block           # REQUIRED, and more so here than on one node: leaders are
                                        # ordered by world rank and their partition offsets assume
                                        # each group owns a CONTIGUOUS global row range.
