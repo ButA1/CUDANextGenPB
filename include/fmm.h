@@ -239,9 +239,22 @@ struct fmm_tree {
   int    *d_first;    // n_nodes
   int    *d_last;     // n_nodes
 
-  // per-node complex spherical-harmonic moments M_n^m, m>=0 half, interleaved
-  // re,im at slot s=sph_slot(n,m): d_moments[node*comp + 2s], [..+2s+1].
-  double *d_moments;  // n_nodes * comp   (comp = comp_sph(p) doubles)
+  // ---- box storage (mirrors fmm_target_tree's d_box_slot/d_local below) ----
+  // Multipole moments live ONLY on "box" nodes: the leaf-size frontier and its strict
+  // ancestors (~2*n_leaves nodes), NOT the ~2N radix nodes beneath the frontier. That is
+  // exactly the set fmm_pair_kernel can reach before it stops descending -- its cutoff
+  // (count(B) <= leaf_size) is the same predicate as mark_box_kernel -- so no moment that
+  // is ever read goes missing. Dense storage would cost n_nodes*comp = 2*(p+1)(p+2)*8
+  // bytes per atom: 2112 B/atom at p=10, i.e. 30 GB for a 14M-atom virion, on EVERY rank.
+  int    *d_box_slot;   // n_nodes : box-node -> [0,n_box) moment slot, else -1
+  int     n_box;        // number of box nodes (frontier + strict ancestors)
+  int    *d_leaf_nodes; // n_leaves : frontier node ids (drives the P2M/M2M launches)
+  int     n_leaves;
+
+  // per-BOX complex spherical-harmonic moments M_n^m, m>=0 half, interleaved
+  // re,im at slot s=sph_slot(n,m): d_moments[d_box_slot[node]*comp + 2s], [..+2s+1].
+  // INDEX THROUGH d_box_slot -- never by raw node id.
+  double *d_moments;  // n_box * comp   (comp = comp_sph(p) doubles)
 };
 
 // ====================================================================
