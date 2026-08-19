@@ -64,8 +64,25 @@ echo
 # --cpu-bind=none mirrors mpirun's --bind-to none so rank 0's NanoShaper threads can use all 64
 # cores of its node rather than just its own 32.
 # ---------------------------------------------------------------------------------------
+# pml=ucx is MANDATORY here, not a tuning knob. Measured on gpu026/027 (mpidiag2-1883214):
+#
+#   intra-node, default vader ....... HANGS. CMA is blocked across user namespaces and there
+#                                     is no knem/xpmem fallback, so the first Send/Recv never
+#                                     completes. This is what stalled 6VYB at p8est_refine.
+#   intra-node, pml=ucx ............. 0.37 us latency, 0.39 us allreduce  (mpirun-in-one-
+#                                     container gets 0.25 / 0.38, so essentially par)
+#   inter-node, default ............. 48.4 us / 52.6 us -- indistinguishable from forced TCP
+#                                     (33.7 / 50.3), i.e. it silently ignores the IB fabric
+#   inter-node, pml=ucx ............. 6.10 us / 5.73 us -- 9x better
+#   4 ranks over 2 nodes, pml=ucx ... 7.41 us allreduce. This exact topology.
+#
+# UCX prints "mm_posix.c:233 open(/proc/PID/fd/N) Permission denied" a few times at startup --
+# that is one shared-memory mechanism failing across namespaces. UCX falls back on its own and
+# still reaches 0.31 us, so the messages are noise, not a fault.
 export SINGULARITYENV_OMP_NUM_THREADS=64
 export APPTAINERENV_OMP_NUM_THREADS=64
 
-srun --mpi=pmix --cpu-bind=none singularity exec --nv "$SIF" \
-     bash -c "export OMP_NUM_THREADS=64; exec ngpb --prmfile ${PRM}"
+srun --mpi=pmix --cpu-bind=none singularity exec --nv "$SIF" bash -c "
+    export OMP_NUM_THREADS=64
+    export OMPI_MCA_pml=ucx OMPI_MCA_osc=ucx
+    exec ngpb --prmfile ${PRM}"
