@@ -211,6 +211,7 @@ The final result can then be seen in Figure~\ref{fig:karras-node-layout}.
 
 Among their library eco-system, Nvidia offers two ready-to-use linear equation solvers, those being cuDSS and AMGX.
 
+% not sure if I'll keep this here
 cuDSS is a direct solver that can use either LU- or Cholesky factorization.
 However, in my limited testing the high memory usage immediately became a problem.
 For \texttt{6VYB} with \texttt{perfil1} of 0.95 and \texttt{scale} of 0.5, the resulting sparse matrix has an $n$ of 28 million and a $nnz$ of almost 200 million, with a total raw size of roughly 2.4 GB.
@@ -219,3 +220,5 @@ As this is too big even for an Nvidia A100 GPU, which has 40 GB of VRAM, I dropp
 
 AMGX is Nvidia's latest iterative solver CUDA library, featuring customizable solvers, preconditioners and algorithms, including the name giving ``algebraic multigrid'' methods.
 
+The algebraic multigrid method is less of a concrete mathematical principle or an algorithm based on one. 
+Rather it is flexible algorithm involving the following steps

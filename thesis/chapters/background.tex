@@ -353,4 +353,6 @@ It is not a particularly fast method and is nowadays often relegated to the role
 
 \subsubsection{Preconditioners}
 
-Since the number of iterations and their 
+Since the speed of iterative solvers depends on the number of iterations, so-called preconditioners are used to reduce them by improving the rate of convergence.
+This is done by by wrapping the linear equation, such that $M^{-1}Ax = M^{-1}b$, where $M$ is an easily invertible approximation of $A$.
+An example would be matrix $D$ from the Jacobi Method, which is purely diagonal.
