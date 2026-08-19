@@ -1,5 +1,51 @@
 \chapter{Implementation}
 \label{sec:implementation}
 
+\section{Enabling CUDA}
+\label{sec:implementation-enabling-cuda}
+
+\section{Linear Equation Solver}
+\label{sec:implementation-lin-eq-solver}
+
+\section{Create Markers}
+\label{sec:implementation-create-markers}
+
+\section{BIMPP}
+\label{sec:implementation-bimpp}
+
+\subsection{sparse\_matrix\_template}
+\label{sec:implementation-bimpp-sparse-matrix-template}
+
+\subsection{bim3a\_solution\_with\_ghosts}
+\label{sec:implementation-bimpp-bim3a-solution-with-ghosts}
+
 \section{Energy Calculation}
 \label{sec:implementation-energy-calculation}
+
+Since ray cache is relatively hard to port to the GPU, I decided to go for a simpler route:
+Keep the classification, flux and normal calculation on the CPU.
+They are essentially just lookups on the ray cache, which take very little time.
+Reformulating them was not worth it. 
+Besides, the true weight of the computational effort lies in the pairwise interactions themselves.
+Thus the idea was to collect the necessary data into flat arrays, to then do execute those on the GPU.
+At the end, I settled on 3 implementations, each being a viable option in different scenarios.
+The naive implementation or kernels are surprisingly useful on workstation GPUs, which are not held back by poor FP64 performance. 
+For gaming GPUs, mixed precision is a very good option if some loss of accuracy is acceptable.
+FMM represents a middle ground, which at certain settings achieves 0 additional error increase over NGPB's default error level, while being significantly faster on gaming GPUs than the naive kernels.
+
+\subsection{Naive Kernels}
+\label{sec:implementation-energy-calculation-naive-kernels}
+
+The first implementation was to create native kernels for all three energies: the Coulomb, polarization and ionic.
+The atoms, charges, flux, triangle corners and normals where put into flat arrays and passed to the kernels as needed.
+Even systems like 6VYB with 44k or 1VSZ 180k atoms fit comfortably into the 10GB of VRAM of an RTX 3080.
+
+
+\subsection{Mixed Precision}
+\label{sec:implementation-energy-calculation-mixed-precision}
+
+\subsection{FMM}
+\label{sec:implementation-energy-calculation-fmm}
+
+\section{Multi-GPU}
+\label{sec:implementation-multi-gpu}
