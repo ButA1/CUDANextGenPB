@@ -76,11 +76,28 @@ After conversing with one of the authors of NGPB, we decided that the best cours
 For this I modified \texttt{normal\_intersection} to return \texttt{true} if it had found an intersection and \texttt{false} otherwise.
 As this occurrence is very rare, it did not affect the speed, and even the accuracy in many cases.
 
+% TODO pseudo code could be nice
+
 \subsection{Mixed Precision}
 \label{sec:implementation-energy-calculation-mixed-precision}
 
+
+
 \subsection{FMM}
 \label{sec:implementation-energy-calculation-fmm}
+
+It was obvious that in order to retain the level of accuracy a more sophisticated approach was be required to achieve any significant level of speedup.
+For this purpose I implemented a fairly non-standard implementation of FMM, with the only ``normal'' things about it being the overall algorithm.
+
+Both the source and the target tree are constructed using Karras's LBVH algorithm\cite{karras2012lbvh}.
+This means they are binary radix trees, which is different from a traditional octree used in FMM.
+However, it is practically the same spacial decomposition.
+To get an ``octant'' of a node, one must simply descend it three levels, though this does mean that my tree depth is essentially 3x that of an equivalent octree.
+I have to point out though that those ``octants'' aren't actually that, because LBVH creates tight boxes around a cluster of particles, rather than bisected quadrants.
+This has both upsides and downsides.
+% write them down
+
+I used spherical harmonics 
 
 \section{Multi-GPU}
 \label{sec:implementation-multi-gpu}
