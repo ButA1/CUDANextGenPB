@@ -317,7 +317,9 @@ They then construct the Krylov subspace through projections of a vector $r_0$ th
     \mathcal{K}_i(A, r_0) = \mathrm{span}\{r_0, A r_0, A^2 r_0, \dots, A^{i-1} r_0\}
     \label{eq:krylov-subspace}
 \end{equation}
-In which they look for a vector $z_i$, which is added to $x_0$, which is then used to compute the next residual.
+In which they look for a vector $z_i$, that is added to the previous guess $x_i$. 
+This is then used to compute the next guess $x_{i+1}$.
+It continues these steps until $r_i$ is equal or less than the target residual.
 It is proven that outside of rounding errors, this method terminates at a finite number of steps \cite{saad2003iterative}.
 
 Accuracy does not depend on the choice of iterative solver.
@@ -354,5 +356,14 @@ It is not a particularly fast method and is nowadays often relegated to the role
 \subsubsection{Preconditioners}
 
 Since the speed of iterative solvers depends on the number of iterations, so-called preconditioners are used to reduce them by improving the rate of convergence.
-This is done by wrapping the linear equation, such that $M^{-1}Ax = M^{-1}b$, where $M$ is an easily invertible approximation of $A$.
+They come up with a matrix $M$, which is an easily invertible approximation of $A$.
 An example would be matrix $D$ from the Jacobi Method, which is purely diagonal.
+Instead of solving $Ax=b$ directly, Krylov methods apply this operator to the equation on every iteration.
+This is done either through left preconditioning ($M^{-1}Ax = M^{-1}b$), right preconditioning ($AM^{-1}u = b$ where $u=Mx$), or --- specifically for CG --- split conditioning ($L^{-1}AL^{T}v = L^{-1}b$ with $M=LL^T$ and $v=L^Tx$).
+
+The basic idea is essentially to bring the matrix $A$ closer to the identity matrix.
+It is the ``ideal'' matrix to strife towards, since it converges immediately
+For example in Krylov methods, the initial residual would be $r_0=b-Ix_0=b-x_0=b$ assuming that the initial guess $x_0$ is 0. 
+The subsequent Krylov space would then consist of just $r_0I$ = $bI$ = $b$, which is the final solution.
+Interestingly enough, the perfect preconditioner in theory would be the $A$ itself, since $AA^{-1}=I$.
+Unfortunately, computing its inversion would be just as hard as computing the system using no preconditioner at all.

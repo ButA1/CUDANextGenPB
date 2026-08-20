@@ -95,9 +95,11 @@ However, it is practically the same spacial decomposition.
 To get an ``octant'' of a node, one must simply descend it three levels, though this does mean that my tree depth is essentially 3x that of an equivalent octree.
 I have to point out though that those ``octants'' aren't actually that, because LBVH creates tight boxes around a cluster of particles, rather than bisected quadrants.
 This has both upsides and downsides.
-% write them down
+% TODO write them down
+% honestly it looks almost like its all downsides
 
-I used spherical harmonics 
+I used spherical harmonics and the translation operators, such as the M2M, M2L, L2L and L2P are taken from ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}.
+
 
 \section{Multi-GPU}
 \label{sec:implementation-multi-gpu}
