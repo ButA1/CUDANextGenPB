@@ -89,6 +89,7 @@ test/*.out
 *.csv
 exposed.xyz
 exposedIndices.txt
+*.err
 
 # Compiler-specific directories
 .gcc_flags
@@ -110,4 +111,3 @@ thesis/*.toc
 thesis/main.bbl-SAVE-ERROR
 .gitignore
 thesis/main.bcf-SAVE-ERROR
-test5/1873176.err
