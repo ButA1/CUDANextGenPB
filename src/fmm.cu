@@ -40,13 +40,23 @@
 //    c_fact[k] = k!                      (k up to (2p)! ; doubles)
 //    c_A[idx]  = A_n^m = (-1)^n / sqrt((n-m)!(n+m)!)   (CGR'99 Eq. 14)
 //                idx = n*n + (m+n), m in [-n, n]
+//    c_Ainv[idx] = 1 / A_n^m = (-1)^n * sqrt((n-m)!(n+m)!)   (same layout)
 // ====================================================================
 __constant__ double c_fact[FMM_FACT_MAX + 1];
 // A_n^m table to degree 2p: M2L (Eq.17) indexes A_{j+n}^{m-k} with degree j+n up to 2p.
 __constant__ double c_A[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
+// Reciprocal of c_A. M2L (Eq.17) and L2L (Eq.21) divide by an A_n^m whose indices vary with the
+// inner (n,m) loop -- i.e. one FP64 division per O(p^4) term, which is brutal at the 3080's 1:64
+// FP64 rate. IEEE-754 pins a/b to the correctly-rounded result and a*(1/b) is a different value,
+// so nvcc cannot make that substitution on its own (no -use_fast_math here); it has to be done in
+// the source. Worth 1.5x on m2l_accumulate_kernel at p=10. Costs one extra (2p+1)^2 doubles of
+// __constant__ (3.5 KB at p=10) and shifts results by ~1 ulp per coefficient -- ~1e-12 even if it
+// accumulated linearly across the inner sum, far under the ~1e-10 energy tolerance.
+__constant__ double c_Ainv[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
 
 __device__ __forceinline__ double fact_dev(int k) { return c_fact[k]; }
 __device__ __forceinline__ double A_nm(int n, int m) { return c_A[n * n + (m + n)]; }
+__device__ __forceinline__ double A_inv(int n, int m) { return c_Ainv[n * n + (m + n)]; }
 
 // Host-side one-shot initializer for the constant tables.
 static void init_constant_tables() {
@@ -57,15 +67,23 @@ static void init_constant_tables() {
   h_fact[0] = 1.0;
   for (int k = 1; k <= FMM_FACT_MAX; ++k) h_fact[k] = h_fact[k - 1] * (double)k;
 
-  double h_A[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
+  double h_A   [(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
+  double h_Ainv[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
   for (int n = 0; n <= FMM_MAX_2P; ++n) {
     double sgn = (n & 1) ? -1.0 : 1.0;
-    for (int m = -n; m <= n; ++m)
-      h_A[n * n + (m + n)] = sgn / sqrt(h_fact[n - m] * h_fact[n + m]);
+    for (int m = -n; m <= n; ++m) {
+      double r = sqrt(h_fact[n - m] * h_fact[n + m]);
+      // 1/A_n^m is built straight from the factorials rather than as 1.0/h_A[..], so it carries
+      // one rounding instead of two. (-1)^n is its own inverse. Largest entry is sqrt((4p)!):
+      // 2.9e23 at p=10, 2.7e59 at p=20 -- nowhere near the 1.8e308 double max.
+      h_A   [n * n + (m + n)] = sgn / r;
+      h_Ainv[n * n + (m + n)] = sgn * r;
+    }
   }
 
   CUDA_CHECK(cudaMemcpyToSymbol(c_fact, h_fact, sizeof(h_fact)));
   CUDA_CHECK(cudaMemcpyToSymbol(c_A,    h_A,    sizeof(h_A)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_Ainv, h_Ainv, sizeof(h_Ainv)));
   initialized = true;
 }
 
@@ -342,9 +360,12 @@ __device__ void m2m_shift_impl(const double *__restrict__ O,
           if (km < -jn || km > jn) continue;         // O_{jn}^{km} needs |km| <= jn
           int e = k - iabs(m) - iabs(km);            // |k|=k (k>=0); e is even
           double ipow = ((e / 2) & 1) ? -1.0 : 1.0;
-          double coef = ipow * A_nm(n, m) * A_nm(jn, km) / A_nm(j, k);
+          double coef = ipow * A_nm(n, m) * A_nm(jn, km);
           acc = acc + (coef * (get_M(O, jn, km) * get_R(R, n, -m)));
         }
+      // 1/A_j^k does not depend on (n,m), so it scales the finished sum once instead of
+      // dividing every term -- see the c_Ainv note at the top of this file.
+      acc = A_inv(j, k) * acc;
       int s = sph_slot(j, k);
       if (ATOMIC) {
         atomicAdd(&M[2 * s],     acc.re);
@@ -385,10 +406,11 @@ __device__ __forceinline__ cmplx m2l_coeff(int p,
       int e  = iabs(mk) - k - iabs(m);           // |k|=k (k>=0); e is even
       double ipow  = ((e / 2) & 1) ? -1.0 : 1.0;
       double sgn_n = (n & 1) ? -1.0 : 1.0;       // 1/(-1)^n = (-1)^n
-      double coef  = ipow * sgn_n * A_nm(n, m) * A_nm(j, k) / A_nm(jn, mk);
+      double coef  = ipow * sgn_n * A_nm(n, m) * A_inv(jn, mk);
       acc = acc + (coef * (get_M(O, n, m) * get_R(S, jn, mk)));
     }
-  return acc;
+  // A_j^k does not depend on (n,m) -> applied once here rather than per term.
+  return A_nm(j, k) * acc;
 }
 
 // Local-to-local translation T_LL (CGR'99 Thm 2.5, Eq. 21). Shifts a parent local
@@ -415,9 +437,11 @@ __device__ void l2l_shift(const double *__restrict__ O,
           int e  = iabs(m) - iabs(mk) - k;           // |k|=k (k>=0); e is even
           double ipow = ((e / 2) & 1) ? -1.0 : 1.0;
           double sgn  = ((n + j) & 1) ? -1.0 : 1.0;  // 1/(-1)^{n+j}
-          double coef = ipow * sgn * A_nm(nj, mk) * A_nm(j, k) / A_nm(n, m);
+          double coef = ipow * sgn * A_nm(nj, mk) * A_inv(n, m);
           acc = acc + (coef * (get_M(O, n, m) * get_R(R, nj, mk)));
         }
+      // A_j^k does not depend on (n,m) -> applied once here rather than per term.
+      acc = A_nm(j, k) * acc;
       int s = sph_slot(j, k);
       L[2 * s]     += acc.re;
       L[2 * s + 1] += acc.im;
