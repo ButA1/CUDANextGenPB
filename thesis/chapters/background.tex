@@ -174,11 +174,11 @@ The SM is abstracted as a ``block'' and its L1-Cache as the ``shared memory''.
     \caption[GA102 full GPU with 84 SMs]{The full GA102 GPU, comprising seven GPCs with six TPCs each, two SMs per TPC, the shared L2 cache and the twelve memory controllers. Reproduced from the NVIDIA Ampere GA102 GPU architecture whitepaper \cite{nvidia_ampere_ga102_whitepaper}, \textcopyright{} 2021 NVIDIA Corporation.}
     \label{fig:ga102-full-gpu}
 \end{figure}
-
+% TODO not sure if I'm gonna keep these detailed descriptions...
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=0.6\textwidth]{figures/ga10x_sm.png}
-    \caption[GA10x streaming multiprocessor]{A single GA10x streaming multiprocessor, split into four processing partitions. Each partition holds its own register file, warp scheduler and dispatch unit, two FP32 datapaths (one of which doubles as the INT32 datapath) and a third-generation tensor core; all four partitions share the 128\,KB L1 data cache and shared memory. Reproduced from the NVIDIA Ampere GA102 GPU architecture whitepaper \cite{nvidia_ampere_ga102_whitepaper}, \textcopyright{} 2021 NVIDIA Corporation.}
+    \caption[GA10x streaming multiprocessor]{A single GA10x streaming multiprocessor, split into four processing blocks. Each blocks holds its own register file, warp scheduler and dispatch unit, two FP32 datapaths (one of which doubles as the INT32 datapath) and a third-generation tensor core; all four partitions share the 128\,KB L1 data cache and shared memory. Reproduced from the NVIDIA Ampere GA102 GPU architecture whitepaper \cite{nvidia_ampere_ga102_whitepaper}, \textcopyright{} 2021 NVIDIA Corporation.}
     \label{fig:ga10x-sm}
 \end{figure}
 
@@ -260,15 +260,15 @@ Since they are implemented using hash tables or maps, they have some amount of m
 
 Conversely, the Compressed Sparse Row format utilizes 3 arrays: column indices and values with the length of the non-zero-values (NNZ), and row offsets with the length equal to the number of rows plus one.
 Figure~\ref{fig:csr-format} shows an example of a small $4\times4$ sparse matrix and its corresponding CSR representation.
-The \texttt{values} array stores the non-zero entries in row-major order, and \texttt{col\_idx} stores the column each of those entries belongs to.
-\texttt{row\_offsets} then stores, for each row, the index into \texttt{values}/\texttt{col\_idx} at which that row's entries begin, with a final trailing entry equal to NNZ so that the length of any row can be computed as \texttt{row\_offsets[i+1] - row\_offsets[i]}.
+The \texttt{values} array stores the non-zero entries in row-major order, and \texttt{col\_\allowbreak{}idx} stores the column each of those entries belongs to.
+\texttt{row\_\allowbreak{}offsets} then stores, for each row, the index into \texttt{values}/\texttt{col\_\allowbreak{}idx} at which that row's entries begin, with a final trailing entry equal to NNZ so that the length of any row can be computed as \texttt{row\_\allowbreak{}offsets[i+1] - row\_\allowbreak{}offsets[i]}.
 On the surface this might look more complicated than a DOK but the CSR wins when accessing all row values of a matrix, which is conducive to matrix multiplication.
-Since \texttt{row\_offsets} depends on the number of values per row, it needs to be recomputed every time values are added or removed.
+Since \texttt{row\_\allowbreak{}offsets} depends on the number of values per row, it needs to be recomputed every time values are added or removed.
 
 \begin{figure}[htbp]
     \centering
     \input{figures/csr_format.tex}
-    \caption[Example of the CSR sparse matrix format]{A $4\times4$ sparse matrix (top, non-zero entries outlined in bold) and its Compressed Sparse Row representation (bottom). Each \texttt{row\_offsets} entry points to where that row's data begins in \texttt{col\_idx}/\texttt{values}; the trailing entry equals NNZ. Own illustration, following the array layout described in \cite{nvidia_nvpl_sparse_storage}.}
+    \caption[Example of the CSR sparse matrix format]{A $4\times4$ sparse matrix (top, non-zero entries outlined in bold) and its Compressed Sparse Row representation (bottom). Each \texttt{row\_\allowbreak{}offsets} entry points to where that row's data begins in \texttt{col\_\allowbreak{}idx}/\texttt{values}; the trailing entry equals NNZ. Own illustration, following the array layout described in \cite{nvidia_nvpl_sparse_storage}.}
     \label{fig:csr-format}
 \end{figure}
 

@@ -206,6 +206,15 @@ The final result can then be seen in Figure~\ref{fig:karras-node-layout}.
     \label{fig:karras-node-layout}
 \end{figure}
 
+\subsection{Tiling}
+\label{sec:alternative-techniques-cuda-tiling}
+
+Tiling is a standard optimization technique in CUDA programming, that improves memory throughput by loading ``tiles'' of the total problem from global memory into the smaller and faster memories.
+This helps because global memory reads are more efficient when fetching chunks of data, instead of individual values.
+Thus reading tiles of values into shared memory or the registers first, before reading individual values during the calculation is more efficient.
+It is most effective when the computational intensity of the calculation is lower than the needed memory throughput.
+If the computational intensity far outweighs the memory throughput then it is unfortunately not very helpful.
+
 \subsection{CUDA linear equation solvers}
 \label{sec:alternative-techniques-cuda-cu-lin-eq-solvers}
 

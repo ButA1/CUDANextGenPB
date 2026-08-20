@@ -40,6 +40,41 @@ The first implementation was to create native kernels for all three energies: th
 The atoms, charges, flux, triangle corners and normals where put into flat arrays and passed to the kernels as needed.
 Even systems like 6VYB with 44k or 1VSZ 180k atoms fit comfortably into the 10GB of VRAM of an RTX 3080.
 
+The Coulomb kernel is launched for all atoms in parallel.
+Due to the triangular shape of the total sum, the workload across threads is wildly unbalanced.
+However this turned out to be a very small issue, as the ionic and polarization kernels both take up more than 1000x of the time.
+
+The polarization and ionic kernels are launched for all surface points and triangles in parallel.
+It immediately became apparent, that those are the more computationally intense kernels, being highly FP64 bound.
+
+Despite the fact that the optimization is very straight forward, the new GPU accelerated version of \texttt{energy\_\allowbreak{}fast}, dubbed \texttt{energy\_\allowbreak{}cuda\_\allowbreak{}fast} ran 6VYB 17x faster on the RTX 3080 and a whopping 240x faster on an A100.
+
+\subsubsection{Further optimizations}
+
+On the GPU side:
+I used CUDA's \texttt{\_\allowbreak{}\_\allowbreak{}restrict\_\allowbreak{}\_\allowbreak{}} keyword of the data pointers, which prevents aliasing and enables more aggressive optimization by the compiler.
+This something the compiler should handle automatically, but this keyword gives assurance and does nothing in the worst case.
+
+Tiling was deemed ineffective.
+Though it would have helped a bit for the Coulomb kernel, the gain was just 10x on a kernel that took around 1ms on 6VYB.
+The other two kernels where heavily FP64 bound
+and since tiling only helps with memory throughput it subsequently dropped.
+
+A much more significant optimization was the use of the built-in inverse square root function \texttt{rsqrt}, instead of ``manually'' calculating the distance between bodies and diving by it.
+This dropped the total time by another 25\%.
+\newline
+\newline
+On the CPU side: 
+Since the the polarization and ionic kernels both need the same charge and atom arrays as the Coulomb kernel, I've reused their device pointers, but the speedup of that was miniscule.
+
+Lastly, I identified that the original code was computing \texttt{normal\_\allowbreak{}intersections} multiple times per quadrant edge.
+Since the surfaces of marching cubes and NanoShaper should be nigh identical, the quadrant's edges for which the \texttt{normal\_\allowbreak{}intersections} are computed should be always be the edges of those quadrants, which are located at the surface $\Gamma$, so I precomputed them.
+
+It is at this point that noticed that marching cubes and NanoShaper do unfortunately sometimes disagree, leading to \texttt{normal\_\allowbreak{}intersections} to return a default value without writing to the passed normal pointer at all.
+Worse yet, this stale normal point then gets used in the calculation of the ionic energy.
+After conversing with one of the authors of NGPB, we decided that the best course of action is to drop a surface triangle if one of its normals could not be determined.
+For this I modified \texttt{normal\_intersection} to return \texttt{true} if it had found an intersection and \texttt{false} otherwise.
+As this occurrence is very rare, it did not affect the speed, and even the accuracy in many cases.
 
 \subsection{Mixed Precision}
 \label{sec:implementation-energy-calculation-mixed-precision}
