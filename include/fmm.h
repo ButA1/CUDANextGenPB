@@ -295,8 +295,19 @@ struct fmm_target_tree {
   int    *d_box_slot; // n_nodes : box-node -> [0,n_box) local slot, else -1
   int     n_box;      // number of box nodes (frontier + ancestors)
   double *d_local;    // n_box * comp : per-box local expansion L_n^m (m>=0 half)
-  int    *d_depth;    // n_nodes : tree depth (root = 0), for the top-down L2L sweep
   int     max_depth;  // deepest BOX-node depth (host copy; bounds the L2L level loop)
+
+  // ---- L2L worklist: the non-root box nodes, bucketed by depth ----
+  // Same idea as d_leaf_nodes above -- resolve the "does this thread have work?" predicate ONCE
+  // at build time and hand the kernel a packed list -- except the L2L predicate also depends on
+  // the level, so the list is segmented by depth (a CSR keyed by depth, built by the same
+  // count/scan/scatter as fmm_build_p2p_csr). Without it every L2L level scanned all n_nodes and
+  // its survivors were so sparse that each one sat alone in its warp. Node depth itself is now a
+  // build-time temporary and no longer stored.
+  int    *d_l2l_nodes; // n_box - 1 : non-root box node ids, grouped by depth
+  int    *h_l2l_off;   // max_depth + 2 : level lvl owns d_l2l_nodes[h_l2l_off[lvl]..[lvl+1]).
+                       // HOST pointer -- this struct is passed BY VALUE into kernels; never
+                       // dereference it on the device.
 
   // ---- near-field P2P interaction lists (CSR, grouped by target-leaf node A) ----
   // The pair traversal emits near (leaf,leaf) pairs; a counting sort by A groups them so the

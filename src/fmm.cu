@@ -755,6 +755,31 @@ __global__ void box_slot_kernel(int n_nodes, const int *__restrict__ flag,
   box_depth[v] = box ? depth[v] : -1;
 }
 
+// Bucket the non-root box nodes by depth so each L2L level launches exactly the threads it
+// needs. Same counting sort as fmm_build_p2p_csr, over max_depth+1 buckets instead of n_nodes.
+// box_depth[v] is the node's depth if it is a box node, else -1; depth 0 is the root, which no
+// L2L level ever touches.
+__global__ void l2l_count_kernel(int n_nodes, const int *__restrict__ box_depth,
+                                 int *__restrict__ cnt) {
+  int v = blockIdx.x * blockDim.x + threadIdx.x;
+  if (v >= n_nodes) return;
+  int d = box_depth[v];
+  if (d >= 1) atomicAdd(&cnt[d], 1);
+}
+
+// Scatter each non-root box node into its depth's segment. Intra-level order is
+// non-deterministic (atomic fill) and that is fine here: every node writes only its OWN d_local
+// slot, so no two threads share an output and no summation order changes -- unlike the P2P CSR,
+// this stays bit-identical to the old level-synchronous sweep.
+__global__ void l2l_scatter_kernel(int n_nodes, const int *__restrict__ box_depth,
+                                   const int *__restrict__ off, int *__restrict__ fill,
+                                   int *__restrict__ nodes) {
+  int v = blockIdx.x * blockDim.x + threadIdx.x;
+  if (v >= n_nodes) return;
+  int d = box_depth[v];
+  if (d >= 1) nodes[off[d] + atomicAdd(&fill[d], 1)] = v;
+}
+
 // ====================================================================
 //  Shared LBVH build stages 1-2, used by BOTH the source (fmm_build_atom_tree)
 //  and target (build_target_tree) builders: scene AABB -> Morton codes ->
@@ -896,12 +921,16 @@ static void tt_downward_storage(fmm_target_tree *tt, int tpb) {
   const int nn = tt->n_nodes;
   int fr_blocks = (nn + tpb - 1) / tpb;
 
-  CUDA_CHECK(cudaMalloc(&tt->d_depth,    nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&tt->d_box_slot, nn * sizeof(int)));
-  node_depth_kernel<<<fr_blocks, tpb>>>(nn, tt->d_parent, tt->d_depth);
+
+  // Node depth is only an input to box_slot_kernel and to the depth bucketing below, so it stays
+  // a build-time temporary (as it already is on the source side) rather than an n_nodes array
+  // living for the whole run.
+  int *d_depth, *d_flag, *d_pref, *d_bdepth;
+  CUDA_CHECK(cudaMalloc(&d_depth,  nn * sizeof(int)));
+  node_depth_kernel<<<fr_blocks, tpb>>>(nn, tt->d_parent, d_depth);
   CUDA_CHECK(cudaGetLastError());
 
-  int *d_flag, *d_pref, *d_bdepth;
   CUDA_CHECK(cudaMalloc(&d_flag,   nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_pref,   nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_bdepth, nn * sizeof(int)));
@@ -913,7 +942,7 @@ static void tt_downward_storage(fmm_target_tree *tt, int tpb) {
     CUDA_CHECK(cudaMalloc(&d_t, tb));
     cub::DeviceScan::ExclusiveSum(d_t, tb, d_flag, d_pref, nn);
     cudaFree(d_t); }
-  box_slot_kernel<<<fr_blocks, tpb>>>(nn, d_flag, d_pref, tt->d_depth,
+  box_slot_kernel<<<fr_blocks, tpb>>>(nn, d_flag, d_pref, d_depth,
                                       tt->d_box_slot, d_bdepth);
   CUDA_CHECK(cudaGetLastError());
   { int last_pref, last_flag;                  // n_box = pref[nn-1] + flag[nn-1]
@@ -927,7 +956,43 @@ static void tt_downward_storage(fmm_target_tree *tt, int tpb) {
     cub::DeviceReduce::Max(d_t, tb, d_bdepth, d_md, nn);
     CUDA_CHECK(cudaMemcpy(&tt->max_depth, d_md, sizeof(int), cudaMemcpyDeviceToHost));
     cudaFree(d_t); cudaFree(d_md); }
-  cudaFree(d_flag); cudaFree(d_pref); cudaFree(d_bdepth);
+
+  // Depth-bucketed L2L worklist. Buckets are 0..max_depth, plus one trailing slot so the
+  // exclusive scan leaves the grand total in off[nlev] with no special-casing. Bucket 0 (the
+  // root) stays empty by construction.
+  { const int nlev = tt->max_depth + 1;
+    int *d_cnt, *d_fill, *d_off;
+    CUDA_CHECK(cudaMalloc(&d_cnt,  (nlev + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_fill, (nlev + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_off,  (nlev + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_cnt,  0, (nlev + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_fill, 0, (nlev + 1) * sizeof(int)));
+
+    l2l_count_kernel<<<fr_blocks, tpb>>>(nn, d_bdepth, d_cnt);
+    CUDA_CHECK(cudaGetLastError());
+    { void *d_t = nullptr; size_t tb = 0;
+      cub::DeviceScan::ExclusiveSum(d_t, tb, d_cnt, d_off, nlev + 1);
+      CUDA_CHECK(cudaMalloc(&d_t, tb));
+      cub::DeviceScan::ExclusiveSum(d_t, tb, d_cnt, d_off, nlev + 1);
+      cudaFree(d_t); }
+
+    tt->h_l2l_off = new int[nlev + 1];
+    CUDA_CHECK(cudaMemcpy(tt->h_l2l_off, d_off, (nlev + 1) * sizeof(int),
+                          cudaMemcpyDeviceToHost));
+    // Every box node except the root lands in exactly one bucket, so the buckets must account
+    // for n_box-1 nodes. A mismatch means the bucketed worklist and the old depth/box_slot
+    // predicate disagree, i.e. the L2L sweep would silently skip (or double-shift) nodes.
+    int n_l2l = tt->h_l2l_off[nlev];
+    if (n_l2l != tt->n_box - 1)
+      fprintf(stderr, "[fmm] L2L bucket count %d != n_box-1 (%d)\n", n_l2l, tt->n_box - 1);
+    CUDA_CHECK(cudaMalloc(&tt->d_l2l_nodes, (size_t)(n_l2l > 0 ? n_l2l : 1) * sizeof(int)));
+    if (n_l2l > 0) {
+      l2l_scatter_kernel<<<fr_blocks, tpb>>>(nn, d_bdepth, d_off, d_fill, tt->d_l2l_nodes);
+      CUDA_CHECK(cudaGetLastError());
+    }
+    cudaFree(d_cnt); cudaFree(d_fill); cudaFree(d_off); }
+
+  cudaFree(d_depth); cudaFree(d_flag); cudaFree(d_pref); cudaFree(d_bdepth);
 
   CUDA_CHECK(cudaMalloc(&tt->d_local, (size_t)tt->n_box * tt->comp * sizeof(double)));
 }
@@ -945,7 +1010,8 @@ static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, i
   tt->n_p2p     = 0;
   tt->d_pos = tt->d_min = tt->d_max = tt->d_local = nullptr;
   tt->d_orig = tt->d_left = tt->d_right = tt->d_parent = nullptr;
-  tt->d_first = tt->d_last = tt->d_leaf_nodes = tt->d_depth = tt->d_box_slot = nullptr;
+  tt->d_first = tt->d_last = tt->d_leaf_nodes = tt->d_box_slot = nullptr;
+  tt->d_l2l_nodes = tt->h_l2l_off = nullptr;
   tt->d_p2p_off = tt->d_p2p_val = nullptr;
   if (num_pts <= 0) return;
 
@@ -974,7 +1040,8 @@ static void free_target_tree(fmm_target_tree *tt) {
   cudaFree(tt->d_left);   cudaFree(tt->d_right);  cudaFree(tt->d_parent);
   cudaFree(tt->d_first);  cudaFree(tt->d_last);
   cudaFree(tt->d_leaf_nodes);
-  cudaFree(tt->d_local);  cudaFree(tt->d_depth);  cudaFree(tt->d_box_slot);
+  cudaFree(tt->d_local);  cudaFree(tt->d_box_slot);
+  cudaFree(tt->d_l2l_nodes);  delete[] tt->h_l2l_off;
   cudaFree(tt->d_p2p_off); cudaFree(tt->d_p2p_val);
 }
 
@@ -1064,15 +1131,19 @@ __global__ void m2l_accumulate_kernel(fmm_tree src, fmm_target_tree tgt,
     }
 }
 
-// One level of the top-down L2L sweep: every node v at depth==lvl shifts its parent's
-// (already complete) local expansion to v's center and adds it into d_local[v]. Run for
-// lvl = 1..max_depth so each node sees a finalized parent. Distinct v -> no write races.
+// One level of the top-down L2L sweep: nodes[0..n) are this level's box nodes, each shifting its
+// parent's (already complete) local expansion to its own center and adding it into d_local[v].
+// Called for lvl = 1..max_depth so each node sees a finalized parent. Distinct v -> no write
+// races. The depth and box-slot tests were resolved once at tree-build time (tt_downward_storage),
+// exactly as d_leaf_nodes pre-resolves the frontier test for l2p_p2p_kernel -- so every lane
+// here has real work, instead of one survivor per warp scanning all n_nodes.
 template<int P>
-__global__ void l2l_level_kernel(fmm_target_tree tgt, int lvl) {
-  int v = blockIdx.x * blockDim.x + threadIdx.x;
-  if (v >= tgt.n_nodes || tgt.d_depth[v] != lvl) return;
-  int sv = tgt.d_box_slot[v];
-  if (sv < 0) return;                                   // only box nodes carry locals
+__global__ void l2l_level_kernel(fmm_target_tree tgt,
+                                 const int *__restrict__ nodes, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  int v  = nodes[i];
+  int sv = tgt.d_box_slot[v];                           // >= 0 by construction
   int u = tgt.d_parent[v];
   int su = tgt.d_box_slot[u];                           // parent of a non-root box is a box
   constexpr int COMP_DBL = comp_sph(P);
@@ -1163,9 +1234,15 @@ static void fmm_translations(const fmm_tree &src, fmm_target_tree &tt,
     m2l_accumulate_kernel<P><<<g, tpb>>>(src, tt, d_m2l, n_m2l);
     CUDA_CHECK(cudaGetLastError());
   }
-  int tpb = 256, g = (tt.n_nodes + tpb - 1) / tpb;
+  // Grid is sized by each level's actual node count, not by n_nodes. tpb is smaller than the old
+  // 256 because the levels are now small: at 64 a mid-size level still spreads across many SMs
+  // instead of landing on two or three blocks.
+  if (!tt.h_l2l_off) return;
+  const int tpb = 64;
   for (int lvl = 1; lvl <= tt.max_depth; ++lvl) {
-    l2l_level_kernel<P><<<g, tpb>>>(tt, lvl);
+    int lo = tt.h_l2l_off[lvl], n = tt.h_l2l_off[lvl + 1] - lo;
+    if (n <= 0) continue;
+    l2l_level_kernel<P><<<(n + tpb - 1) / tpb, tpb>>>(tt, tt.d_l2l_nodes + lo, n);
     CUDA_CHECK(cudaGetLastError());
   }
 }
