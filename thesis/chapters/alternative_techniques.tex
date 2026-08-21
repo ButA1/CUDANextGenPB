@@ -15,6 +15,7 @@ Although most FEM solvers avoid N-Body calculations entirely, NGPB has this prob
 One the one hand, many approximation techniques have been developed, which are all roughly based on the following idea:
 Kernels generally have an inverse dependency on distance.
 The further the distance between the bodies, the less individual interactions matter.
+These techniques range from being very simple, like the Cut-Off method, to fairly complex like Barnes Hut (BH) or Fast Multipole Method (FMM).
 
 On the other hand, the nature of the kernels means that N-Body problems are perfect for highly-parallel architectures, primarily GPUs.
 This works so well in fact that naively running kernels in parallel often beats intricate optimizations.
@@ -32,8 +33,9 @@ This fact relies on the system being very large, which is hardly ever the case.
 \label{sec:alternative-techniques-nbody-bh}
 
 If a cluster of bodies is far enough away from a target body, the cluster could be summarized as a single body, that interacts with the target.
-This is the core idea behind Barnes-Hut.
-It walks through a tree of body clusters for all bodies, and decides whether certain clusters are far enough away to calculate the interaction using their summary instead of ever individual interaction of every body within it.
+This is the core idea behind Barnes-Hut (BH).
+First the domain is organized into a tree.
+It walks through the tree of body clusters for all bodies, and decides whether certain clusters are far enough away to calculate the interaction using their summary instead of ever individual interaction of every body within it.
 Originally these summaries are approximated with simple sums of all the bodies in the cluster concentrated at their center of gravity.
 The distance criterion, commonly denoted as $\theta$, controls the accuracy of the algorithm.
 The higher $\theta$ is, the more summaries of clusters are accepted, and the more the algorithm approaches its theoretical peak completely of \(\mathcal{O}(n log n)\).
@@ -41,14 +43,14 @@ Since these summaries are approximations, increasing $\theta$ also increases the
 In contrast, lowering $\theta$ makes the result more accurate as more interactions are computed directly, but also making the complexity approach the original \(\mathcal{O}(n^2)\).
 Traditionally, a cluster is far enough away when $\theta > s/d$, where $s$ is the size of the cluster, and $d$ is the distance between the cluster and target.
 
-To make higher $\theta$ more acceptable, the simple sum was replaced by multipole expansions, which more are more complex, but also more accurately summarized the interaction with the cluster.
-With that, the acceptance criterion now became the multipole acceptance criterion.
+To make higher $\theta$ more acceptable, the simple sum was replaced by multipole expansions (M2P), which are more computationally expensive, but also more accurately summarized the interaction with the cluster.
+With that, the acceptance criterion now became the multipole acceptance criterion (MAC).
 More sophisticated criteria have been developed in order to help increase $\theta$ even further, but had much less of an impact than multipole expansions.
 
 \subsection{Alternative MACs}
 \label{sec:alternative-techniques-alternative-macs}
 
-In the paper \cite{salmon1994skeletons} John Salmon and Michael Warren investigated the effectiveness between three different MACs: the classic Barnes-Hut criterion, ``minimum distance'' and ``Bmax''.
+In the paper \cite{salmon1994skeletons} John Salmon and Michael Warren investigated the effectiveness between three different MACs: the classic BH criterion, ``minimum distance'' and ``Bmax''.
 They found that none of these reduced the error to a significant degree and concluded that an increase in multipole expansion order is much more effective.
 % TODO what about their "sum squares MAC"?
 % again I am afraid I didn't do something optimally enough, how does it compare to the doubles sided Bmax?
@@ -61,44 +63,64 @@ One can imagine them as a lobe patterns originating from a central point.
 They approximate a function by expanding it into a sum of repetitive terms.
 Generally speaking, the number of terms is equal to the order $P$ of the expansion.
 The higher the order, the more the expansions converges towards the original function, becoming exact if the order is infinite.
-An interesting observation is that the 0-th order is equal to the sum of the bodies, meaning that the original Barnes-Hut technically used a 0-order-expansion.
+An interesting observation is that the 0-th order is equal to the sum of the bodies, meaning that the original BH technically used a 0-order-expansion.
+
 There are many ways to formulate multipole expansions, each with their own upsides and downsides.
+The electrostatic Coulomb potential Eq.~\ref{eq:coulomb-potential} is a form of laplacian kernel $1/|r|$, which the fundamental solution to the laplace operator $\Delta = \nabla \cdot \nabla$, essentially the same operator that appears in the PBE Eq.~\ref{eq:pbe-basic}.
+Multipole expansions the laplace kernel (also called the or Green's function)are well known.
 
 \subsubsection{Cartesian Taylor}
 The Taylor expansions is perhaps the best known function expansion.
 The cartesian Taylor expansion is the same core concept applied to all 3 dimensions of the cartesian coordinates.
-They need no complex arithmetic or rotation setup, and lend themselves particularly well for treecoded Barnes-Hut.
-Exactly this combination was already implemented in a BEM LPBE solver by W. Geng and R. Krasny \cite{geng2013tabipb}.
+They are mathematically simple and pole-free, without the need for complex numbers or trigonometry, making them genuinely GPU-friendly.
+Their storage complexity is \(\mathcal{O}(p^3)\), meaning they grow pretty quickly as the order increases.
+This is not a big deal in case of treecoded BH, because the multipole gets evaluated at every particle.
+It is much less suited for Fast Multipole Expansion methods, because the storage complexity bites in two different ways: once purely because FMM usually requires higher P, and a second time during the translation of the multipole expansion into a local expansion.
+
+Treecode Barnes combination was already implemented in a BEM LPBE solver by W. Geng and R. Krasny \cite{geng2013tabipb}.
 Dubbed TABI-PB 1.0, it is based of previous work involving Krasny \cite{li2009cartesian}, allowing for an expansion order of up to 10.
 Though the treecode could reach error magnitudes of $e^-6$ with a $theta$ of 0.5, it still need to turn down $theta$ all the way down to 0.2 to reach an error of $e^-10$.
-% TODO I am not sure if it was the number of terms of number of moments
 
 \subsubsection{Spherical Harmonics}
 Spherical harmonics use spherical coordinates as opposed to cartesian.
-They are much more compact, needing fewer moments than Cartesian Taylor, which allows for higher orders while using the same amount of storage.
-They require complex numbers and trigonometry, making them more computationally expensive.
-% TODO I think one of Yokota's papers included a table with time complexities
-% HOLD UP I just looked at it and its actually still more complex lol
+Their storage complexity is \(\mathcal{O}(p^2)\), needing fewer moments than Cartesian Taylor, which allows for higher orders while using the same amount of storage.
+They require complex numbers and trigonometry, due to the use of associated-Legendre recurrences, making them more computationally expensive than Cartesian.
+They also have a pole at $\theta=0,\pi$.
+However, these trade offs are wroth it in FMM due to the lower storage complexity.
+
+A spherical harmonic expansion for the Coulomb potential, as well as the screened potential, is given in ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}.
+% not sure if I can find a paper that actually has JUST the spherical harmonics
 
 \subsection{Fast Multipole Method}
 \label{sec:alternative-techniques-nbody-fmm}
-% IS THIS THE FMM OF 87?
+
 Introduced in 1987 by Leslie Greengard and Vladimir Rokhlin \cite{greengard1987fmm}, the Fast Multipole Method (FMM) takes the idea of Barnes-Hut and expands on it.
-Instead of evaluating the cluster multipole expansion against a single target body, it now also summarizes the targets into clusters as well, called the local expansion.
+Instead of evaluating the cluster multipole expansion against a single target body (as M2P does), it now also summarizes the targets into clusters as well, called the local expansion.
 This eliminates the need to traverse the tree for every body.
-Thus FMM does not iterate over each particle, it iterates over each leaf cluster, and computes their multipole expansion.
-%TODO what is a leaf cluster!
+Thus FMM does not iterate over each particle, it iterates over each leaf cluster, and computes their multipole expansion using the P2M operator.
+
 When it then moves to the higher level in the tree, it does not compute the multipole expansion from scratch.
-Instead it uses a M2M operator which computes the multipole expansion of a parent cluster from its children's multipole.
+Instead it uses the M2M operator, that translation the multipole expansion of a parent cluster from its children's multipoles.
 This is the upward pass, and it continues until it reaches the root of the tree in just \(\mathcal{O}(n)\) steps.
 Next the well-separated clusters convert their multipole expansions into local expansion with the M2L operator.
 Then comes the downward pass, where the local expansions of the parent clusters get passed down to their children using the L2L operator, also in \(\mathcal{O}(n)\) steps.
 Thus the ideal overall time complexity is just \(\mathcal{O}(n)\).
 
 Classical FMM does not use an MAC, instead controlling the error entirely through the order of the expansion $P$.
+Thus the use of spherical harmonics, as well as other more storage efficient expansions like planewaves, is preferred over cartesian Taylor, though this is not the only reason.
+The M2L operator iterates over all multiple expansion moments for every moment of the local expansion.
+For cartesian Taylor with a space complexity of \(\mathcal{O}(p^3)\), this means the M2L would have the arithmetic complexity of \(\mathcal{O}(p^6)\), while spherical harmonics only end up with \(\mathcal{O}(p^4)\).
+Moreover, this complexity can be further reduced to \(\mathcal{O}(p^3)\) through rotational operators.
 Whether two clusters are considered well separated is purely based on whether they are touching, and which tree level they are on, rather than their geometry.
+This approach already had been applied multiple times to the BEM to solve for the electrostatic potential of biomolecular systems \cite{bharadwaj1995fmbem, cheng1999fastadaptive}.
 
-% TODO add a section about TABI 2.0
+However, there are also alternative approaches like R. Yokota's et. al. dual tree traverse FMM \cite{yokota2012hierarchical, yokota2013dualtree}, which classifies interactions using MACs into P2P and M2L interactions.
+For this it constructs two trees: a source and target tree, and initializes the interaction stack with the two root nodes.
+Until the stack is empty, it pops a pair from it and subdivides the largest node, which creates new interaction pairs. 
+This is a necessary condition to maintain \(\mathcal{O}(n)\) complexity.
+For each pair, it first checks whether both nodes of a pair are leafs, in which case a direct calculation P2P is performed.
+If none of them are leafs, the pair is tested with the MAC.
+If it passes the multipole interaction is computed, otherwise the pair gets pushed to the stack.
 
 \section{CUDA optimizations}
 \label{sec:alternative-techniques-cuda-optimizations}

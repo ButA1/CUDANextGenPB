@@ -88,17 +88,25 @@ As this occurrence is very rare, it did not affect the speed, and even the accur
 
 It was obvious that in order to retain the level of accuracy a more sophisticated approach was be required to achieve any significant level of speedup.
 For this purpose I implemented a fairly non-standard implementation of FMM, with the only ``normal'' things about it being the overall algorithm.
+It uses a LBVH trees, iterative dual tree traverse with double sided MAC, 
 
-Both the source and the target tree are constructed using Karras's LBVH algorithm\cite{karras2012lbvh}.
-This means they are binary radix trees, which is different from a traditional octree used in FMM.
+Both the source and the target tree are constructed using Karras's LBVH algorithm\cite{karras2012lbvh}, but a prerequisite for this is a bounding box over all bodies.
+I compute this one the GPU by finding the minimum and maximum coordinates in all the spacial dimensions with the \texttt{bbox\_kernel}.
+In combines custom atomicMinDouble and atomicMaxDouble into 6 shared variables per block, before comparing the result of the block against the global memory.
+Although not efficient, this at least reduces the traffic from per thread to 6 times the amount of blocks.
+Running 1VYZ and 6VYB, this kernel only took only tens of microseconds.
+% TODO honestly just writing this makes it seem ultra inefficient
+% I might switch to cub Reduce instead, this is embarrassingly bad
+
+The resulting structure is a binary radix trees, which is different from a traditional octree used in FMM.
 However, it is practically the same spacial decomposition.
 To get an ``octant'' of a node, one must simply descend it three levels, though this does mean that my tree depth is essentially 3x that of an equivalent octree.
 I have to point out though that those ``octants'' aren't actually that, because LBVH creates tight boxes around a cluster of particles, rather than bisected quadrants.
 This has both upsides and downsides.
-% TODO write them down
-% honestly it looks almost like its all downsides
+On one side I need to traverse 3x as many times as I would with a octree.
+On the other I achieve greater MAC granularity, since I only split nodes two, instead of 8.
 
-I used spherical harmonics and the translation operators, such as the M2M, M2L, L2L and L2P are taken from ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}.
+I used spherical harmonics and the translation operators, such as the M2M, M2L, L2L and L2P are taken from ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}, which I used for the calculation of the polarization Eq.~\ref{eq:polarization-energy} and the second integral term of the 
 
 
 \section{Multi-GPU}
