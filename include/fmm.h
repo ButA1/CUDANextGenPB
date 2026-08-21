@@ -239,9 +239,22 @@ struct fmm_tree {
   int    *d_first;    // n_nodes
   int    *d_last;     // n_nodes
 
-  // per-node complex spherical-harmonic moments M_n^m, m>=0 half, interleaved
-  // re,im at slot s=sph_slot(n,m): d_moments[node*comp + 2s], [..+2s+1].
-  double *d_moments;  // n_nodes * comp   (comp = comp_sph(p) doubles)
+  // ---- box storage (mirrors fmm_target_tree's d_box_slot/d_local below) ----
+  // Multipole moments live ONLY on "box" nodes: the leaf-size frontier and its strict
+  // ancestors (~2*n_leaves nodes), NOT the ~2N radix nodes beneath the frontier. That is
+  // exactly the set fmm_pair_kernel can reach before it stops descending -- its cutoff
+  // (count(B) <= leaf_size) is the same predicate as mark_box_kernel -- so no moment that
+  // is ever read goes missing. Dense storage would cost n_nodes*comp = 2*(p+1)(p+2)*8
+  // bytes per atom: 2112 B/atom at p=10, i.e. 30 GB for a 14M-atom virion, on EVERY rank.
+  int    *d_box_slot;   // n_nodes : box-node -> [0,n_box) moment slot, else -1
+  int     n_box;        // number of box nodes (frontier + strict ancestors)
+  int    *d_leaf_nodes; // n_leaves : frontier node ids (drives the P2M/M2M launches)
+  int     n_leaves;
+
+  // per-BOX complex spherical-harmonic moments M_n^m, m>=0 half, interleaved
+  // re,im at slot s=sph_slot(n,m): d_moments[d_box_slot[node]*comp + 2s], [..+2s+1].
+  // INDEX THROUGH d_box_slot -- never by raw node id.
+  double *d_moments;  // n_box * comp   (comp = comp_sph(p) doubles)
 };
 
 // ====================================================================
@@ -282,8 +295,19 @@ struct fmm_target_tree {
   int    *d_box_slot; // n_nodes : box-node -> [0,n_box) local slot, else -1
   int     n_box;      // number of box nodes (frontier + ancestors)
   double *d_local;    // n_box * comp : per-box local expansion L_n^m (m>=0 half)
-  int    *d_depth;    // n_nodes : tree depth (root = 0), for the top-down L2L sweep
   int     max_depth;  // deepest BOX-node depth (host copy; bounds the L2L level loop)
+
+  // ---- L2L worklist: the non-root box nodes, bucketed by depth ----
+  // Same idea as d_leaf_nodes above -- resolve the "does this thread have work?" predicate ONCE
+  // at build time and hand the kernel a packed list -- except the L2L predicate also depends on
+  // the level, so the list is segmented by depth (a CSR keyed by depth, built by the same
+  // count/scan/scatter as fmm_build_p2p_csr). Without it every L2L level scanned all n_nodes and
+  // its survivors were so sparse that each one sat alone in its warp. Node depth itself is now a
+  // build-time temporary and no longer stored.
+  int    *d_l2l_nodes; // n_box - 1 : non-root box node ids, grouped by depth
+  int    *h_l2l_off;   // max_depth + 2 : level lvl owns d_l2l_nodes[h_l2l_off[lvl]..[lvl+1]).
+                       // HOST pointer -- this struct is passed BY VALUE into kernels; never
+                       // dereference it on the device.
 
   // ---- near-field P2P interaction lists (CSR, grouped by target-leaf node A) ----
   // The pair traversal emits near (leaf,leaf) pairs; a counting sort by A groups them so the
@@ -313,26 +337,32 @@ __device__ __forceinline__ cmplx get_R(const cmplx* R, int n, int m) {
 
 // ====================================================================
 //  double atomic min/max (CUDA has no native FP64 min/max atomic)
+//
+//  Instead of a CAS retry loop we exploit the fact that IEEE-754 doubles are
+//  ordered by their bit pattern: read as a SIGNED int64 the non-negative ones
+//  sort exactly like the doubles, while read as an UNSIGNED int64 every
+//  negative one outranks every non-negative one and the negatives sort in
+//  reverse. Branching on the sign of the incoming value therefore reduces each
+//  update to a single native 64-bit atomic (CC >= 3.5) -- no retry loop, and no
+//  non-atomic read of a location other threads are writing. Either branch is a
+//  correct min/max against whatever is currently stored, whatever ITS sign, so
+//  mixed-sign callers on one address still reduce correctly. -0.0 takes the
+//  negative branch, which is harmless since -0.0 == 0.0. NaN is not handled
+//  (all callers feed finite coordinates).
 // ====================================================================
 __device__ __forceinline__ double atomicMinDouble(double *addr, double val) {
-  unsigned long long *a = (unsigned long long *)addr;
-  unsigned long long old = *a, assumed;
-  do {
-    assumed = old;
-    if (__longlong_as_double(assumed) <= val) break;
-    old = atomicCAS(a, assumed, __double_as_longlong(val));
-  } while (assumed != old);
-  return __longlong_as_double(old);
+  const long long i = __double_as_longlong(val);
+  return i < 0
+       ? __longlong_as_double((long long)atomicMax((unsigned long long *)addr,
+                                                   (unsigned long long)i))
+       : __longlong_as_double(atomicMin((long long *)addr, i));
 }
 __device__ __forceinline__ double atomicMaxDouble(double *addr, double val) {
-  unsigned long long *a = (unsigned long long *)addr;
-  unsigned long long old = *a, assumed;
-  do {
-    assumed = old;
-    if (__longlong_as_double(assumed) >= val) break;
-    old = atomicCAS(a, assumed, __double_as_longlong(val));
-  } while (assumed != old);
-  return __longlong_as_double(old);
+  const long long i = __double_as_longlong(val);
+  return i < 0
+       ? __longlong_as_double((long long)atomicMin((unsigned long long *)addr,
+                                                   (unsigned long long)i))
+       : __longlong_as_double(atomicMax((long long *)addr, i));
 }
 
 // Leaf-kernel block width = launch blockDim. Target leaves hold <= 256 points, so 256

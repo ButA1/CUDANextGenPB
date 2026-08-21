@@ -1,0 +1,92 @@
+#!/bin/bash
+#SBATCH --job-name=ngpb-h1n1-2n
+#SBATCH --partition=h200_short
+#SBATCH --gres=gpu:h200:2              # PER NODE -> 2 nodes x 2 = 4 GPUs total, the same leader
+                                       # layout that measured 79.7 GB/card. Targets gpu069-072,
+                                       # which should queue faster than the single 4-GPU gpu068.
+#SBATCH --nodes=2
+#SBATCH --ntasks=8                     # NOT 4. At 4 ranks each holds 227M local quadrants and
+                                       # p8est's 12 x local_quadrants edge array (int32
+                                       # p4est_locidx_t, tmesh_3d.cpp:957) overflows -> malloc
+                                       # NULL -> abort in p8est_mesh_new_ext. That is what killed
+                                       # job 1883234. R >= 6 required; R=8 also keeps the FMM
+                                       # energy stage to 2 trees per GPU instead of 4.
+#SBATCH --ntasks-per-node=4            # forces 4+4 -> 2 ranks per GPU, 4 leaders total
+#SBATCH --cpus-per-task=16             # 4 x 16 = 64 cores per node
+#SBATCH --distribution=block           # REQUIRED, and more so here than on one node: leaders are
+                                       # ordered by world rank and their partition offsets assume
+                                       # each group owns a CONTIGUOUS global row range.
+#SBATCH --mem=0
+#SBATCH --exclusive
+#SBATCH --time=04:00:00                # ~1.5 h measured+estimated (see run_h1n1.slurm), with
+                                       # margin for the inter-node halo exchange. Short on purpose
+                                       # so Slurm can backfill it. Verify h200_short's cap.
+#SBATCH --output=h1n1-2n-%j.out
+#SBATCH --error=h1n1-2n-%j.err
+
+set -euo pipefail
+
+module load singularity
+
+cd "$SLURM_SUBMIT_DIR"
+SIF="${SIF:-$SLURM_SUBMIT_DIR/ngpb.sif}"
+PRM="${PRM:-options_h1n1.prm}"
+
+for f in "$SIF" "$PRM" H1N1.pqr amgx_pcgf_amg_poly_cluster.json; do
+    [ -e "$f" ] || { echo "MISSING: $f" >&2; exit 1; }
+done
+
+head -c 4 H1N1.pqr | grep -q ATOM || {
+    echo "H1N1.pqr does not start with an ATOM record -- reader would parse 0 atoms" >&2
+    exit 1
+}
+
+echo "Nodes  : $SLURM_JOB_NODELIST"
+echo "CPUs   : ${SLURM_NTASKS} ranks x ${SLURM_CPUS_PER_TASK}"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader || true
+echo
+
+# ---------------------------------------------------------------------------------------
+# MULTI-NODE LAUNCH DIFFERS FROM THE 1-NODE SCRIPT AND IS THE ONE UNVERIFIED PIECE HERE.
+#
+# recipe_cuda.def:131 deliberately runs `mpirun` INSIDE the container ("robust for single
+# node, no host MPI interop needed"). That does not extend across nodes: the container's own
+# OpenMPI would have to ssh between compute nodes to spawn remote ranks.
+#
+# The portable fix is to let Slurm do the launching -- srun starts one container per task and
+# wires them together over PMI, so the container's OpenMPI never spawns anything itself. That
+# requires the container's OpenMPI to be ABI-compatible with the host's PMIx.
+#
+# VERIFY BEFORE RELYING ON THIS:
+#   srun --mpi=list                       # is pmix (or pmix_v4/v5) offered?
+#   srun -N2 -n4 --mpi=pmix singularity exec "$SIF" \
+#        bash -c 'echo rank $OMPI_COMM_WORLD_RANK of $OMPI_COMM_WORLD_SIZE on $(hostname)'
+# That should print 4 distinct ranks across 2 hostnames. If it prints four rank-0-of-1 lines,
+# PMI is not wiring up and this script will run 4 independent serial jobs -- which would waste
+# another queue slot without obviously failing.
+#
+# --cpu-bind=none mirrors mpirun's --bind-to none so rank 0's NanoShaper threads can use all 64
+# cores of its node rather than just its own 32.
+# ---------------------------------------------------------------------------------------
+# pml=ucx is MANDATORY here, not a tuning knob. Measured on gpu026/027 (mpidiag2-1883214):
+#
+#   intra-node, default vader ....... HANGS. CMA is blocked across user namespaces and there
+#                                     is no knem/xpmem fallback, so the first Send/Recv never
+#                                     completes. This is what stalled 6VYB at p8est_refine.
+#   intra-node, pml=ucx ............. 0.37 us latency, 0.39 us allreduce  (mpirun-in-one-
+#                                     container gets 0.25 / 0.38, so essentially par)
+#   inter-node, default ............. 48.4 us / 52.6 us -- indistinguishable from forced TCP
+#                                     (33.7 / 50.3), i.e. it silently ignores the IB fabric
+#   inter-node, pml=ucx ............. 6.10 us / 5.73 us -- 9x better
+#   4 ranks over 2 nodes, pml=ucx ... 7.41 us allreduce. This exact topology.
+#
+# UCX prints "mm_posix.c:233 open(/proc/PID/fd/N) Permission denied" a few times at startup --
+# that is one shared-memory mechanism failing across namespaces. UCX falls back on its own and
+# still reaches 0.31 us, so the messages are noise, not a fault.
+export SINGULARITYENV_OMP_NUM_THREADS=64
+export APPTAINERENV_OMP_NUM_THREADS=64
+
+srun --mpi=pmix --cpu-bind=none singularity exec --nv "$SIF" bash -c "
+    export OMP_NUM_THREADS=64
+    export OMPI_MCA_pml=ucx OMPI_MCA_osc=ucx
+    exec ngpb --prmfile ${PRM}"

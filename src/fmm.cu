@@ -40,13 +40,23 @@
 //    c_fact[k] = k!                      (k up to (2p)! ; doubles)
 //    c_A[idx]  = A_n^m = (-1)^n / sqrt((n-m)!(n+m)!)   (CGR'99 Eq. 14)
 //                idx = n*n + (m+n), m in [-n, n]
+//    c_Ainv[idx] = 1 / A_n^m = (-1)^n * sqrt((n-m)!(n+m)!)   (same layout)
 // ====================================================================
 __constant__ double c_fact[FMM_FACT_MAX + 1];
 // A_n^m table to degree 2p: M2L (Eq.17) indexes A_{j+n}^{m-k} with degree j+n up to 2p.
 __constant__ double c_A[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
+// Reciprocal of c_A. M2L (Eq.17) and L2L (Eq.21) divide by an A_n^m whose indices vary with the
+// inner (n,m) loop -- i.e. one FP64 division per O(p^4) term, which is brutal at the 3080's 1:64
+// FP64 rate. IEEE-754 pins a/b to the correctly-rounded result and a*(1/b) is a different value,
+// so nvcc cannot make that substitution on its own (no -use_fast_math here); it has to be done in
+// the source. Worth 1.5x on m2l_accumulate_kernel at p=10. Costs one extra (2p+1)^2 doubles of
+// __constant__ (3.5 KB at p=10) and shifts results by ~1 ulp per coefficient -- ~1e-12 even if it
+// accumulated linearly across the inner sum, far under the ~1e-10 energy tolerance.
+__constant__ double c_Ainv[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
 
 __device__ __forceinline__ double fact_dev(int k) { return c_fact[k]; }
 __device__ __forceinline__ double A_nm(int n, int m) { return c_A[n * n + (m + n)]; }
+__device__ __forceinline__ double A_inv(int n, int m) { return c_Ainv[n * n + (m + n)]; }
 
 // Host-side one-shot initializer for the constant tables.
 static void init_constant_tables() {
@@ -57,15 +67,23 @@ static void init_constant_tables() {
   h_fact[0] = 1.0;
   for (int k = 1; k <= FMM_FACT_MAX; ++k) h_fact[k] = h_fact[k - 1] * (double)k;
 
-  double h_A[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
+  double h_A   [(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
+  double h_Ainv[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
   for (int n = 0; n <= FMM_MAX_2P; ++n) {
     double sgn = (n & 1) ? -1.0 : 1.0;
-    for (int m = -n; m <= n; ++m)
-      h_A[n * n + (m + n)] = sgn / sqrt(h_fact[n - m] * h_fact[n + m]);
+    for (int m = -n; m <= n; ++m) {
+      double r = sqrt(h_fact[n - m] * h_fact[n + m]);
+      // 1/A_n^m is built straight from the factorials rather than as 1.0/h_A[..], so it carries
+      // one rounding instead of two. (-1)^n is its own inverse. Largest entry is sqrt((4p)!):
+      // 2.9e23 at p=10, 2.7e59 at p=20 -- nowhere near the 1.8e308 double max.
+      h_A   [n * n + (m + n)] = sgn / r;
+      h_Ainv[n * n + (m + n)] = sgn * r;
+    }
   }
 
   CUDA_CHECK(cudaMemcpyToSymbol(c_fact, h_fact, sizeof(h_fact)));
   CUDA_CHECK(cudaMemcpyToSymbol(c_A,    h_A,    sizeof(h_A)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_Ainv, h_Ainv, sizeof(h_Ainv)));
   initialized = true;
 }
 
@@ -223,10 +241,12 @@ __global__ void morton_kernel(int N, const double *__restrict__ pos,
 }
 
 // ====================================================================
-//  Kernel 3: reorder atoms into Morton order + per-leaf moment init
+//  Kernel 3: reorder atoms into Morton order + init leaf geometry
 // ====================================================================
-// Leaf expansion center is the atom position itself, so m^0 = q and m^k = 0 for |k|>=1.
-__global__ void reorder_kernel(int N, int comp,
+// No moments are written here: radix leaves are below the leaf-size frontier and carry
+// no moment slot. The multipole expansion is seeded directly at the frontier boxes by
+// src_p2m_kernel, from the atom range each box covers.
+__global__ void reorder_kernel(int N,
                                const int *__restrict__ order,
                                const double *__restrict__ pos_in,
                                const double *__restrict__ q_in,
@@ -234,7 +254,6 @@ __global__ void reorder_kernel(int N, int comp,
                                double *__restrict__ q_out,
                                double *__restrict__ nmin,
                                double *__restrict__ nmax,
-                               double *__restrict__ moments,
                                int *__restrict__ parent,
                                int *__restrict__ first,
                                int *__restrict__ last) {
@@ -253,10 +272,6 @@ __global__ void reorder_kernel(int N, int comp,
   // leaf covers the single atom i (in Morton-sorted order)
   first[leaf] = i;
   last[leaf]  = i;
-
-  double *m = moments + (size_t)leaf * comp;
-  m[0] = q;
-  for (int s = 1; s < comp; ++s) m[s] = 0.0;
 
   if (i == 0) parent[0] = -1;
 }
@@ -326,10 +341,13 @@ __device__ __forceinline__ int iabs(int a) { return a < 0 ? -a : a; }
 //   M_j^k += Σ_{n=0}^{j} Σ_{m=-n}^{n} O_{j-n}^{k-m} · i^{|k|-|m|-|k-m|}
 //                · A_n^m A_{j-n}^{k-m} / A_j^k · R_n^{-m}.
 // The phase i^{|k|-|m|-|k-m|} has an even exponent, hence the real (-1)^(e/2).
-template<int P>
-__device__ void m2m_shift(const double *__restrict__ O,
-                          double dx, double dy, double dz,
-                          double *__restrict__ M) {
+// ATOMIC=true accumulates with atomicAdd so several threads can share one destination
+// (used by the P2M, where a whole block cooperates on one box's expansion). The maths is
+// identical either way -- only the store differs.
+template<int P, bool ATOMIC>
+__device__ void m2m_shift_impl(const double *__restrict__ O,
+                               double dx, double dy, double dz,
+                               double *M) {
   cmplx R[nmom_sph(P)];
   solid_harmonics<double, true, nmom_sph(P), P>(P, dx, dy, dz, R);   // R_n^m of shift, n<=P
 
@@ -342,13 +360,28 @@ __device__ void m2m_shift(const double *__restrict__ O,
           if (km < -jn || km > jn) continue;         // O_{jn}^{km} needs |km| <= jn
           int e = k - iabs(m) - iabs(km);            // |k|=k (k>=0); e is even
           double ipow = ((e / 2) & 1) ? -1.0 : 1.0;
-          double coef = ipow * A_nm(n, m) * A_nm(jn, km) / A_nm(j, k);
+          double coef = ipow * A_nm(n, m) * A_nm(jn, km);
           acc = acc + (coef * (get_M(O, jn, km) * get_R(R, n, -m)));
         }
+      // 1/A_j^k does not depend on (n,m), so it scales the finished sum once instead of
+      // dividing every term -- see the c_Ainv note at the top of this file.
+      acc = A_inv(j, k) * acc;
       int s = sph_slot(j, k);
-      M[2 * s]     += acc.re;
-      M[2 * s + 1] += acc.im;
+      if (ATOMIC) {
+        atomicAdd(&M[2 * s],     acc.re);
+        atomicAdd(&M[2 * s + 1], acc.im);
+      } else {
+        M[2 * s]     += acc.re;
+        M[2 * s + 1] += acc.im;
+      }
     }
+}
+
+template<int P>
+__device__ __forceinline__ void m2m_shift(const double *__restrict__ O,
+                                          double dx, double dy, double dz,
+                                          double *__restrict__ M) {
+  m2m_shift_impl<P, false>(O, dx, dy, dz, M);
 }
 
 // Multipole-to-local translation T_ML (CGR'99 Thm 2.4, Eq. 17). Converts a source
@@ -373,10 +406,11 @@ __device__ __forceinline__ cmplx m2l_coeff(int p,
       int e  = iabs(mk) - k - iabs(m);           // |k|=k (k>=0); e is even
       double ipow  = ((e / 2) & 1) ? -1.0 : 1.0;
       double sgn_n = (n & 1) ? -1.0 : 1.0;       // 1/(-1)^n = (-1)^n
-      double coef  = ipow * sgn_n * A_nm(n, m) * A_nm(j, k) / A_nm(jn, mk);
+      double coef  = ipow * sgn_n * A_nm(n, m) * A_inv(jn, mk);
       acc = acc + (coef * (get_M(O, n, m) * get_R(S, jn, mk)));
     }
-  return acc;
+  // A_j^k does not depend on (n,m) -> applied once here rather than per term.
+  return A_nm(j, k) * acc;
 }
 
 // Local-to-local translation T_LL (CGR'99 Thm 2.5, Eq. 21). Shifts a parent local
@@ -403,64 +437,22 @@ __device__ void l2l_shift(const double *__restrict__ O,
           int e  = iabs(m) - iabs(mk) - k;           // |k|=k (k>=0); e is even
           double ipow = ((e / 2) & 1) ? -1.0 : 1.0;
           double sgn  = ((n + j) & 1) ? -1.0 : 1.0;  // 1/(-1)^{n+j}
-          double coef = ipow * sgn * A_nm(nj, mk) * A_nm(j, k) / A_nm(n, m);
+          double coef = ipow * sgn * A_nm(nj, mk) * A_inv(n, m);
           acc = acc + (coef * (get_M(O, n, m) * get_R(R, nj, mk)));
         }
+      // A_j^k does not depend on (n,m) -> applied once here rather than per term.
+      acc = A_nm(j, k) * acc;
       int s = sph_slot(j, k);
       L[2 * s]     += acc.re;
       L[2 * s + 1] += acc.im;
     }
 }
 
-template<int P>
-__global__ void summarize_kernel(int N,
-                                 const int *__restrict__ left,
-                                 const int *__restrict__ right,
-                                 const int *__restrict__ parent,
-                                 double *__restrict__ nmin,
-                                 double *__restrict__ nmax,
-                                 double *__restrict__ moments,
-                                 int *__restrict__ flags) {
-  constexpr int comp = comp_sph(P);
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= N) return;
-
-  int node = parent[(N - 1) + i];
-  while (node != -1) {
-    __threadfence();
-    if (atomicAdd(&flags[node], 1) == 0) return;
-
-    int lc = left[node], rc = right[node];
-
-    double mnx = fmin(nmin[3*lc],   nmin[3*rc]);
-    double mny = fmin(nmin[3*lc+1], nmin[3*rc+1]);
-    double mnz = fmin(nmin[3*lc+2], nmin[3*rc+2]);
-    double mxx = fmax(nmax[3*lc],   nmax[3*rc]);
-    double mxy = fmax(nmax[3*lc+1], nmax[3*rc+1]);
-    double mxz = fmax(nmax[3*lc+2], nmax[3*rc+2]);
-    nmin[3*node] = mnx; nmin[3*node+1] = mny; nmin[3*node+2] = mnz;
-    nmax[3*node] = mxx; nmax[3*node+1] = mxy; nmax[3*node+2] = mxz;
-
-    double cx = 0.5 * (mnx + mxx);
-    double cy = 0.5 * (mny + mxy);
-    double cz = 0.5 * (mnz + mxz);
-
-    double *mp = moments + (size_t)node * comp;
-    for (int s = 0; s < comp; ++s) mp[s] = 0.0;
-
-    #pragma unroll
-    for (int s_child = 0; s_child < 2; ++s_child) {
-      int c = (s_child == 0) ? lc : rc;
-      double ccx = 0.5 * (nmin[3*c]   + nmax[3*c]);
-      double ccy = 0.5 * (nmin[3*c+1] + nmax[3*c+1]);
-      double ccz = 0.5 * (nmin[3*c+2] + nmax[3*c+2]);
-      const double *mc = moments + (size_t)c * comp;
-      m2m_shift<P>(mc, ccx - cx, ccy - cy, ccz - cz, mp);
-    }
-
-    node = parent[node];
-  }
-}
+// NOTE: the old fused summarize_kernel (AABB + dense per-node M2M) was removed when the
+// source moments moved onto box slots. Its AABB half lives on as summarize_aabb_kernel
+// below; its M2M half is now src_p2m_kernel + src_m2m_kernel, which write through
+// d_box_slot. Do not reintroduce a node-indexed moment writer -- d_moments is only
+// n_box*comp long, so raw-node-id indexing would run off the end.
 
 // ====================================================================
 //  Target-tree build kernels (geometry only; clones of the atom-tree
@@ -763,6 +755,31 @@ __global__ void box_slot_kernel(int n_nodes, const int *__restrict__ flag,
   box_depth[v] = box ? depth[v] : -1;
 }
 
+// Bucket the non-root box nodes by depth so each L2L level launches exactly the threads it
+// needs. Same counting sort as fmm_build_p2p_csr, over max_depth+1 buckets instead of n_nodes.
+// box_depth[v] is the node's depth if it is a box node, else -1; depth 0 is the root, which no
+// L2L level ever touches.
+__global__ void l2l_count_kernel(int n_nodes, const int *__restrict__ box_depth,
+                                 int *__restrict__ cnt) {
+  int v = blockIdx.x * blockDim.x + threadIdx.x;
+  if (v >= n_nodes) return;
+  int d = box_depth[v];
+  if (d >= 1) atomicAdd(&cnt[d], 1);
+}
+
+// Scatter each non-root box node into its depth's segment. Intra-level order is
+// non-deterministic (atomic fill) and that is fine here: every node writes only its OWN d_local
+// slot, so no two threads share an output and no summation order changes -- unlike the P2P CSR,
+// this stays bit-identical to the old level-synchronous sweep.
+__global__ void l2l_scatter_kernel(int n_nodes, const int *__restrict__ box_depth,
+                                   const int *__restrict__ off, int *__restrict__ fill,
+                                   int *__restrict__ nodes) {
+  int v = blockIdx.x * blockDim.x + threadIdx.x;
+  if (v >= n_nodes) return;
+  int d = box_depth[v];
+  if (d >= 1) nodes[off[d] + atomicAdd(&fill[d], 1)] = v;
+}
+
 // ====================================================================
 //  Shared LBVH build stages 1-2, used by BOTH the source (fmm_build_atom_tree)
 //  and target (build_target_tree) builders: scene AABB -> Morton codes ->
@@ -904,12 +921,16 @@ static void tt_downward_storage(fmm_target_tree *tt, int tpb) {
   const int nn = tt->n_nodes;
   int fr_blocks = (nn + tpb - 1) / tpb;
 
-  CUDA_CHECK(cudaMalloc(&tt->d_depth,    nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&tt->d_box_slot, nn * sizeof(int)));
-  node_depth_kernel<<<fr_blocks, tpb>>>(nn, tt->d_parent, tt->d_depth);
+
+  // Node depth is only an input to box_slot_kernel and to the depth bucketing below, so it stays
+  // a build-time temporary (as it already is on the source side) rather than an n_nodes array
+  // living for the whole run.
+  int *d_depth, *d_flag, *d_pref, *d_bdepth;
+  CUDA_CHECK(cudaMalloc(&d_depth,  nn * sizeof(int)));
+  node_depth_kernel<<<fr_blocks, tpb>>>(nn, tt->d_parent, d_depth);
   CUDA_CHECK(cudaGetLastError());
 
-  int *d_flag, *d_pref, *d_bdepth;
   CUDA_CHECK(cudaMalloc(&d_flag,   nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_pref,   nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_bdepth, nn * sizeof(int)));
@@ -921,7 +942,7 @@ static void tt_downward_storage(fmm_target_tree *tt, int tpb) {
     CUDA_CHECK(cudaMalloc(&d_t, tb));
     cub::DeviceScan::ExclusiveSum(d_t, tb, d_flag, d_pref, nn);
     cudaFree(d_t); }
-  box_slot_kernel<<<fr_blocks, tpb>>>(nn, d_flag, d_pref, tt->d_depth,
+  box_slot_kernel<<<fr_blocks, tpb>>>(nn, d_flag, d_pref, d_depth,
                                       tt->d_box_slot, d_bdepth);
   CUDA_CHECK(cudaGetLastError());
   { int last_pref, last_flag;                  // n_box = pref[nn-1] + flag[nn-1]
@@ -935,7 +956,43 @@ static void tt_downward_storage(fmm_target_tree *tt, int tpb) {
     cub::DeviceReduce::Max(d_t, tb, d_bdepth, d_md, nn);
     CUDA_CHECK(cudaMemcpy(&tt->max_depth, d_md, sizeof(int), cudaMemcpyDeviceToHost));
     cudaFree(d_t); cudaFree(d_md); }
-  cudaFree(d_flag); cudaFree(d_pref); cudaFree(d_bdepth);
+
+  // Depth-bucketed L2L worklist. Buckets are 0..max_depth, plus one trailing slot so the
+  // exclusive scan leaves the grand total in off[nlev] with no special-casing. Bucket 0 (the
+  // root) stays empty by construction.
+  { const int nlev = tt->max_depth + 1;
+    int *d_cnt, *d_fill, *d_off;
+    CUDA_CHECK(cudaMalloc(&d_cnt,  (nlev + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_fill, (nlev + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_off,  (nlev + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_cnt,  0, (nlev + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_fill, 0, (nlev + 1) * sizeof(int)));
+
+    l2l_count_kernel<<<fr_blocks, tpb>>>(nn, d_bdepth, d_cnt);
+    CUDA_CHECK(cudaGetLastError());
+    { void *d_t = nullptr; size_t tb = 0;
+      cub::DeviceScan::ExclusiveSum(d_t, tb, d_cnt, d_off, nlev + 1);
+      CUDA_CHECK(cudaMalloc(&d_t, tb));
+      cub::DeviceScan::ExclusiveSum(d_t, tb, d_cnt, d_off, nlev + 1);
+      cudaFree(d_t); }
+
+    tt->h_l2l_off = new int[nlev + 1];
+    CUDA_CHECK(cudaMemcpy(tt->h_l2l_off, d_off, (nlev + 1) * sizeof(int),
+                          cudaMemcpyDeviceToHost));
+    // Every box node except the root lands in exactly one bucket, so the buckets must account
+    // for n_box-1 nodes. A mismatch means the bucketed worklist and the old depth/box_slot
+    // predicate disagree, i.e. the L2L sweep would silently skip (or double-shift) nodes.
+    int n_l2l = tt->h_l2l_off[nlev];
+    if (n_l2l != tt->n_box - 1)
+      fprintf(stderr, "[fmm] L2L bucket count %d != n_box-1 (%d)\n", n_l2l, tt->n_box - 1);
+    CUDA_CHECK(cudaMalloc(&tt->d_l2l_nodes, (size_t)(n_l2l > 0 ? n_l2l : 1) * sizeof(int)));
+    if (n_l2l > 0) {
+      l2l_scatter_kernel<<<fr_blocks, tpb>>>(nn, d_bdepth, d_off, d_fill, tt->d_l2l_nodes);
+      CUDA_CHECK(cudaGetLastError());
+    }
+    cudaFree(d_cnt); cudaFree(d_fill); cudaFree(d_off); }
+
+  cudaFree(d_depth); cudaFree(d_flag); cudaFree(d_pref); cudaFree(d_bdepth);
 
   CUDA_CHECK(cudaMalloc(&tt->d_local, (size_t)tt->n_box * tt->comp * sizeof(double)));
 }
@@ -953,7 +1010,8 @@ static void build_target_tree(int num_pts, const double *d_pts, int leaf_size, i
   tt->n_p2p     = 0;
   tt->d_pos = tt->d_min = tt->d_max = tt->d_local = nullptr;
   tt->d_orig = tt->d_left = tt->d_right = tt->d_parent = nullptr;
-  tt->d_first = tt->d_last = tt->d_leaf_nodes = tt->d_depth = tt->d_box_slot = nullptr;
+  tt->d_first = tt->d_last = tt->d_leaf_nodes = tt->d_box_slot = nullptr;
+  tt->d_l2l_nodes = tt->h_l2l_off = nullptr;
   tt->d_p2p_off = tt->d_p2p_val = nullptr;
   if (num_pts <= 0) return;
 
@@ -982,7 +1040,8 @@ static void free_target_tree(fmm_target_tree *tt) {
   cudaFree(tt->d_left);   cudaFree(tt->d_right);  cudaFree(tt->d_parent);
   cudaFree(tt->d_first);  cudaFree(tt->d_last);
   cudaFree(tt->d_leaf_nodes);
-  cudaFree(tt->d_local);  cudaFree(tt->d_depth);  cudaFree(tt->d_box_slot);
+  cudaFree(tt->d_local);  cudaFree(tt->d_box_slot);
+  cudaFree(tt->d_l2l_nodes);  delete[] tt->h_l2l_off;
   cudaFree(tt->d_p2p_off); cudaFree(tt->d_p2p_val);
 }
 
@@ -1061,7 +1120,7 @@ __global__ void m2l_accumulate_kernel(fmm_tree src, fmm_target_tree tgt,
   cmplx S[nmom_sph(2 * P)];
   // t = (source center) - (target center)  (Eq.17 sign convention) wdym sign convention Eq 17?
   solid_harmonics<double, false, nmom_sph(2*P), 2*P>(2*P, Bcx-Acx, Bcy-Acy, Bcz-Acz, S);
-  const double *O = src.d_moments + (size_t)B * COMP_DBL;
+  const double *O = src.d_moments + (size_t)src.d_box_slot[B] * COMP_DBL;   // B is always a box node
   double *L = tgt.d_local + (size_t)tgt.d_box_slot[A] * COMP_DBL;   // A is always a box node
   for (int j = 0; j <= P; ++j)
     for (int k = 0; k <= j; ++k) {
@@ -1072,15 +1131,19 @@ __global__ void m2l_accumulate_kernel(fmm_tree src, fmm_target_tree tgt,
     }
 }
 
-// One level of the top-down L2L sweep: every node v at depth==lvl shifts its parent's
-// (already complete) local expansion to v's center and adds it into d_local[v]. Run for
-// lvl = 1..max_depth so each node sees a finalized parent. Distinct v -> no write races.
+// One level of the top-down L2L sweep: nodes[0..n) are this level's box nodes, each shifting its
+// parent's (already complete) local expansion to its own center and adding it into d_local[v].
+// Called for lvl = 1..max_depth so each node sees a finalized parent. Distinct v -> no write
+// races. The depth and box-slot tests were resolved once at tree-build time (tt_downward_storage),
+// exactly as d_leaf_nodes pre-resolves the frontier test for l2p_p2p_kernel -- so every lane
+// here has real work, instead of one survivor per warp scanning all n_nodes.
 template<int P>
-__global__ void l2l_level_kernel(fmm_target_tree tgt, int lvl) {
-  int v = blockIdx.x * blockDim.x + threadIdx.x;
-  if (v >= tgt.n_nodes || tgt.d_depth[v] != lvl) return;
-  int sv = tgt.d_box_slot[v];
-  if (sv < 0) return;                                   // only box nodes carry locals
+__global__ void l2l_level_kernel(fmm_target_tree tgt,
+                                 const int *__restrict__ nodes, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  int v  = nodes[i];
+  int sv = tgt.d_box_slot[v];                           // >= 0 by construction
   int u = tgt.d_parent[v];
   int su = tgt.d_box_slot[u];                           // parent of a non-root box is a box
   constexpr int COMP_DBL = comp_sph(P);
@@ -1171,9 +1234,15 @@ static void fmm_translations(const fmm_tree &src, fmm_target_tree &tt,
     m2l_accumulate_kernel<P><<<g, tpb>>>(src, tt, d_m2l, n_m2l);
     CUDA_CHECK(cudaGetLastError());
   }
-  int tpb = 256, g = (tt.n_nodes + tpb - 1) / tpb;
+  // Grid is sized by each level's actual node count, not by n_nodes. tpb is smaller than the old
+  // 256 because the levels are now small: at 64 a mid-size level still spreads across many SMs
+  // instead of landing on two or three blocks.
+  if (!tt.h_l2l_off) return;
+  const int tpb = 64;
   for (int lvl = 1; lvl <= tt.max_depth; ++lvl) {
-    l2l_level_kernel<P><<<g, tpb>>>(tt, lvl);
+    int lo = tt.h_l2l_off[lvl], n = tt.h_l2l_off[lvl + 1] - lo;
+    if (n <= 0) continue;
+    l2l_level_kernel<P><<<(n + tpb - 1) / tpb, tpb>>>(tt, tt.d_l2l_nodes + lo, n);
     CUDA_CHECK(cudaGetLastError());
   }
 }
@@ -1254,13 +1323,119 @@ static void fmm_build_local(const fmm_tree &src, fmm_target_tree &tt, double the
   cudaFree(d_m2l);
 }
 
+// ====================================================================
+//  P2M: seed each frontier box from the atoms it covers.
+// ====================================================================
+// One thread per frontier box, so the box's moment slot is owned exclusively -- no
+// atomics, no races. Each box holds <= leaf_size atoms.
+//
+// The per-atom contribution is computed with m2m_shift from a stack monopole
+// {q, 0, 0, ...} rather than a direct solid-harmonic P2M. That IS the same operation
+// (an atom's expansion about its own position is a pure monopole) and it inherits the
+// existing sign/conjugation conventions verbatim, which removes the one place this
+// change could plausibly get the physics wrong. A specialised P2M -- the O sum collapses
+// to the single (n,m)=(j,k) term -- would be faster and is worth doing later, but only
+// once this is validated against the analytic Kirkwood reference.
+// ONE BLOCK PER FRONTIER BOX, one thread per atom within it. Parallelism has to come
+// from the atoms, not the boxes: at leaf_size=256 a 21k-atom system has only ~83 frontier
+// boxes, so a thread-per-box launch runs ~83-wide and is effectively serial.
+// Threads accumulate into a shared-memory expansion with atomicAdd, then write it out
+// once -- so the O(comp) global traffic happens per box, not per atom.
+template<int P>
+__global__ void src_p2m_kernel(fmm_tree src) {
+  constexpr int comp = comp_sph(P);
+  __shared__ double Ms[comp];
+
+  const int i = blockIdx.x;                // one block per frontier box
+  if (i >= src.n_leaves) return;           // whole block returns together
+
+  int A    = src.d_leaf_nodes[i];
+  int slot = src.d_box_slot[A];            // a frontier node is always a box -> slot >= 0
+
+  // expansion center = box AABB center (raw node id: only the moment array is slotted)
+  double cx = 0.5 * (src.d_min[3*A]   + src.d_max[3*A]);
+  double cy = 0.5 * (src.d_min[3*A+1] + src.d_max[3*A+1]);
+  double cz = 0.5 * (src.d_min[3*A+2] + src.d_max[3*A+2]);
+
+  for (int s = threadIdx.x; s < comp; s += blockDim.x) Ms[s] = 0.0;
+  __syncthreads();
+
+  double O[comp];                          // stack monopole; only slot (0,0) is nonzero
+  for (int s = 1; s < comp; ++s) O[s] = 0.0;
+
+  const int first = src.d_first[A], last = src.d_last[A];
+  for (int a = first + threadIdx.x; a <= last; a += blockDim.x) {
+    O[0] = src.d_q[a];                     // O[1] (imaginary part) stays 0
+    m2m_shift_impl<P, true>(O,
+                            src.d_pos[3*a]   - cx,
+                            src.d_pos[3*a+1] - cy,
+                            src.d_pos[3*a+2] - cz,
+                            Ms);
+  }
+  __syncthreads();
+
+  double *M = src.d_moments + (size_t)slot * comp;
+  for (int s = threadIdx.x; s < comp; s += blockDim.x) M[s] = Ms[s];
+}
+
+// ====================================================================
+//  M2M: upward sweep over box ancestors only.
+// ====================================================================
+// Same flag handshake as summarize_kernel, but seeded at the frontier boxes (already
+// filled by P2M) instead of at radix leaves, and moments-only -- the AABBs were
+// finalised earlier by summarize_aabb_kernel over the full tree.
+//
+// Every non-frontier box receives exactly two arrivals, one per child: a frontier child
+// contributes its seeded thread, an interior child contributes its handshake winner.
+// Both children of a non-frontier box ARE boxes -- count(v) > leaf_size makes each
+// child's parent-count exceed leaf_size, which is mark_box_kernel's predicate -- so
+// d_box_slot[lc] and d_box_slot[rc] are never -1.
+//
+// flags is indexed by BOX SLOT, so it is n_box ints (~700 KB) rather than n_nodes
+// (~114 MB at 14M atoms).
+template<int P>
+__global__ void src_m2m_kernel(fmm_tree src, int *__restrict__ flags) {
+  constexpr int comp = comp_sph(P);
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= src.n_leaves) return;
+
+  int node = src.d_parent[src.d_leaf_nodes[i]];
+  while (node != -1) {
+    __threadfence();
+    int sn = src.d_box_slot[node];               // ancestor of a box is a box
+    if (atomicAdd(&flags[sn], 1) == 0) return;   // first child to arrive -> die
+
+    int lc = src.d_left[node], rc = src.d_right[node];
+
+    double cx = 0.5 * (src.d_min[3*node]   + src.d_max[3*node]);
+    double cy = 0.5 * (src.d_min[3*node+1] + src.d_max[3*node+1]);
+    double cz = 0.5 * (src.d_min[3*node+2] + src.d_max[3*node+2]);
+
+    double *M = src.d_moments + (size_t)sn * comp;
+    for (int s = 0; s < comp; ++s) M[s] = 0.0;
+
+    #pragma unroll
+    for (int s_child = 0; s_child < 2; ++s_child) {
+      int c = (s_child == 0) ? lc : rc;
+      double ccx = 0.5 * (src.d_min[3*c]   + src.d_max[3*c]);
+      double ccy = 0.5 * (src.d_min[3*c+1] + src.d_max[3*c+1]);
+      double ccz = 0.5 * (src.d_min[3*c+2] + src.d_max[3*c+2]);
+      const double *mc = src.d_moments + (size_t)src.d_box_slot[c] * comp;
+      m2m_shift<P>(mc, ccx - cx, ccy - cy, ccz - cz, M);
+    }
+
+    node = src.d_parent[node];
+  }
+}
+
 // ---- source-tree build stages (see fmm_build_atom_tree for the top-level flow) ----
 
-// Allocate geometry, topology, and per-node moment arrays (uses t->N, t->n_nodes, t->comp).
+// Allocate geometry and topology. d_moments is NOT allocated here -- it is sized
+// n_box*comp and so has to wait until the box set is known, exactly as tt_alloc_nodes
+// defers d_local to tt_downward_storage.
 static void src_alloc_nodes(fmm_tree *t) {
   const int N    = t->N;
   const int nn   = t->n_nodes;
-  const int comp = t->comp;
   CUDA_CHECK(cudaMalloc(&t->d_pos,     3 * N  * sizeof(double)));
   CUDA_CHECK(cudaMalloc(&t->d_q,           N  * sizeof(double)));
   CUDA_CHECK(cudaMalloc(&t->d_min,     3 * nn * sizeof(double)));
@@ -1270,53 +1445,165 @@ static void src_alloc_nodes(fmm_tree *t) {
   CUDA_CHECK(cudaMalloc(&t->d_parent,      nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&t->d_first,       nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&t->d_last,        nn * sizeof(int)));
-  CUDA_CHECK(cudaMalloc(&t->d_moments,
-                        (size_t)nn * comp * sizeof(double)));
 }
 
-// Stage 3: reorder atoms into Morton order + initialize leaf nodes (incl. moments).
+// Stage 3: reorder atoms into Morton order + initialize leaf geometry.
 static void src_reorder(fmm_tree *t, int tpb, const int *d_idx_sorted,
                         const double *d_atoms, const double *d_charges) {
   int mt_blocks = (t->N + tpb - 1) / tpb;
-  reorder_kernel<<<mt_blocks, tpb>>>(t->N, t->comp, d_idx_sorted, d_atoms, d_charges,
+  reorder_kernel<<<mt_blocks, tpb>>>(t->N, d_idx_sorted, d_atoms, d_charges,
                                      t->d_pos, t->d_q,
                                      t->d_min, t->d_max,
-                                     t->d_moments, t->d_parent,
+                                     t->d_parent,
                                      t->d_first, t->d_last);
   CUDA_CHECK(cudaGetLastError());
 }
 
-// Stages 4-5: internal nodes (Karras) + bottom-up multipole summarize (M2M).
+// Box storage for the SOURCE tree: mark the leaf-size frontier and its ancestors, build
+// the compact node->slot map, compact the frontier list, and allocate d_moments at
+// n_box*comp. Mirrors tt_downward_storage + tt_frontier; duplicated rather than shared
+// because those write target-typed fields and are currently correct.
+//
+// MUST use t->leaf_size UNCLAMPED. build_target_tree clamps its own leaf size to 256
+// (see the tleaf locals in fmm_polarization_energy/fmm_ionic_energy); using that value
+// here would make the box set disagree with fmm_pair_kernel's descent stop and index
+// slot -1.
+static void src_box_storage(fmm_tree *t, int tpb) {
+  const int N  = t->N;
+  const int nn = t->n_nodes;
+  int fr_blocks = (nn + tpb - 1) / tpb;
+
+  int *d_flag, *d_pref, *d_depth, *d_bdepth;
+  CUDA_CHECK(cudaMalloc(&d_flag,   nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_pref,   nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_depth,  nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_bdepth, nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&t->d_box_slot, nn * sizeof(int)));
+
+  // depth/box_depth are only inputs/outputs of the shared box_slot_kernel; the source
+  // sweep is handshake-driven (not level-synchronous) so neither is kept.
+  node_depth_kernel<<<fr_blocks, tpb>>>(nn, t->d_parent, d_depth);
+  CUDA_CHECK(cudaGetLastError());
+  mark_box_kernel<<<fr_blocks, tpb>>>(nn, t->leaf_size, t->d_parent,
+                                      t->d_first, t->d_last, d_flag);
+  CUDA_CHECK(cudaGetLastError());
+  { void *d_t = nullptr; size_t tb = 0;        // exclusive prefix sum of the box flags
+    cub::DeviceScan::ExclusiveSum(d_t, tb, d_flag, d_pref, nn);
+    CUDA_CHECK(cudaMalloc(&d_t, tb));
+    cub::DeviceScan::ExclusiveSum(d_t, tb, d_flag, d_pref, nn);
+    cudaFree(d_t); }
+  box_slot_kernel<<<fr_blocks, tpb>>>(nn, d_flag, d_pref, d_depth,
+                                      t->d_box_slot, d_bdepth);
+  CUDA_CHECK(cudaGetLastError());
+  { int last_pref, last_flag;                  // n_box = pref[nn-1] + flag[nn-1]
+    CUDA_CHECK(cudaMemcpy(&last_pref, d_pref + (nn-1), sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&last_flag, d_flag + (nn-1), sizeof(int), cudaMemcpyDeviceToHost));
+    t->n_box = last_pref + last_flag; }
+  cudaFree(d_flag); cudaFree(d_pref); cudaFree(d_depth); cudaFree(d_bdepth);
+
+  // Frontier list: seeds both the P2M and the upward M2M sweep.
+  int *d_frontier, *d_ids, *d_num;
+  CUDA_CHECK(cudaMalloc(&d_frontier, nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_ids,      nn * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_num,           sizeof(int)));
+  mark_frontier_kernel<<<fr_blocks, tpb>>>(nn, N, t->leaf_size,
+                                           t->d_first, t->d_last, t->d_parent, d_frontier);
+  CUDA_CHECK(cudaGetLastError());
+  iota_kernel<<<fr_blocks, tpb>>>(nn, d_ids);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaMalloc(&t->d_leaf_nodes, nn * sizeof(int)));
+  { void *d_t = nullptr; size_t sb = 0;
+    cub::DeviceSelect::Flagged(d_t, sb, d_ids, d_frontier, t->d_leaf_nodes, d_num, nn);
+    CUDA_CHECK(cudaMalloc(&d_t, sb));
+    cub::DeviceSelect::Flagged(d_t, sb, d_ids, d_frontier, t->d_leaf_nodes, d_num, nn);
+    cudaFree(d_t); }
+  CUDA_CHECK(cudaMemcpy(&t->n_leaves, d_num, sizeof(int), cudaMemcpyDeviceToHost));
+  cudaFree(d_frontier); cudaFree(d_ids); cudaFree(d_num);
+
+  CUDA_CHECK(cudaMalloc(&t->d_moments, (size_t)t->n_box * t->comp * sizeof(double)));
+  CUDA_CHECK(cudaMemset(t->d_moments, 0, (size_t)t->n_box * t->comp * sizeof(double)));
+}
+
+// Stages 4-5: internal nodes (Karras) + bottom-up AABB propagation over the FULL tree.
+// The AABB half is split out of the old fused summarize_kernel because both of the
+// stages that follow depend on it: mark_box_kernel needs final d_first/d_last, and
+// P2M/M2M take their expansion centers from the AABBs.
 // Caller guards on t->N > 1.
-static void src_internal_m2m(fmm_tree *t, int tpb, const uint64_t *d_codes_sorted, int p) {
+static void src_internal_aabb(fmm_tree *t, int tpb, const uint64_t *d_codes_sorted) {
   const int N  = t->N;
   const int nn = t->n_nodes;
   int in_blocks = (N - 1 + tpb - 1) / tpb;
   int mt_blocks = (N + tpb - 1) / tpb;
-  // 4. Build internal nodes (Karras)
+
   build_internal_kernel<<<in_blocks, tpb>>>(N, d_codes_sorted,
                                             t->d_left, t->d_right, t->d_parent,
                                             t->d_first, t->d_last);
   CUDA_CHECK(cudaGetLastError());
 
-  // 5. Bottom-up multipole summarize
   int *d_flags;
   CUDA_CHECK(cudaMalloc(&d_flags, nn * sizeof(int)));
   CUDA_CHECK(cudaMemset(d_flags, 0, nn * sizeof(int)));
-  switch (p) {
-    case 1: summarize_kernel<1 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-    case 2: summarize_kernel<2 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-    case 3: summarize_kernel<3 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-    case 4: summarize_kernel<4 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-    case 5: summarize_kernel<5 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-    case 6: summarize_kernel<6 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-    case 7: summarize_kernel<7 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-    case 8: summarize_kernel<8 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-    case 9: summarize_kernel<9 ><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-    default: summarize_kernel<10><<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent, t->d_min, t->d_max, t->d_moments, d_flags); break;
-  }
+  summarize_aabb_kernel<<<mt_blocks, tpb>>>(N, t->d_left, t->d_right, t->d_parent,
+                                            t->d_min, t->d_max, d_flags);
   CUDA_CHECK(cudaGetLastError());
   cudaFree(d_flags);
+}
+
+// Stages 6-8: box set + compact moment allocation, P2M at the frontier, M2M upward.
+// Runs for every N >= 1 (unlike stages 4-5): at N == 1 the single node is both root and
+// frontier box, so it gets its moments from P2M and the M2M loop body never executes.
+static void src_box_moments(fmm_tree *t, int tpb, int p) {
+  src_box_storage(t, tpb);
+
+  if (t->n_leaves <= 0) return;
+
+  // P2M: grid = one block PER BOX, block = threads over that box's atoms. Parallelism has
+  // to come from the atoms; a flat thread-per-box launch runs only n_leaves wide (~83 for
+  // 6VYB at leaf_size=256) and is effectively serial.
+  //
+  // Block size follows leaf_size so each thread owns one atom -- rounded up to a whole
+  // warp, and capped at 256 (above that threads stride, which is fine). n_leaves scales
+  // as N/leaf_size, so n_leaves * p2m_blk ~= N either way: full atom-level parallelism at
+  // leaf_size=32 (the default) and at 256 (what the H1N1 runs use).
+  int p2m_blk = ((t->leaf_size + 31) / 32) * 32;
+  if (p2m_blk < 32)  p2m_blk = 32;
+  if (p2m_blk > 256) p2m_blk = 256;
+
+  switch (p) {
+    case 1: src_p2m_kernel<1 ><<<t->n_leaves, p2m_blk>>>(*t); break;
+    case 2: src_p2m_kernel<2 ><<<t->n_leaves, p2m_blk>>>(*t); break;
+    case 3: src_p2m_kernel<3 ><<<t->n_leaves, p2m_blk>>>(*t); break;
+    case 4: src_p2m_kernel<4 ><<<t->n_leaves, p2m_blk>>>(*t); break;
+    case 5: src_p2m_kernel<5 ><<<t->n_leaves, p2m_blk>>>(*t); break;
+    case 6: src_p2m_kernel<6 ><<<t->n_leaves, p2m_blk>>>(*t); break;
+    case 7: src_p2m_kernel<7 ><<<t->n_leaves, p2m_blk>>>(*t); break;
+    case 8: src_p2m_kernel<8 ><<<t->n_leaves, p2m_blk>>>(*t); break;
+    case 9: src_p2m_kernel<9 ><<<t->n_leaves, p2m_blk>>>(*t); break;
+    default: src_p2m_kernel<10><<<t->n_leaves, p2m_blk>>>(*t); break;
+  }
+  CUDA_CHECK(cudaGetLastError());
+
+  // M2M stays thread-per-frontier-box: there are only ~n_leaves interior boxes in total
+  // and each walk is ~log(N) deep, so it is nowhere near the bottleneck.
+  int lf_blocks = (t->n_leaves + tpb - 1) / tpb;
+
+  int *d_bflags;
+  CUDA_CHECK(cudaMalloc(&d_bflags, t->n_box * sizeof(int)));
+  CUDA_CHECK(cudaMemset(d_bflags, 0, t->n_box * sizeof(int)));
+  switch (p) {
+    case 1: src_m2m_kernel<1 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    case 2: src_m2m_kernel<2 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    case 3: src_m2m_kernel<3 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    case 4: src_m2m_kernel<4 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    case 5: src_m2m_kernel<5 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    case 6: src_m2m_kernel<6 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    case 7: src_m2m_kernel<7 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    case 8: src_m2m_kernel<8 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    case 9: src_m2m_kernel<9 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    default: src_m2m_kernel<10><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+  }
+  CUDA_CHECK(cudaGetLastError());
+  cudaFree(d_bflags);
 }
 
 // ========================== public C API ==========================
@@ -1352,6 +1639,8 @@ void fmm_build_atom_tree(int num_atoms,
     t->d_pos = t->d_q = t->d_min = t->d_max = t->d_moments = nullptr;
     t->d_left = t->d_right = t->d_parent = nullptr;
     t->d_first = t->d_last = nullptr;
+    t->d_box_slot = t->d_leaf_nodes = nullptr;
+    t->n_box = t->n_leaves = 0;
     return;
   }
 
@@ -1364,8 +1653,9 @@ void fmm_build_atom_tree(int num_atoms,
   src_reorder(t, tpb, d_idx_sorted, d_atoms, d_charges);                 // stage 3
   cudaFree(d_idx_sorted);
 
-  if (t->N > 1) src_internal_m2m(t, tpb, d_codes_sorted, p);             // stages 4-5
+  if (t->N > 1) src_internal_aabb(t, tpb, d_codes_sorted);               // stages 4-5
   cudaFree(d_codes_sorted);
+  src_box_moments(t, tpb, p);                                            // stages 6-8
 
   CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -1376,6 +1666,7 @@ void fmm_free_tree(fmm_tree *t) {
   cudaFree(t->d_min);     cudaFree(t->d_max);
   cudaFree(t->d_left);    cudaFree(t->d_right);   cudaFree(t->d_parent);
   cudaFree(t->d_first);   cudaFree(t->d_last);
+  cudaFree(t->d_box_slot); cudaFree(t->d_leaf_nodes);
   cudaFree(t->d_moments);
   delete t;
 }

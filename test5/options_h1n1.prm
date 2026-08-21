@@ -1,0 +1,34 @@
+[input]
+filetype = pqr
+filename = H1N1.pqr
+[../]
+
+[mesh]
+mesh_shape = 0
+perfil1 = 0.95
+perfil2 = 0.2
+scale   = 0.769231
+[../]
+
+[surface]
+number_of_threads = 64
+[../]
+
+[model]
+bc_type = 1
+molecular_dielectric_constant = 2
+solvent_dielectric_constant   = 80
+ionic_strength                = 0.145
+T                             = 298.15
+calc_energy    = 2
+calc_coulombic = 1
+[../]
+
+[algorithm]
+linear_solver       = amgx
+amgx_config         = amgx_pcgf_amg_poly_cluster.json
+energy_method       = 2
+fmm_mac             = 0.4
+fmm_multipole_order = 10
+fmm_leaf_size       = 256
+[../]
