@@ -13,11 +13,42 @@
 \section{BIMPP}
 \label{sec:implementation-bimpp}
 
+Though it is just a dependency of NGPB, some systems of BIMPP were in dire need of optimization.
+These optimizations ended up being CPU only.
+I created a private fork of it, which I used instead of the special NGPB release.
+
 \subsection{sparse\_matrix\_template}
 \label{sec:implementation-bimpp-sparse-matrix-template}
 
+BIMPP stores both local and non-local values of the distributed sparse matrix in a \texttt{std::vector} of \texttt{std::map<int, double>}.
+In \texttt{x86\_64} \texttt{libstdc++}, \texttt{std::map} is implemented using a red-black tree, whose node is comprised of 3 pointers, a color enum, and a \texttt{std::pair}.
+The three pointers exist for the parent, left and right at take up 24 Bytes.
+The color enum, including padding takes up 8 Bytes.
+In the context of the distributed sparse matrix, the \texttt{std::pair} is a tuple of type \texttt{<int const, double>}.
+So 4 Bytes for the integer, plus 4 Bytes for padding and 8 Bytes for the double comes out to 16 Bytes.
+All together this totals 48 Bytes.
+
+In comes \texttt{flat\_map} from the already reference \texttt{boost} library.
+It is a vector based implementation rather than a tree based one.
+Its memory footprint is just 24 B, essentially half.
+This change is also minimally invasive, only changing an underlying data type in the \texttt{sparse\_matrix\_template} of BIMPP.
+
+This does not solve the issue of the global row being replicated on each rank.
+For this a more sophisticated communication patter needs to be used, as was demonstrated in the SHIRO paper \cite{zhuang2025shiro}.
+
 \subsection{bim3a\_solution\_with\_ghosts}
 \label{sec:implementation-bimpp-bim3a-solution-with-ghosts}
+
+As explained before in \ref{sec:nextgenpb-libraries-bimpp-bim3a-solution-with-ghosts}, this function is used throughout NGPB because it handles the exchange of non-local- and ghost values through a lot of expensive calculations.
+First it updates every quadrant and its neighbors with \texttt{quadrant\_t::update()} hidden inside \texttt{quadrant\_iterator::operator++()}, without skipping those that have been already updated as the neighbor.
+This also computes the physical vertex positions through \texttt{p8est\_qcoord\_to\_vertex}, which go completely unused.
+
+Turns out, this is not necessary at all. 
+\texttt{p4est} already stores this information.
+All I did is reuse it.
+To get all the non-owned nodes reference by the local ones, I referenced \texttt{lnodes->nonlocal\_nodes}.
+For the ghost layer quadrants, I iterated through \texttt{tmesh\_3d::ghost\_data}, which is always 40 entries long per ghost.
+This drastically reduces the runtime at multiple points in the code.
 
 \section{Energy Calculation}
 \label{sec:implementation-energy-calculation}
@@ -88,12 +119,12 @@ As this occurrence is very rare, it did not affect the speed, and even the accur
 
 It was obvious that in order to retain the level of accuracy a more sophisticated approach was be required to achieve any significant level of speedup.
 For this purpose I implemented a fairly non-standard implementation of FMM, with the only ``normal'' things about it being the overall algorithm.
-It uses a LBVH trees, iterative dual tree traverse with double sided MAC, 
+It uses a LBVH trees, iterative dual tree traverse with double sided $B_{max}$ MAC, spherical harmonic expansions with both associated-Legendre and pole-free Cartesian recurrence.
 
-Both the source and the target tree are constructed using Karras's LBVH algorithm\cite{karras2012lbvh}, but a prerequisite for this is a bounding box over all bodies.
+Both the source and the target tree are constructed using Karras's LBVH algorithm\cite{karras2012lbvh}, whose prerequisite is a bounding box over all bodies.
 I compute this one the GPU by finding the minimum and maximum coordinates in all the spacial dimensions with the \texttt{bbox\_kernel}.
 In combines custom atomicMinDouble and atomicMaxDouble into 6 shared variables per block, before comparing the result of the block against the global memory.
-Although not efficient, this at least reduces the traffic from per thread to 6 times the amount of blocks.
+Although not efficient, this at least reduces the traffic from once per thread to 6 times the amount of blocks.
 Running 1VYZ and 6VYB, this kernel only took only tens of microseconds.
 % TODO honestly just writing this makes it seem ultra inefficient
 % I might switch to cub Reduce instead, this is embarrassingly bad
@@ -106,8 +137,9 @@ This has both upsides and downsides.
 On one side I need to traverse 3x as many times as I would with a octree.
 On the other I achieve greater MAC granularity, since I only split nodes two, instead of 8.
 
-I used spherical harmonics and the translation operators, such as the M2M, M2L, L2L and L2P are taken from ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}, which I used for the calculation of the polarization Eq.~\ref{eq:polarization-energy} and the second integral term of the 
-
+I used spherical harmonics and the translation operators, such as the translation operators are taken from ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}, which I used for the calculation of the polarization Eq.~\ref{eq:polarization-energy} and the second term of the ionic energy Eq.~\ref{eq:ionic-energy}.
+The first term though has a different shape $r/|r|^3$.
+Luckily, this is not a problem because is this simply the derivative of the Laplace kernel $\nabla 1/|r| = r/|r|^3$.
 
 \section{Multi-GPU}
 \label{sec:implementation-multi-gpu}

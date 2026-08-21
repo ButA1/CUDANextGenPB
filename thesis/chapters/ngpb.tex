@@ -68,11 +68,10 @@ Its purpose is to build the laplacian matrix operator by mapping a function to c
 \subsubsection{bim3a\_solution\_with\_ghosts}
 \label{sec:nextgenpb-libraries-bimpp-bim3a-solution-with-ghosts}
 
-This is the function that handles the communication of non-locals of distributed vectors computed from the octree mesh, between the ranks and is used many times throughout NGPB.
+This is the function that handles the communication of non-locals of distributed vectors computed from the octree mesh, between the ranks and is used many times throughout NGPB, like for example \texttt{create\_markers}, \texttt{create\_density\_map}.
 
 During my work on the thesis, it became increasingly obvious that this function took way longer than it should.
-Turns out this function rediscovers non-local and ghost quadrants of the octree, by updating every quadrant and its neighbors, without skipping it on those that have been already updated.
-On top of that, it computes the physical vertex positions for every update, which aren't used at all.
+This function rediscovers non-local and ghost quadrants of the octree, that each rank can see, running costly updates quadrants multiple times.
 
 It then finally calls \texttt{remap()}, which collects all the non-local values from the other ranks, and \texttt{assemble()} which distributes the updated values.
 
