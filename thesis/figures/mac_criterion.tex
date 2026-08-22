@@ -1,0 +1,59 @@
+% Multipole acceptance criterion -- include with \input{figures/mac_criterion}
+% Needs only tikz + the arrows.meta library, both already loaded in main.tex.
+\begin{figure}[htbp]
+    \centering
+    \begin{tikzpicture}[
+        x=1cm, y=1cm,
+        line width=0.5pt,
+        >={Stealth[length=2.0mm,width=1.4mm]},
+        pt/.style    ={circle, fill=black, inner sep=0pt, minimum size=1.7pt},
+        ctr/.style   ={circle, draw=black, fill=white, line width=0.4pt,
+                       inner sep=0pt, minimum size=3.2pt},
+        bnd/.style   ={gray!60, dash pattern=on 1.2pt off 1.2pt, line width=0.35pt},
+        lead/.style  ={gray!70, line width=0.3pt},
+        note/.style  ={font=\scriptsize},
+        sym/.style   ={font=\small, fill=white, inner sep=1pt}
+    ]
+
+    % separation (drawn first so the centre markers sit on top of it)
+    \draw[->] (1.0,1.05) -- (7.05,1.05);
+    \node[sym] at (4.1,1.05) {$R$};
+
+    % ---- target cell A ----
+    \draw (0,0.35) rectangle (2.0,1.75);
+    \draw[bnd] (1.0,1.05) circle (1.2207);
+    \foreach \p in {(0.35,0.62),(1.30,0.60),(1.45,0.72),(1.68,1.35),(1.20,1.48)}
+        \node[pt] at \p {};
+    \draw[->] (1.0,1.05) -- (0,1.75);
+    \node[sym] at (0.72,1.52) {$r_A$};
+    \node[note] at (1.0,-0.40) {target cell $A$};
+
+    % ---- source cell B ----
+    \draw (6.6,0.05) rectangle (7.8,2.05);
+    \draw[bnd] (7.2,1.05) circle (1.1662);
+    \foreach \p in {(6.80,0.35),(7.62,0.62),(6.80,1.45),(6.95,1.80),(7.58,1.28)}
+        \node[pt] at \p {};
+    \draw[->] (7.2,1.05) -- (7.8,2.05);
+    \node[sym] at (7.16,1.62) {$r_B$};
+    \node[note] at (7.2,-0.40) {source cell $B$};
+
+    % ---- centre markers, on top of everything ----
+    \node[ctr] at (1.0,1.05) {};
+    \node[ctr] at (7.2,1.05) {};
+
+    % ---- centre-of-expansion callout ----
+    \draw[lead] (7.25,1.00) -- (8.45,0.15);
+    \node[note, anchor=west] at (8.40,0.08) {centre of expansion};
+
+    % ---- criterion ----
+    \node[anchor=west] at (8.75,1.50) {$\dfrac{r_A + r_B}{R} < \theta$};
+    \node[anchor=west, note] at (8.75,0.72)
+         {evaluated as $(r_A + r_B)^2 < \theta^2 R^2$};
+
+    \end{tikzpicture}
+    \caption[The two-sided multipole acceptance criterion]{A cell pair is accepted as a
+        single M2L interaction when the half-diagonals of the two bounding boxes
+        (dashed) satisfy $r_A + r_B < \theta R$; otherwise the larger cell is split and
+        its children are re-tested.}
+    \label{fig:fmm-mac}
+\end{figure}

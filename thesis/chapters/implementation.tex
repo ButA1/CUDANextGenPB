@@ -247,13 +247,22 @@ To get the coefficient $M_n^{-m}$, I simply looked up $M_n^m$, and inverted its 
 \subsubsection{Traversal}
 
 The traverse is based on DTT \cite{yokota2013dualtree} algorithm described in \ref{sec:alternative-techniques-nbody-fmm-dtt}, using the double sided $B_{max}$ MAC controlled through $\theta$.
+Rather than the $B_{\max}$ of each cell, I use the half-diagonals $r_A$ and $r_B$ of the bounding boxes, accepting a pair when $r_A + r_B < \theta R$
+(Figure~\ref{fig:fmm-mac}).
+\input{figures/mac_criterion}
 Instead of evaluating the interactions during the traverse itself, I construct a list of near field (P2P) and far field (M2L) interaction, essentially doing what traditional FMM does, although using a MAC.
 My version is also recursive, but iterative, which processes the entire frontier in a level-synchronous loop.
-Each iteration calls the \texttt{fmm\_pair\_kernel}, which does the same classifications, as the regular DTT, but emits the M2L, P2P and next frontier pairs. 
+Each iteration calls the \texttt{fmm\_pair\_kernel}, which does the same classifications, as the regular DTT, but emits the M2L, P2P and next frontier pairs.
+An important distinction is also that a ``leaf'' is considered the smallest box node, not the smallest node in the tree.
 Since the buffer size can not be dynamically changed, I started the traversal with an estimate.
+The buffer cap starts out at $2^18$ and climbs a power-of-two ladder until it is either larger than 1 GiB, or $64 /cdot n_{box}$.
 If the buffers overflowed it would increase the buffer size by 4 and try again.
-The buffer cap starts out at either a generous 1 GiB, or at 64 times the number of box nodes.
-The reason for the latter is M2L interaction list for a cell forms a constant-thickness shell on a sphere with a radius of roughly $1/\theta$ \cite{yokota2012hierarchical}. 
+% For the double sided MAC, the M2L interaction list for a cell forms a constant-thickness shell on a sphere with a radius of roughly $1/\theta$ meaning it list size grows with \(\mathcal{O}(\theta^{-2})\) \cite{yokota2012hierarchical}.
+% The P2P list then takes up the inner volume the sphere, which grows with \(\mathcal{O}(\theta^{-3})\).
+% pretty much BS because I don't have an octree
+Through some experimentation, I found that the number of P2P interactions per box node only exceeded 64, when $\theta$ was set to 0.1 --- a uselessly small number which slows the algorithm down to a crawl.
+Even in that case the ladder would overstep $64 /cdot n_{box}$ once more, since only the next power of two would be greater.
+This approach is surprisingly robust, and has not lead to overflows, even when calculating the energies for really large systems like H1N1.
 
 \section{Multi-GPU}
 \label{sec:implementation-multi-gpu}
