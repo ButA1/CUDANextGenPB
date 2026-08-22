@@ -114,13 +114,17 @@ Moreover, this complexity can be further reduced to \(\mathcal{O}(p^3)\) through
 Whether two clusters are considered well separated is purely based on whether they are touching, and which tree level they are on, rather than their geometry.
 This approach already had been applied multiple times to the BEM to solve for the electrostatic potential of biomolecular systems \cite{bharadwaj1995fmbem, cheng1999fastadaptive}.
 
-However, there are also alternative approaches like R. Yokota's et. al. dual tree traverse FMM \cite{yokota2012hierarchical, yokota2013dualtree}, which classifies interactions using MACs into P2P and M2L interactions.
+\subsubsection{Dual Tree Traverse}
+\label{sec:alternative-techniques-nbody-fmm-dtt}
+
+However, there are also alternative approaches like R. Yokota's et. al. dual tree traverse (DTT) FMM \cite{yokota2012hierarchical, yokota2013dualtree}, which classifies interactions using MACs into P2P and M2L interactions.
 For this it constructs two trees: a source and target tree, and initializes the interaction stack with the two root nodes.
 Until the stack is empty, it pops a pair from it and subdivides the largest node, which creates new interaction pairs. 
 This is a necessary condition to maintain \(\mathcal{O}(n)\) complexity.
 For each pair, it first checks whether both nodes of a pair are leafs, in which case a direct calculation P2P is performed.
 If none of them are leafs, the pair is tested with the MAC.
 If it passes the multipole interaction is computed, otherwise the pair gets pushed to the stack.
+This approach does not require a quad- or octree to work, and is compatible with bounding volume hierarchies.
 
 \section{CUDA optimizations}
 \label{sec:alternative-techniques-cuda-optimizations}
