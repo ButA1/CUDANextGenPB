@@ -1,14 +1,41 @@
 \chapter{Implementation}
 \label{sec:implementation}
 
+In this section I go over my optimizations to the individual submodules of NGPB.
+
 \section{Enabling CUDA}
 \label{sec:implementation-enabling-cuda}
+
+This project is built using a good old Makefile, with operating system specific settings loaded in called the \texttt{local\_settings.mk}.
+The flags in the \texttt{local\_settings.mk} take precedent over those in the Makefile.
+It is compiled using the \texttt{mpicxx} compiler, so I would need to employ the same strategy as shown in the RWTH tutorial \cite{rwth_cuda}.
+
+As a first step, I added CUDA compilation target in the Makefile to compile CUDA source files with \texttt{nvcc}.
+Next I added the \texttt{-dlink} flag to resolve CUDA runtime symbols between CUDA and non-CUDA object files.
+This creates a intermediate object file \texttt{device\_link.o}
+To make \texttt{nvcc} compile header files, I included \texttt{CPPFLAGS} and MPI's internal flags by reading them from the shell using \texttt{shell \$(CXX) --showme:compile}.
+I then switched to the \texttt{local\_settings.mk} files where I added CUDA library flags and the \texttt{rpath} to \texttt{LDFLAGS}, as well as \texttt{-lcudart} to LIBS.
+Finally I passed all CUDA object files, including \texttt{device\_link.o} to \texttt{mpicxx}.
 
 \section{Linear Equation Solver}
 \label{sec:implementation-lin-eq-solver}
 
+I chose to implement AMGX over cuDSS due to high memory usage of the latter.
+Since AMGX is not part of the standard CUDA toolchain, the \texttt{LDFLAGS} of \texttt{local\_settings.mk} needed to be updated with \texttt{-lamgxsh} and the \texttt{rpath}.
+Since NGPB already has a choice between two linear solvers, I simply added AMGX as an option to the \texttt{linear\_solver} parameter in PRM file.
+Settings for LIS are inserted directly into the file.
+This was not a good option for AMGX as its configuration can be quite big, so to allow for arbitrary configurations to be loaded, the new \texttt{amgx\_config} parameter, which takes the path to a AMGX configuration.
+The call structure mirrors the other solvers as well, plugging in next to \texttt{lis\_\allowbreak{}compute\_\allowbreak{}electric\_\allowbreak{}potential} and \texttt{mumps\_\allowbreak{}compute\_\allowbreak{}electric\_\allowbreak{}potential} simply as \texttt{amgx\_\allowbreak{}compute\_\allowbreak{}electric\_\allowbreak{}potential} in the code base.
+
+\subsection{Upload Method}
+
+Despite not much to be done inside the code there was still a decision to be made how the linear equation should be uploaded to the device.
+The AMGX reference may make it seem easy to use multiple ranks with a single GPU.
+
 \section{Create Markers}
 \label{sec:implementation-create-markers}
+
+Create markers casts rays 
 
 \section{BIMPP}
 \label{sec:implementation-bimpp}
@@ -120,6 +147,10 @@ As this occurrence is very rare, it did not affect the speed, and even the accur
 It was obvious that in order to retain the level of accuracy a more sophisticated approach was be required to achieve any significant level of speedup.
 For this purpose I implemented a fairly non-standard implementation of FMM, with the only ``normal'' things about it being the overall algorithm.
 It uses a LBVH trees, iterative dual tree traverse with double sided $B_{max}$ MAC, spherical harmonic expansions with both associated-Legendre and pole-free Cartesian recurrence.
+
+\subsubsection{Overview}
+
+
 
 \subsubsection{Tree Construction}
 
