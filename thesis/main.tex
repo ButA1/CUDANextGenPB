@@ -48,6 +48,24 @@
     showstringspaces=false,
 }
 
+% \snakecase{mark_frontier_kernel} typesets as \texttt{mark\_\allowbreak{}frontier\_\allowbreak{}kernel}:
+% underscores may be typed raw, and each one gets a line-break opportunity after it.
+% \_ is patched inside the argument too, so \snakecase{mark\_frontier\_kernel} works
+% identically -- use that form in moving arguments (section titles, captions), where
+% the argument is tokenised before \snakecase can change catcodes.
+\makeatletter
+\begingroup
+  \catcode`\_=\active
+  \gdef\ngpb@snake@setup{%
+    \catcode`\_=\active
+    \def_{\textunderscore\allowbreak}%
+    \def\_{\textunderscore\allowbreak}%
+  }
+\endgroup
+\newcommand\ngpb@snake@run[1]{\texttt{#1}\endgroup}
+\DeclareRobustCommand\snakecase{\begingroup\ngpb@snake@setup\ngpb@snake@run}
+\makeatother
+
 % Dynamic bibliography: entries come from references.bib.
 % Add new sources there and cite them with \cite{key} anywhere in the text.
 \usepackage[backend=biber,style=numeric,sorting=none]{biblatex}

@@ -181,9 +181,6 @@ Among themselves they sort in reverse, since a larger magnitude means a larger b
 Both effects are cancelled at once by switching to the opposite operation on the unsigned type, so a single branch on the sign of the incoming value is all that is needed.
 Either branch computes the correct result regardless of the sign of the value currently held at the address, which means that threads contributing values of mixed sign still reduce correctly.
 
-% The workaround that circulates most widely takes a different route and wraps \texttt{atomicCAS} in a retry loop: it reads the address, compares in a register, and swaps the new value back in only if no other thread has modified the address in the meantime, retrying until it succeeds.
-% That version needs nothing beyond a 64-bit \texttt{atomicCAS}, but it issues at least two memory operations per update and repeats them under contention, whereas the variant above always compiles down to a single atomic instruction.
-
 \subsection{Optimized Tree Construction}
 \label{sec:alternative-techniques-cuda-optimizations-lbhv}
 

@@ -39,7 +39,10 @@ Due to the lack of documentation, it is difficult to get an overview over all it
 I would describe it as library that enables distributed vector- and sparse matrix operations on quad- and octrees.
 It itself is based on p4est, and it too handles the communication of non-local elements between the MPI processes.
 
-It leans towards being sparsity-aware, but the current implementation is known to be memory inefficient. 
+In order to perform parallel computations on a sparse matrix, they are broken up into segments, where each node (or process) handles one of them locally.
+However, this creates an issue where some operations would affect non-local entries of segments that belong to another node.
+Those non-local changes need to be communicated after each operation.
+The current implementation is known to be memory inefficient. 
 The main culprit is the way BIMPP stores its distributed sparse matrix. 
 For every rank, BIMPP holds both local and non-local values of a distributed sparse matrix in a \texttt{std::vector} of \texttt{std::map}, where the \texttt{std::vector} is sized to the global amount of rows.
 \texttt{std::vector} initializes an empty map for every entry.
@@ -111,16 +114,16 @@ These settings include the path to the molecule, mesh settings, simulation param
 \subsubsection{Mesh Settings}
 
 NGPB offers four different mesh types, on which the remaining mesh parameters depend \cite{nextgenpb_docs}. 
-The first and default option is \texttt{mesh\_\allowbreak{}shape = 0}, which is a de-refined mesh with a fine and coarse region.
+The first and default option is \snakecase{mesh_shape = 0}, which is a de-refined mesh with a fine and coarse region.
 The parameters \texttt{perfil1} and \texttt{perfil2} (short for ``percentage fill'') set the fraction of the fine and coarse domain size occupied by the molecule, so the higher the value, the tighter the corresponding region wraps around it. 
 Their default values are 0.8 and 0.2 respectively.
 
 Logically, one would want the molecule to be fully inside the fine grid domain but also leave enough room for the Stern Layer. This is a thin layer only a few Ångström thick, that exists on the surface of solids submerged in a solution, in which charged particles behave differently.
-The inclusion of the Stern Layer is optional, and controlled through the \texttt{stern\_\allowbreak{}layer\_\allowbreak{}surf} parameter and its thickness with \texttt{stern\_\allowbreak{}layer\_\allowbreak{}thickness}.
+The inclusion of the Stern Layer is optional, and controlled through the \snakecase{stern_layer_surf} parameter and its thickness with \snakecase{stern_layer_thickness}.
 
 Resolution with this mesh type is controlled through \texttt{scale}. Its value is equal to the inverse resolution in Ångström, meaning that a value of 2 corresponds to a resolution of 0.5 \,\AA{}. This resolution only applies to the fine region.
 
-Lastly, there was also the undocumented parameter \texttt{loc\_\allowbreak{}refinement}, which could basically force the mesh to be refined regardless of \texttt{mesh\_\allowbreak{}shape}, and thus route the energy calculation through the \texttt{energy} function instead of \texttt{energy\_\allowbreak{}fast}.
+Lastly, there was also the undocumented parameter \snakecase{loc_refinement}, which could basically force the mesh to be refined regardless of \snakecase{mesh_shape}, and thus route the energy calculation through the \texttt{energy} function instead of \snakecase{energy_fast}.
 
 \subsubsection{Simulation Parameters}
 
@@ -128,7 +131,7 @@ In this section, users can set the physical properties of the system.
 First an foremost are the dielectric constants of the molecule and the solvent relative to vacuum permittivity $\varepsilon_0$.
 Then come the solvent properties like ionic strength and temperature.
 It also offers different boundary conditions, which tell how the system how the electrostatic potential has to behave at the edge of the system.
-Lastly, it controls which energies get computed. For my purposes I enabled \texttt{calc\_\allowbreak{}coulombic} and set \texttt{calc\_\allowbreak{}energy} to 2, meaning it computes all 3 energies.
+Lastly, it controls which energies get computed. For my purposes I enabled \snakecase{calc_coulombic} and set \snakecase{calc_energy} to 2, meaning it computes all 3 energies.
 
 \subsubsection{Algorithmic Parameters}
 
@@ -182,7 +185,7 @@ Fortunately NGPB does not care about these indices and simply gives them their o
 \subsection{Grid \& Surface Construction}
 \label{sec:nextgenpb-submodules-grid-surface-construction}
 
-As mentioned in \ref{sec:nextgenpb-submodules-input}, I will focus solely on the derefined mesh (\texttt{mesh\_\allowbreak{}shape = 0}).
+As mentioned in \ref{sec:nextgenpb-submodules-input}, I will focus solely on the derefined mesh (\snakecase{mesh_shape = 0}).
 NGPB uses p8est to construct the octree, where the fine region is nested inside the corse region.
 It places the molecule inside the fine region so that \texttt{perfil1}
 is satisfied for every dimension.
@@ -199,30 +202,30 @@ This is standard practice with octrees an avoids quadrants that share no vertice
 
 This is central component that gets used throughout multiple stages.
 As its name suggests it holds the information about the rays cast by NanoShaper.
-It stores a list of intersections and normals as an object \texttt{crossing\_\allowbreak{}t} under coordinates on an axis plane. 
+It stores a list of intersections and normals as an object \snakecase{crossing_t} under coordinates on an axis plane. 
 The first index for the outmost array is the axis, so in a 3D environment those are the axes x,y and z. 
 The next two for the binary tree map are the coordinates on the perpendicular plane along said axis.
 The intersections are then the coordinates along the axis, which together with the coordinates on the plane gives you the point of each intersection.
 Normals are triplets ordered by the intersection.
-Lastly, \texttt{crossing\_\allowbreak{}t} also have an \texttt{init} flag, symbolizing whether the ray has to be recast.
+Lastly, \snakecase{crossing_t} also have an \texttt{init} flag, symbolizing whether the ray has to be recast.
 This is a very efficient representation that is unfortunately not portable to the GPU, due to the binary tree map, whose values are complex structs, not simple types.
 
-It is initialized in the method \texttt{init\_\allowbreak{}analytical\_\allowbreak{}surf\_\allowbreak{}ns}, where NanoShaper is used to cast rays in the fine region using the same $1/scale$ grid and finally stored in the cache.
+It is initialized in the method \snakecase{init_analytical_surf_ns}, where NanoShaper is used to cast rays in the fine region using the same $1/scale$ grid and finally stored in the cache.
 This happens only on rank 0, leaving the ray cache of the other ranks initially empty.
 
-Casting additional rays recast individually using \texttt{compute\_\allowbreak{}ns\_\allowbreak{}inters} or in a batch using \texttt{compute\_\allowbreak{}pending\_\allowbreak{}rays}.
-The latter goes through the cached rays and uses the \texttt{init} flag of \texttt{crossing\_\allowbreak{}t} to determine, whether they should be recomputed.
+Casting additional rays recast individually using \snakecase{compute_ns_inters} or in a batch using \snakecase{compute_pending_rays}.
+The latter goes through the cached rays and uses the \texttt{init} flag of \snakecase{crossing_t} to determine, whether they should be recomputed.
 
-The method \texttt{fill\_\allowbreak{}cache} then scatters rays from the rank 0 cache. The necessary rays are computed inside \texttt{create\_\allowbreak{}markers}. It too can call \texttt{compute\_\allowbreak{}ns\_\allowbreak{}inters} implicitly if requested rays are missing from the cache or are uninitialized.
+The method \snakecase{fill_cache} then scatters rays from the rank 0 cache. The necessary rays are computed inside \snakecase{create_markers}. It too can call \snakecase{compute_ns_inters} implicitly if requested rays are missing from the cache or are uninitialized.
 
 \subsubsection{create\_markers}
 
 This function primarily classifies quadrants as either being inside, outside or on the border of the molecule.
 Its secondary functions are redistribution of ray information to all ranks, and casting additional rays if needed.
-For rank 0, it checks whether rays are present in the ray cache using \texttt{is\_\allowbreak{}in\_\allowbreak{}ns\_\allowbreak{}surf}, which adds casts a new ray on a miss.
+For rank 0, it checks whether rays are present in the ray cache using \snakecase{is_in_ns_surf}, which adds casts a new ray on a miss.
 Additional rays may also be cast for refined meshes, which have quadrants that are smaller than $1/scale$.
 For the remaining ranks, it collects a list of rays that it needs.
-Rank 0 then distributes those rays to the corresponding ranks using \texttt{fill\_\allowbreak{}cache}.
+Rank 0 then distributes those rays to the corresponding ranks using \snakecase{fill_cache}.
 
 \subsection{Matrix Assembly}
 \label{sec:nextgenpb-submodules-matrix-assembly}
@@ -232,7 +235,7 @@ This step produces the matrix operator and the right-hand-side (RHS) vector need
 \subsubsection{create\_density\_map}
 
 This method computes the RHS of the linear equation from the fixed charge densities.
-It calls \texttt{bim3a\_\allowbreak{}solution\_\allowbreak{}with\_\allowbreak{}ghosts} twice.
+It calls \snakecase{bim3a_solution_with_ghosts} twice.
 
 \subsubsection{cube\_fraction\_intersection}
 
@@ -241,7 +244,7 @@ It then takes the last intersection point it finds and computes its length relat
 
 \subsubsection{assemble\_system\_matrix}
 
-This method allocates the CSR matrix and computes the operator using \texttt{bim3a\_\allowbreak{}laplacian\_\allowbreak{}frac} in combination with \texttt{cube\_\allowbreak{}fraction\_\allowbreak{}intersection}.
+This method allocates the CSR matrix and computes the operator using \snakecase{bim3a_laplacian_frac} in combination with \snakecase{cube_fraction_intersection}.
 It is by far the most memory intensive step, due to BIMPP architectural choices explained in \ref{sec:nextgenpb-libraries-bimpp}.
 This step also applies the boundary condition.
 
@@ -249,7 +252,7 @@ This step also applies the boundary condition.
 \label{sec:nextgenpb-submodules-solve-linear-equation}
 
 In this step the linear PBE is solved for the electrostatic potential.
-Depending on which solver is selected in the PRM file, this is either done with \texttt{lis\_\allowbreak{}compute\_\allowbreak{}electric\_\allowbreak{}potential} or \texttt{mumps\_\allowbreak{}compute\_\allowbreak{}electric\_\allowbreak{}potential}.
+Depending on which solver is selected in the PRM file, this is either done with \snakecase{lis_compute_electric_potential} or \snakecase{mumps_compute_electric_potential}.
 Relying heavily on matrix operations, this step is a great candidate for GPU acceleration.
 Libraries like cuDSS and AMGX can be easily implemented here.
 
@@ -259,7 +262,7 @@ Libraries like cuDSS and AMGX can be easily implemented here.
 This step finally computes the 3 energies, as well as the total energy of the system.
 Depending on whether the mesh has been refined, NGPB chooses between two sets of methods.
 Methods suffixed by ``fast'' assume that the mesh is unrefined, and as the name implies, skips certain steps that would be needed it were.
-The main two methods here are \texttt{energy} and \texttt{energy\_\allowbreak{}fast}, which compute the energies according to the following formulas:
+The main two methods here are \texttt{energy} and \snakecase{energy_fast}, which compute the energies according to the following formulas:
 
 The Coulomb energy is the typical interaction between two charged particles $q_i$ and $q_j$ without self-interaction, so $\lVert \mathbf{r}_i - \mathbf{r}_j \rVert$ in Equation~\eqref{eq:Coulomb-energy} never equals 0. 
 \begin{equation}
@@ -275,7 +278,7 @@ The authors approximate the electric flux along a surface patch with:
     \label{eq:electric-flux}
 \end{equation}
 where $\varepsilon^{eff}$ is the WHA according to Eq.~\ref{eq:effective-permittivity}.
-It uses \texttt{classifyCube\_\allowbreak{}flux(\_\allowbreak{}fast)} to gather the necessary values per quadrant.
+It uses \snakecase{classifyCube_flux(_fast)} to gather the necessary values per quadrant.
 The total polarization charge is computed with:
 \begin{equation}
     q_p \approx \varepsilon_0 \left( \frac{1}{\varepsilon_s} - \frac{1}{\varepsilon_m} \right) D_v^{eff} h_v^2
@@ -300,7 +303,7 @@ However, using Green's identities, the authors of NGPB converted the volume inte
 
 As stated in the NGPB paper, the second integral is the same, and instead of recomputing, the intermediate result from the polarization energy calculation gets reused.
 The first integral, denoted $I$, is discretized using triangles instead of surface points.
-To get these triangles NGPB uses \texttt{classifyCube(\_\allowbreak{}fast)}, which uses marching cubes to locally re-triangulate the surface.
+To get these triangles NGPB uses \snakecase{classifyCube(_fast)}, which uses marching cubes to locally re-triangulate the surface.
 Let $N_t$ be the totality of all triangles.
 Then the first integral can be computed discretely as follows:
 
@@ -333,7 +336,7 @@ Because all fine region quadrants are at $1/scale$ when no refinement is done, t
 \subsubsection{classifyCube\_flux(\_fast)}
 
 This method returns the $\varepsilon$ and $\phi$ for each quadrant's node.
-Just like in \texttt{classifyCube(\_\allowbreak{}fast)}, the \texttt{fast} version also ignores hanging nodes.
+Just like in \snakecase{classifyCube(_fast)}, the \texttt{fast} version also ignores hanging nodes.
 Additionally it computes the flux direction along the edges, on which the $\varepsilon$ changes.
 
 \subsubsection{normal\_intersection}

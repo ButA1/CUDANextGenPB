@@ -53,7 +53,7 @@ In the NGPB paper \cite{diflorio2025nextgenpb}, the authors showed that a \textt
 Out of curiosity, I did run a couple of tests using a \texttt{perfil1} of 1. It didn't change the result all that much, and it also didn't make the tests run any faster, so I stuck with the author-approved values.
 \texttt{perfil2} is kept at its default value of 0.2, as the coarse region has a much lower impact on performance. 
 \texttt{scale} is also kept at its default value of 2, which was proven to be sufficient in the paper.
-To my surprise, \texttt{loc\_\allowbreak{}refinement} yielded worse results in my testing, and served only to test \texttt{energy\_\allowbreak{}cuda}.
+To my surprise, \snakecase{loc_refinement} yielded worse results in my testing, and served only to test \snakecase{energy_cuda}.
 
 When it came to the choice between the two solvers I settled on LIS pretty quickly.
 A short test on my local machine showed that mumps takes way longer than LIS for 1CCM with all the settings being the same aside from the solver.
@@ -75,12 +75,12 @@ Most local testing was performed using an \texttt{-n} of 4, while testing on the
 \subsection{Compiler Flags}
 \label{sec:evaluation-experimental-setup-compiler-flags}
 
-Aside from the additional compiler flags added due to inclusion of CUDA, I largely used the same flags from the original makefile and \texttt{local\_\allowbreak{}settings}. 
+Aside from the additional compiler flags added due to inclusion of CUDA, I largely used the same flags from the original makefile and \snakecase{local_settings}. 
 Although initially I changed the optimization flag from \texttt{-O2} to \texttt{-O0} due to fears of catastrophic cancellations during floating-point calculations, spawned by the flux charge variations described in \ref{sec:evaluation-experimental-setup-mpi-ranks}, it quickly proved more trouble than it was worth. 
 It made the code extremely slow, which exaggerated the speedup achieved by the GPU and the perceived need to optimize other parts of the code. 
 Besides that, the dependencies of NGPB were also compiled using \texttt{-O2}. 
 
-I reverted to \texttt{-O2}, but purposefully stayed away from the commented-out \texttt{-Ofast -mtune=native -march=native} setting lingering inside the \texttt{local\_\allowbreak{}settings}. While it would have provided even faster baseline performance, \texttt{-Ofast} in particular implies \texttt{-ffast-math}, which permits reassociation of floating point sums, assumes finite arithmetic, and on x86 links \texttt{crtfastmath.o} that enables flush-to-zero and denormals-are-zero process-wide, thereby affecting the linked dependencies as well.
+I reverted to \texttt{-O2}, but purposefully stayed away from the commented-out \texttt{-Ofast -mtune=native -march=native} setting lingering inside the \snakecase{local_settings}. While it would have provided even faster baseline performance, \texttt{-Ofast} in particular implies \texttt{-ffast-math}, which permits reassociation of floating point sums, assumes finite arithmetic, and on x86 links \texttt{crtfastmath.o} that enables flush-to-zero and denormals-are-zero process-wide, thereby affecting the linked dependencies as well.
 This is a notable relaxation of the IEEE semantics and could compromise the CPU baseline against which the GPU was compared.
 The other two flags \texttt{-mtune=native} and \texttt{-march=native} are more benign. They change instruction scheduling and enable FMA contraction, the latter being enabled by default on \texttt{nvcc}.
 
@@ -110,13 +110,13 @@ Mesh settings were mostly kept at the given values, though I already pointed out
         \toprule
         Test & PQR File & Category & Mesh Settings & Model Settings \\
         \midrule
-        test0 & 1CCM.pqr & Comparative & \texttt{mesh\_\allowbreak{}shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 &
-        \multirow{6}{4.7cm}{\texttt{bc\_\allowbreak{}type}=1\newline$\varepsilon_m$=2, $\varepsilon_s$=80\newline\texttt{ionic\_\allowbreak{}strength}=0.145\,mol/L\newline$T$=298.15\,K\newline\texttt{calc\_\allowbreak{}energy}=2\newline\texttt{calc\_\allowbreak{}coulombic}=1} \\
-        test1 & 6VYB.pqr & Comparative & \texttt{mesh\_\allowbreak{}shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 & \\
-        test2 & 1vsz.pqr & Comparative & \texttt{mesh\_\allowbreak{}shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 & \\
-        test3 & UNITSPHERE\_-\newline DISC\_2.pqr & Analytical & \texttt{mesh\_\allowbreak{}shape}=0, \texttt{perfil1}=0.15,\newline\texttt{perfil2}=0.15, \texttt{scale}=2.0 & \\
-        test4 & 30sfere.pqr & Analytical & \texttt{mesh\_\allowbreak{}shape}=0, \texttt{perfil1}=0.20,\newline\texttt{perfil2}=0.20, \texttt{scale}=2.0 & \\
-        test5 & 6VYB.pqr (cluster) & Comparative & \texttt{mesh\_\allowbreak{}shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 & \\
+        test0 & 1CCM.pqr & Comparative & \snakecase{mesh_shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 &
+        \multirow{6}{4.7cm}{\snakecase{bc\_type}=1\newline$\varepsilon_m$=2, $\varepsilon_s$=80\newline\snakecase{ionic\_strength}=0.145\,mol/L\newline$T$=298.15\,K\newline\snakecase{calc\_energy}=2\newline\snakecase{calc\_coulombic}=1} \\
+        test1 & 6VYB.pqr & Comparative & \snakecase{mesh_shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 & \\
+        test2 & 1vsz.pqr & Comparative & \snakecase{mesh_shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 & \\
+        test3 & UNITSPHERE\_-\newline DISC\_2.pqr & Analytical & \snakecase{mesh_shape}=0, \texttt{perfil1}=0.15,\newline\texttt{perfil2}=0.15, \texttt{scale}=2.0 & \\
+        test4 & 30sfere.pqr & Analytical & \snakecase{mesh_shape}=0, \texttt{perfil1}=0.20,\newline\texttt{perfil2}=0.20, \texttt{scale}=2.0 & \\
+        test5 & 6VYB.pqr (cluster) & Comparative & \snakecase{mesh_shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 & \\
         \bottomrule
     \end{tabular}
     \caption{Test cases and their NGPB configuration parameters.}
@@ -138,7 +138,7 @@ For more exact timings in the GPU-specific optimizations, I profiled the CUDA ke
 Additionally it provides detailed information about their utilization of GPU resources and gives suggestions on how to optimize them. 
 I was able to simply wrap it around the \texttt{mpirun} command. 
 This recorded the separate kernel launches of each rank, which wasn't really a problem though. 
-Unfortunately, I could only use \texttt{ncu} locally since it requires \texttt{NVreg\_\allowbreak{}RestrictProfilingToAdminUsers} to be disabled.
+Unfortunately, I could only use \texttt{ncu} locally since it requires \snakecase{NVreg_RestrictProfilingToAdminUsers} to be disabled.
 On top of that, an FP64-intensive kernel running on the RTX 3080 might obscure other performance bottlenecks.
 Due to this, I was not able to get the full picture needed to optimize the CUDA code to the fullest extent.
 I avoided profiling the linear solvers running on the GPU, since I made no code changes to them, by selecting the built-in solvers like LIS instead. 

@@ -260,25 +260,17 @@ Since they are implemented using hash tables or maps, they have some amount of m
 
 Conversely, the Compressed Sparse Row format utilizes 3 arrays: column indices and values with the length of the non-zero-values (NNZ), and row offsets with the length equal to the number of rows plus one.
 Figure~\ref{fig:csr-format} shows an example of a small $4\times4$ sparse matrix and its corresponding CSR representation.
-The \texttt{values} array stores the non-zero entries in row-major order, and \texttt{col\_\allowbreak{}idx} stores the column each of those entries belongs to.
-\texttt{row\_\allowbreak{}offsets} then stores, for each row, the index into \texttt{values}/\texttt{col\_\allowbreak{}idx} at which that row's entries begin, with a final trailing entry equal to NNZ so that the length of any row can be computed as \texttt{row\_\allowbreak{}offsets[i+1] - row\_\allowbreak{}offsets[i]}.
+The \texttt{values} array stores the non-zero entries in row-major order, and \snakecase{col_idx} stores the column each of those entries belongs to.
+\snakecase{row_offsets} then stores, for each row, the index into \texttt{values}/\snakecase{col_idx} at which that row's entries begin, with a final trailing entry equal to NNZ so that the length of any row can be computed as \snakecase{row_offsets[i+1] - row_offsets[i]}.
 On the surface this might look more complicated than a DOK but the CSR wins when accessing all row values of a matrix, which is conducive to matrix multiplication.
-Since \texttt{row\_\allowbreak{}offsets} depends on the number of values per row, it needs to be recomputed every time values are added or removed.
+Since \snakecase{row_offsets} depends on the number of values per row, it needs to be recomputed every time values are added or removed.
 
 \begin{figure}[htbp]
     \centering
     \input{figures/csr_format.tex}
-    \caption[Example of the CSR sparse matrix format]{A $4\times4$ sparse matrix (top, non-zero entries outlined in bold) and its Compressed Sparse Row representation (bottom). Each \texttt{row\_\allowbreak{}offsets} entry points to where that row's data begins in \texttt{col\_\allowbreak{}idx}/\texttt{values}; the trailing entry equals NNZ. Own illustration, following the array layout described in \cite{nvidia_nvpl_sparse_storage}.}
+    \caption[Example of the CSR sparse matrix format]{A $4\times4$ sparse matrix (top, non-zero entries outlined in bold) and its Compressed Sparse Row representation (bottom). Each \snakecase{row\_offsets} entry points to where that row's data begins in \snakecase{col\_idx}/\texttt{values}; the trailing entry equals NNZ. Own illustration, following the array layout described in \cite{nvidia_nvpl_sparse_storage}.}
     \label{fig:csr-format}
 \end{figure}
-
-\subsection{Distributed Sparse Matrices}
-\label{sec:background-sparse-matrices-distributed}
-
-% not sure if this will stay here
-In order to perform parallel computations on a sparse matrix, they are broken up into segments, where each node (or process) handles one of them locally.
-However, this creates an issue where some operations would affect non-local entries of segments that belong to another node.
-Those non-local changes need to be communicated after each operation.
 
 \section{Linear Equation Solvers}
 \label{sec:background-linear-eq-solvers}

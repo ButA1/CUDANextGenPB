@@ -25,7 +25,7 @@ Since AMGX is not part of the standard CUDA toolchain, the \texttt{LDFLAGS} of \
 Since NGPB already has a choice between two linear solvers, I simply added AMGX as an option to the \texttt{linear\_solver} parameter in PRM file.
 Settings for LIS are inserted directly into the file.
 This was not a good option for AMGX as its configuration can be quite big, so to allow for arbitrary configurations to be loaded, the new \texttt{amgx\_config} parameter, which takes the path to a AMGX configuration.
-The call structure mirrors the other solvers as well, plugging in next to \texttt{lis\_\allowbreak{}compute\_\allowbreak{}electric\_\allowbreak{}potential} and \texttt{mumps\_\allowbreak{}compute\_\allowbreak{}electric\_\allowbreak{}potential} simply as \texttt{amgx\_\allowbreak{}compute\_\allowbreak{}electric\_\allowbreak{}potential} in the code base.
+The call structure mirrors the other solvers as well, plugging in next to \snakecase{lis_compute_electric_potential} and \snakecase{mumps_compute_electric_potential} simply as \snakecase{amgx_compute_electric_potential} in the code base.
 
 \subsection{Upload Method}
 
@@ -108,12 +108,12 @@ However this turned out to be a very small issue, as the ionic and polarization 
 The polarization and ionic kernels are launched for all surface points and triangles in parallel.
 It immediately became apparent, that those are the more computationally intense kernels, being highly FP64 bound.
 
-Despite the fact that the optimization is very straight forward, the new GPU accelerated version of \texttt{energy\_\allowbreak{}fast}, dubbed \texttt{energy\_\allowbreak{}cuda\_\allowbreak{}fast} ran 6VYB 17x faster on the RTX 3080 and a whopping 240x faster on an A100.
+Despite the fact that the optimization is very straight forward, the new GPU accelerated version of \snakecase{energy_fast}, dubbed \snakecase{energy_cuda_fast} ran 6VYB 17x faster on the RTX 3080 and a whopping 240x faster on an A100.
 
 \subsubsection{Further optimizations}
 
 On the GPU side:
-I used CUDA's \texttt{\_\allowbreak{}\_\allowbreak{}restrict\_\allowbreak{}\_\allowbreak{}} keyword of the data pointers, which prevents aliasing and enables more aggressive optimization by the compiler.
+I used CUDA's \snakecase{__restrict__} keyword of the data pointers, which prevents aliasing and enables more aggressive optimization by the compiler.
 This something the compiler should handle automatically, but this keyword gives assurance and does nothing in the worst case.
 
 Tiling was deemed ineffective.
@@ -128,10 +128,10 @@ This dropped the total time by another 25\%.
 On the CPU side: 
 Since the the polarization and ionic kernels both need the same charge and atom arrays as the Coulomb kernel, I've reused their device pointers, but the speedup of that was miniscule.
 
-Lastly, I identified that the original code was computing \texttt{normal\_\allowbreak{}intersections} multiple times per quadrant edge.
-Since the surfaces of marching cubes and NanoShaper should be nigh identical, the quadrant's edges for which the \texttt{normal\_\allowbreak{}intersections} are computed should be always be the edges of those quadrants, which are located at the surface $\Gamma$, so I precomputed them.
+Lastly, I identified that the original code was computing \snakecase{normal_intersections} multiple times per quadrant edge.
+Since the surfaces of marching cubes and NanoShaper should be nigh identical, the quadrant's edges for which the \snakecase{normal_intersections} are computed should be always be the edges of those quadrants, which are located at the surface $\Gamma$, so I precomputed them.
 
-It is at this point that noticed that marching cubes and NanoShaper do unfortunately sometimes disagree, leading to \texttt{normal\_\allowbreak{}intersections} to return a default value without writing to the passed normal pointer at all.
+It is at this point that noticed that marching cubes and NanoShaper do unfortunately sometimes disagree, leading to \snakecase{normal_intersections} to return a default value without writing to the passed normal pointer at all.
 Worse yet, this stale normal point then gets used in the calculation of the ionic energy.
 After conversing with one of the authors of NGPB, we decided that the best course of action is to drop a surface triangle if one of its normals could not be determined.
 For this I modified \texttt{normal\_intersection} to return \texttt{true} if it had found an intersection and \texttt{false} otherwise.
@@ -254,20 +254,25 @@ L2L shifts a local expansion $O_n^m$, centered at $X_0=(\rho,\alpha,\beta)$, dow
     \label{eq:l2l-coeffs}
 \end{equation}
 The coefficient order grows outward with the degree $n$ by $2n+1$, meaning that an expansion of degree 1 $M_1^m$ has 3 coefficient, while $M_2^m$ has 5, $M_3^m$ has 7 etc.
-A coefficient $M_n^m$ is always the complex conjugate of $M_n^{-m}$. 
+A coefficient $M_n^m$ is always the complex conjugate of $M_n^{-m}$.
 This allowed me to pack them in a lower-triangular layout, with interleaving real and imaginary parts, storing only the positive $m$.
 To get the coefficient $M_n^{-m}$, I simply looked up $M_n^m$, and inverted its imaginary part.
+This way the number of coefficient grows only by $n+1$.
+For the buffer size, that means the number of coefficient truncated at degree $p$ goes from $\sum_{n=0}^{p}(2n+1) = (p+1)^2$ to $\sum_{n=0}^{p}(n+1) = \frac{(p+1)(p+2)}{2}$
 
-\subsubsection{Tree Construction}
+\subsubsection{Source Tree Construction}
 
-Both the source and the target tree are constructed using Karras's LBVH algorithm\cite{karras2012lbvh}, whose prerequisite is a bounding box over all bodies.
-I compute this one the GPU by finding the minimum and maximum coordinates in all the spacial dimensions with the \texttt{bbox\_kernel}.
-In combines custom atomicMinDouble and atomicMaxDouble into 6 shared variables per block, before comparing the result of the block against the global memory.
-Although not efficient, this at least reduces the traffic from once per thread to 6 times the amount of blocks.
-Running 1VYZ and 6VYB, this kernel only took only tens of microseconds.
+The source is constructed using Karras's LBVH algorithm\cite{karras2012lbvh}.
+First it computes a bounding box over all atoms using a grid stride \texttt{bbox\_kernel}.
+% It combines custom atomicMinDouble and atomicMaxDouble into 6 shared variables per block, before comparing the result of the block against the global memory.
+% Although not efficient, this at least reduces the traffic from once per thread to 6 times the amount of blocks.
+% Running 1VYZ and 6VYB, this kernel only took only tens of microseconds.
 % TODO honestly just writing this makes it seem ultra inefficient
 % I might switch to cub Reduce instead, this is embarrassingly bad
 % I also should be vary of being that precise right now
+Next it creates the morton codes for each atom in the \texttt{morton\_kernel}, before sorting using a radix sort and reordering them by those codes in \texttt{reorder\_kernel}.
+Then follows the bottom-up build of the tree, exactly as described in \ref{sec:alternative-techniques-cuda-optimizations-lbhv}.
+Afterwards it computes the bounding boxed of the internal does bottom-up in \texttt{summarize\_aabb\_kernel}.
 
 The resulting structure is a binary radix tree, which is different from a traditional octree used in FMM.
 However, it is practically the same spacial decomposition.
@@ -278,13 +283,19 @@ On one side I need to traverse 3x as many times as I would with a octree.
 On the other I achieve greater MAC granularity, since I only split nodes two, instead of 8.
 
 Each leaf of the LBVH only contains a single atom.
-However, this is overly granular and wasteful.
-In order to cluster them into leafs with a certain number of atoms, I classified them into nodes on whether they cover enough atoms.
-Logically, a parent node whose child covers enough nodes automatically does so as well.
+The total number of nodes in the tree equates to $N-1$ internal nodes plus $N$ leaf nodes ($N$ being the number of atoms).
+However, calculating the multipole expansion would be very wasteful, not to mention that each node would also have to carry its moments.
+So for the FMM I would only consider the top most nodes who's parent covers a constant number of atoms called \snakecase{leaf_size}.
+Those nodes are the ``frontier'' or box leaves, considered the leaves by the FMM.
+Logically, a parent node whose child covers more than \snakecase{leaf_size} atoms automatically does so as well.
 These nodes are called the box nodes, and they are the only ones that will be carrying the coefficients and moments of the multipole expansions.
-This not only eases calculation, it also drastically reduces memory consumption, as the non-box nodes far outnumber them.
+This not only eases calculation, it also drastically reduces memory consumption, as the number of box nodes $n_{box} \approx 2N / leaf\_size$.
 % not sure if this belongs into evaluation
-For the clustered leaf size, I settled on 256 through experimentation.
+% For the clustered leaf size, I settled on 256 through experimentation.
+
+This is the entire purpose of \snakecase{src_box_storage}.
+It marks the box nodes with \snakecase{mark_box_kernel}, its frontier with \snakecase{mark_frontier_kernel} and dense slot map with \snakecase{box_slot_kernel} for indexing the multipole moments.
+Lastly, it allocates the buffer for the multipole moments with size $n_box \cdot (p+1)(p+2)$.
 
 \input{figures/fmm_g1}
 
@@ -306,6 +317,8 @@ For the clustered leaf size, I settled on 256 through experimentation.
 %    indexed by BOX SLOT, so n_box ints (~700 kB) rather than n_nodes (~114 MB at
 %    14M atoms).
 
+The P2M seeds the box leaves with a monopole, which is then passed upward using M2M, with is equivalent to using the P2M.
+
 \input{figures/fmm_g2}
 
 \subsubsection{Target Tree Construction}
@@ -326,13 +339,10 @@ For the clustered leaf size, I settled on 256 through experimentation.
 %    enough that each sat alone in its warp.
 %  - d_local is n_box*comp, not N*comp: ~35 MB instead of ~9 GB on a 10^7-vertex
 %    surface.
+The target tree is built twice, once for the point-discrete, and once for the triangle-discrete calculations.
+The LBVH path from the source tree builder is reused almost entirely.
 
 \input{figures/fmm_g3}
-
-% TODO figure out what to do with M2P
-% M2P is not used as a multipole expansion for a single atom is the atom itself (pure monopole).
-% doing M2M on these monopoles is basically M2P but its less efficient
-% The current implementation is inefficient though, so I am keeping these as comments
 
 \subsubsection{Traversal}
 
@@ -358,25 +368,13 @@ This approach is surprisingly robust, and has not lead to overflows, even when c
 \input{figures/fmm_g4}
 
 \subsubsection{Near-Field List Grouping}
-% Points worth making here:
-%  - The traversal emits near pairs in whatever order the atomics handed out slots,
-%    which is useless to a kernel that wants one target leaf's neighbours.
-%  - fmm_build_p2p_csr is a counting sort over n_nodes buckets keyed by the target
-%    node id: count -> exclusive scan -> scatter. Same CSR layout as
-%    \ref{sec:background-sparse-matrices} / Figure~\ref{fig:csr-format}.
-%  - Row A then holds target box leaf A's near SOURCE box leaves, so the evaluation
-%    kernel reads its near list directly: no per-leaf BFS descent, no shared
-%    frontier, and no frontier buffer that can overflow.
-%  - Order within a row is non-deterministic (atomic fill). Harmless: the P2P
-%    summation order already differs from the CPU baseline, which is why the two
-%    agree to ~1e-10 rather than bit-exactly.
 
 After the traversal the P2P pairs are unsorted. 
-So they are grouped by the target leaf inside \texttt{fmm\_\allowbreak{}build\_\allowbreak{}p2p\_\allowbreak{}csr} using a counting sort.
-First it counts the sources for each target, then performs an exclusive scan.
-emitting a CSR
+So they are grouped by the target leaf inside \snakecase{fmm_build_p2p_csr} using a counting sort.
+A first pass counts the near sources of each target, an exclusive scan turns those counts into the CSR row offsets, and a final scatter pass writes each pair's source leaf into its target's row. 
 This way I avoid a BFS descent later when evaluating P2P.
-
+Because many threads write into the same row concurrently, each row carries an atomic fill counter that hands out distinct slots within the row.
+This order is non-deterministic, but also does not matter for the P2P evaluation.
 
 \input{figures/fmm_g5}
 
@@ -411,7 +409,7 @@ This way I avoid a BFS descent later when evaluating P2P.
 
 \input{figures/fmm_g7}
 
-\subsubsection{Far Field Evaluation}
+\subsubsection{Fused Evaluation}
 % NOTE: this heading is the original one. Group 8 evaluates the NEAR field (P2P)
 % and the far field (L2P) in one fused kernel, so "Fused Evaluation" may fit better.
 % Points worth making here:
