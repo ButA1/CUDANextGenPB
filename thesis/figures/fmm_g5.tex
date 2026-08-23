@@ -1,0 +1,28 @@
+% ------------------------------------------------------------------------
+%  FMM implementation, group 5: near-field list grouping.
+%  Include with \input{figures/fmm_g5}
+%  Companion to the pipeline overview in figures/fmm_overview.tex.
+% ------------------------------------------------------------------------
+\input{figures/fmm_style}
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[
+    >={Latex[length=1.8mm]},
+    g/.style={fmmgpu, text width=14.6cm},
+    c/.style={fmmcpu, text width=14.6cm},
+]
+\node[g, anchor=north west] (c1) at (0,0) {%
+  \fmmH{\texttt{fmm\_build\_p2p\_csr()}}
+  \fmmK{p2p\_count\_kernel}{--- 1 thread / near pair $\rightarrow$ \texttt{cnt[A]}}
+  \fmmK{cub::DeviceScan::ExclusiveSum}{--- $\rightarrow$ \texttt{d\_p2p\_off}}
+  \fmmK{p2p\_scatter\_kernel}{--- 1 thread / near pair, atomic fill of \texttt{d\_p2p\_val}}};
+
+\foreach \n in {c1}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {GPU};
+
+\end{tikzpicture}
+\caption[Group 5: near-field list grouping]{\textbf{Group~5: near-field list grouping.} Solid boxes are
+    GPU kernels, dashed boxes host steps; italics give the parallel mapping.}
+\label{fig:fmm-g5}
+\end{figure}

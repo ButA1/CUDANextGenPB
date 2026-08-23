@@ -1,0 +1,35 @@
+% ------------------------------------------------------------------------
+%  FMM implementation, group 6: M2L accumulation.
+%  Include with \input{figures/fmm_g6}
+%  Companion to the pipeline overview in figures/fmm_overview.tex.
+% ------------------------------------------------------------------------
+\input{figures/fmm_style}
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[
+    >={Latex[length=1.8mm]},
+    g/.style={fmmgpu, text width=14.6cm},
+    c/.style={fmmcpu, text width=14.6cm},
+]
+\node[c, anchor=north west] (m0) at (0,0) {%
+  \fmmH{\texttt{fmm\_translations<P>()}}
+  \fmmK{switch on $p$}{--- runtime order $\rightarrow$ compile-time \texttt{P}; zeroes \texttt{d\_local}}};
+
+\node[g, anchor=north west] (m1) at ([yshift=-3mm]m0.south west) {%
+  \fmmH{\texttt{m2l\_accumulate\_kernel<P>}}
+  \fmmK{1 thread / M2L pair}{--- 128 threads / block}
+  \fmmK{$S(c_B-c_A)$ to order $2p$}{--- per thread, then \texttt{atomicAdd} into \texttt{d\_local[A]}}};
+
+\foreach \n in {m1}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {GPU};
+\foreach \n in {m0}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {CPU};
+\foreach \a/\b in {m0/m1}
+  \draw[fmmflow] (\a.south) -- (\b.north);
+
+\end{tikzpicture}
+\caption[Group 6: M2L accumulation]{\textbf{Group~6: M2L accumulation.} Solid boxes are
+    GPU kernels, dashed boxes host steps; italics give the parallel mapping.}
+\label{fig:fmm-g6}
+\end{figure}

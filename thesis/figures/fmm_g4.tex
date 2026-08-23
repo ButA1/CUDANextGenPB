@@ -1,0 +1,36 @@
+% ------------------------------------------------------------------------
+%  FMM implementation, group 4: dual-tree traversal.
+%  Include with \input{figures/fmm_g4}
+%  Companion to the pipeline overview in figures/fmm_overview.tex.
+% ------------------------------------------------------------------------
+\input{figures/fmm_style}
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[
+    >={Latex[length=1.8mm]},
+    g/.style={fmmgpu, text width=14.6cm},
+    c/.style={fmmcpu, text width=14.6cm},
+]
+\node[c, anchor=north west] (p0) at (0,0) {%
+  \fmmH{Host driver \textnormal{\textemdash\ \texttt{fmm\_pair\_traverse()}}}
+  \fmmK{level-synchronous BFS}{--- one launch per level, counter read D2H}
+  \fmmK{overflow}{--- frontier $\times 4$; M2L/P2P resized to the exact total}};
+
+\node[g, anchor=north west] (p1) at ([yshift=-3mm]p0.south west) {%
+  \fmmH{\texttt{fmm\_pair\_kernel}}
+  \fmmK{1 thread / $(A,B)$ cell pair}{--- 128 threads / block, grid $=$ frontier size}
+  \fmmN{far $\rightarrow$ \textbf{M2L list}\quad near $\rightarrow$ \textbf{P2P list}\quad else split the larger cell}};
+
+\foreach \n in {p1}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {GPU};
+\foreach \n in {p0}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {CPU};
+\foreach \a/\b in {p0/p1}
+  \draw[fmmflow] (\a.south) -- (\b.north);
+
+\end{tikzpicture}
+\caption[Group 4: dual-tree traversal]{\textbf{Group~4: dual-tree traversal.} Solid boxes are
+    GPU kernels, dashed boxes host steps; italics give the parallel mapping.}
+\label{fig:fmm-g4}
+\end{figure}

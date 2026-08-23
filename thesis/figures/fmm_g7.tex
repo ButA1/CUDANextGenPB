@@ -1,0 +1,34 @@
+% ------------------------------------------------------------------------
+%  FMM implementation, group 7: L2L downward sweep.
+%  Include with \input{figures/fmm_g7}
+%  Companion to the pipeline overview in figures/fmm_overview.tex.
+% ------------------------------------------------------------------------
+\input{figures/fmm_style}
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[
+    >={Latex[length=1.8mm]},
+    g/.style={fmmgpu, text width=14.6cm},
+    c/.style={fmmcpu, text width=14.6cm},
+]
+\node[c, anchor=north west] (l0) at (0,0) {%
+  \fmmH{Host level loop}
+  \fmmK{\texttt{lvl} $=1\dots$\texttt{max\_depth}}{--- one launch per level $=$ the level barrier}};
+
+\node[g, anchor=north west] (l1) at ([yshift=-3mm]l0.south west) {%
+  \fmmH{\texttt{l2l\_level\_kernel<P>}}
+  \fmmK{1 thread / box node at this depth}{--- 64 threads / block, grid from \texttt{d\_l2l\_nodes}}};
+
+\foreach \n in {l1}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {GPU};
+\foreach \n in {l0}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {CPU};
+\foreach \a/\b in {l0/l1}
+  \draw[fmmflow] (\a.south) -- (\b.north);
+
+\end{tikzpicture}
+\caption[Group 7: L2L downward sweep]{\textbf{Group~7: L2L downward sweep.} Solid boxes are
+    GPU kernels, dashed boxes host steps; italics give the parallel mapping.}
+\label{fig:fmm-g7}
+\end{figure}

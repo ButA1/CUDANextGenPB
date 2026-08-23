@@ -1,0 +1,34 @@
+% ------------------------------------------------------------------------
+%  FMM implementation, group 2: upward pass.
+%  Include with \input{figures/fmm_g2}
+%  Companion to the pipeline overview in figures/fmm_overview.tex.
+% ------------------------------------------------------------------------
+\input{figures/fmm_style}
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[
+    >={Latex[length=1.8mm]},
+    g/.style={fmmgpu, text width=14.6cm},
+    c/.style={fmmcpu, text width=14.6cm},
+]
+\node[g, anchor=north west] (u1) at (0,0) {%
+  \fmmH{P2M \textnormal{\textemdash\ \texttt{src\_p2m\_kernel<P>}}}
+  \fmmK{1 block / \textbf{box leaf}, 1 thread / atom in it}{--- grid $=$ \texttt{n\_leaves}, block $=$ \texttt{leaf\_size} to a warp, capped at 256}
+  \fmmK{shared-memory expansion}{--- one \texttt{d\_moments} store per box}};
+
+\node[g, anchor=north west] (u2) at ([yshift=-3mm]u1.south west) {%
+  \fmmH{M2M \textnormal{\textemdash\ \texttt{src\_m2m\_kernel<P>}}}
+  \fmmK{1 thread / \textbf{box leaf}}{--- 256 threads / block, climbing \texttt{parent}}
+  \fmmK{\texttt{atomicAdd} handshake}{--- indexed by box slot; second child proceeds}};
+
+\foreach \n in {u1,u2}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {GPU};
+\foreach \a/\b in {u1/u2}
+  \draw[fmmflow] (\a.south) -- (\b.north);
+
+\end{tikzpicture}
+\caption[Group 2: upward pass]{\textbf{Group~2: upward pass.} Solid boxes are
+    GPU kernels, dashed boxes host steps; italics give the parallel mapping.}
+\label{fig:fmm-g2}
+\end{figure}

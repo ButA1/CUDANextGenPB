@@ -1,0 +1,42 @@
+% ------------------------------------------------------------------------
+%  FMM implementation, group 3: target tree construction.
+%  Include with \input{figures/fmm_g3}
+%  Companion to the pipeline overview in figures/fmm_overview.tex.
+% ------------------------------------------------------------------------
+\input{figures/fmm_style}
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[
+    >={Latex[length=1.8mm]},
+    g/.style={fmmgpu, text width=14.6cm},
+    c/.style={fmmcpu, text width=14.6cm},
+]
+\node[g, anchor=north west] (t1) at (0,0) {%
+  \fmmH{LBVH build, box nodes and box leaves \textnormal{\textemdash\ \texttt{build\_target\_tree()}}}
+  \fmmN{The same eleven kernels as group~1, same thread mappings, over the $M$ target points, except:}
+  \fmmK{reorder\_geom\_kernel}{--- 1 thread / point; geometry only, plus \texttt{d\_orig}}
+  \fmmK{cub::DeviceReduce::Max}{--- deepest box depth $\rightarrow$ \texttt{max\_depth}}};
+
+\node[g, anchor=north west] (t2) at ([yshift=-3mm]t1.south west) {%
+  \fmmH{L2L depth worklist}
+  \fmmK{l2l\_count\_kernel}{--- 1 thread / node $\rightarrow$ depth bucket}
+  \fmmK{cub::DeviceScan::ExclusiveSum}{--- counts $\rightarrow$ offsets}
+  \fmmK{l2l\_scatter\_kernel}{--- 1 thread / node $\rightarrow$ \texttt{d\_l2l\_nodes}, a CSR keyed by depth}};
+
+\node[c, anchor=north west] (t3) at ([yshift=-3mm]t2.south west) {%
+  \fmmH{Local-expansion storage}
+  \fmmK{cudaMalloc}{--- \texttt{d\_local}, \texttt{n\_box} $\times\,(p{+}1)(p{+}2)$ doubles}};
+
+\foreach \n in {t1,t2}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {GPU};
+\foreach \n in {t3}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {CPU};
+\foreach \a/\b in {t1/t2, t2/t3}
+  \draw[fmmflow] (\a.south) -- (\b.north);
+
+\end{tikzpicture}
+\caption[Group 3: target tree construction]{\textbf{Group~3: target tree construction.} Solid boxes are
+    GPU kernels, dashed boxes host steps; italics give the parallel mapping.}
+\label{fig:fmm-g3}
+\end{figure}

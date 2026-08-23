@@ -1,0 +1,53 @@
+% ------------------------------------------------------------------------
+%  FMM implementation, group 1: source tree construction.
+%  Include with \input{figures/fmm_g1}
+%  Companion to the pipeline overview in figures/fmm_overview.tex.
+% ------------------------------------------------------------------------
+\input{figures/fmm_style}
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[
+    >={Latex[length=1.8mm]},
+    g/.style={fmmgpu, text width=14.6cm},
+    c/.style={fmmcpu, text width=14.6cm},
+]
+\node[c, anchor=north west] (s0) at (0,0) {%
+  \fmmH{Setup \textnormal{\textemdash\ \texttt{fmm\_build\_atom\_tree()}}}
+  \fmmK{init\_constant\_tables()}{--- $k!$, $A_n^m$ $\rightarrow$ \texttt{\_\_constant\_\_}}
+  \fmmK{src\_alloc\_nodes()}{--- \texttt{cudaMalloc}, $2N-1$ nodes}};
+
+\node[g, anchor=north west] (s1) at ([yshift=-3mm]s0.south west) {%
+  \fmmH{LBVH build \textnormal{\textemdash\ \texttt{lbvh\_morton\_sort()}}}
+  \fmmK{bbox\_kernel}{--- grid-stride over the $N$ atoms}
+  \fmmK{morton\_kernel}{--- 1 thread / atom}
+  \fmmK{cub::DeviceRadixSort::SortPairs}{--- device-wide}
+  \fmmK{reorder\_kernel}{--- 1 thread / atom $\rightarrow$ seeds the \textbf{LBVH leaves}}
+  \fmmK{build\_internal\_kernel}{--- 1 thread / internal node}
+  \fmmK{summarize\_aabb\_kernel}{--- 1 thread / \textbf{LBVH leaf}, bottom-up}};
+
+\node[g, anchor=north west] (s2) at ([yshift=-3mm]s1.south west) {%
+  \fmmH{Box nodes and box leaves \textnormal{\textemdash\ \texttt{src\_box\_storage()}}}
+  \fmmK{node\_depth\_kernel}{--- 1 thread / node}
+  \fmmK{mark\_box\_kernel}{--- 1 thread / node $\rightarrow$ \textbf{box nodes}}
+  \fmmK{cub::DeviceScan::ExclusiveSum}{--- device-wide}
+  \fmmK{box\_slot\_kernel}{--- 1 thread / node $\rightarrow$ \texttt{d\_box\_slot}}
+  \fmmK{mark\_frontier\_kernel}{--- 1 thread / node $\rightarrow$ \textbf{box leaves}}
+  \fmmK{iota\_kernel, cub::DeviceSelect::Flagged}{--- compact to \texttt{d\_leaf\_nodes}}};
+
+\node[c, anchor=north west] (s3) at ([yshift=-3mm]s2.south west) {%
+  \fmmH{Moment storage}
+  \fmmK{cudaMalloc, cudaMemset}{--- \texttt{d\_moments}, \texttt{n\_box} $\times\,(p{+}1)(p{+}2)$ doubles}};
+
+\foreach \n in {s1,s2}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {GPU};
+\foreach \n in {s0,s3}
+  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {CPU};
+\foreach \a/\b in {s0/s1, s1/s2, s2/s3}
+  \draw[fmmflow] (\a.south) -- (\b.north);
+
+\end{tikzpicture}
+\caption[Group 1: source tree construction]{\textbf{Group~1: source tree construction.} Solid boxes are
+    GPU kernels, dashed boxes host steps; italics give the parallel mapping.}
+\label{fig:fmm-g1}
+\end{figure}

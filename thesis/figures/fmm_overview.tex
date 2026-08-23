@@ -1,0 +1,121 @@
+% ------------------------------------------------------------------------
+%  FMM implementation: whole-pipeline overview, group headlines only.
+%  Include with \input{figures/fmm_overview}
+%  Each group is broken out in its own detailed figure (fmm_g1 .. fmm_g8).
+% ------------------------------------------------------------------------
+\input{figures/fmm_style}
+
+\begin{figure}[p]
+\centering
+\begin{tikzpicture}[
+    >={Latex[length=1.9mm]},
+    b/.style ={fmmgpu, text width=4.4cm, align=center, inner sep=1.4mm,
+               font=\small},
+    bc/.style={fmmcpu, text width=4.4cm, align=center, inner sep=1.4mm,
+               font=\small},
+    w/.style ={b,  text width=9.7cm},
+    wc/.style={bc, text width=9.7cm},
+]
+
+% ---------- legend ----------
+\node[anchor=north, align=center] at (4.99,0.5) {{\scriptsize
+   \tikz[baseline=-0.5ex]\node[draw, line width=0.6pt, fill=white,
+        minimum width=4mm, minimum height=2.6mm, inner sep=0pt]{};\;GPU kernel
+   \qquad
+   \tikz[baseline=-0.5ex]\node[draw=black!55, line width=0.5pt,
+        dash pattern=on 1.4pt off 1.2pt, fill=black!7,
+        minimum width=4mm, minimum height=2.6mm, inner sep=0pt]{};\;host (CPU) step}};
+
+% =============== 1  source tree construction ===============
+\node[wc, anchor=north west] (a1) at (0,-1.0) {Setup};
+\node[w,  anchor=north west] (a2) at ([yshift=-1.8mm]a1.south west) {LBVH build};
+\node[w,  anchor=north west] (a3) at ([yshift=-1.8mm]a2.south west) {Box nodes and box leaves};
+\node[wc, anchor=north west] (a4) at ([yshift=-1.8mm]a3.south west) {Moment storage};
+\node[fmmgrp, fit=(a1)(a2)(a3)(a4)] (G1) {};
+
+% =============== 2  upward pass ===============
+% Every group is anchored back to x = 0, never to the previous PANEL edge --
+% otherwise each group drifts 2.4 mm (one fmmgrp inner sep) further left.
+\coordinate (p2) at (0,0 |- G1.south);
+\node[b, anchor=north west] (b1) at ([yshift=-8mm]p2) {P2M};
+\node[b, anchor=north west] (b2) at ([xshift=6mm]b1.north east) {M2M};
+\node[fmmgrp, fit=(b1)(b2)] (G2) {};
+
+% =============== 3  target tree construction ===============
+\coordinate (p3) at (0,0 |- G2.south);
+\node[w,  anchor=north west] (c1) at ([yshift=-23mm]p3) {LBVH build, box nodes and box leaves};
+\node[w,  anchor=north west] (c2) at ([yshift=-1.8mm]c1.south west) {L2L depth worklist};
+\node[wc, anchor=north west] (c3) at ([yshift=-1.8mm]c2.south west) {Local-expansion storage};
+\node[fmmgrp, fit=(c1)(c2)(c3)] (G3) {};
+
+% =============== 4  dual-tree traversal ===============
+\coordinate (p4) at (0,0 |- G3.south);
+\node[bc, anchor=north west] (d1) at ([yshift=-8mm]p4) {Host driver};
+\node[b,  anchor=north west] (d2) at ([xshift=6mm]d1.north east) {\texttt{\small fmm\_pair\_kernel}};
+\node[fmmgrp, fit=(d1)(d2)] (G4) {};
+
+% =============== 5 / 6  the two interaction lists ===============
+\coordinate (p5) at (0,0 |- G4.south);
+\node[b, anchor=north west] (e1) at ([yshift=-11mm]p5) {Near-list CSR};
+\node[b, anchor=north west] (f1) at ([xshift=6mm]e1.north east) {M2L accumulate};
+\node[fmmgrp, fit=(e1)] (G5) {};
+\node[fmmgrp, fit=(f1)] (G6) {};
+
+% =============== 7  L2L ===============
+\coordinate (p7) at (f1.west |- G6.south);
+\node[b, anchor=north west] (g1) at ([yshift=-9mm]p7) {L2L level sweep};
+\node[fmmgrp, fit=(g1)] (G7) {};
+
+% =============== 8  fused evaluation ===============
+\coordinate (p8) at (0,0 |- G7.south);
+\node[w,  anchor=north west] (h1) at ([yshift=-11mm]p8) {Fused L2P $+$ P2P leaf kernel};
+\node[wc, anchor=north west] (h2) at ([yshift=-1.8mm]h1.south west) {Host reduction};
+\node[fmmgrp, fit=(h1)(h2)] (G8) {};
+
+% ---------- group labels on the panel borders ----------
+\node[fmmlbl] at ([xshift=4mm]G1.north west) {\bfseries 1\ \ Source tree construction};
+\node[fmmlbl] at ([xshift=4mm]G2.north west) {\bfseries 2\ \ Upward pass};
+\node[fmmlbl] at ([xshift=4mm]G3.north west) {\bfseries 3\ \ Target tree construction};
+\node[fmmlbl] at ([xshift=4mm]G4.north west) {\bfseries 4\ \ Dual-tree traversal};
+\node[fmmlbl] at ([xshift=4mm]G5.north west) {\bfseries 5\ \ P2P CSR};
+\node[fmmlbl] at ([xshift=4mm]G6.north west) {\bfseries 6\ \ M2L};
+\node[fmmlbl] at ([xshift=4mm]G7.north west) {\bfseries 7\ \ L2L};
+\node[fmmlbl] at ([xshift=4mm]G8.north west) {\bfseries 8\ \ Fused evaluation};
+
+% ---------- flow ----------
+\foreach \x/\y in {a1/a2, a2/a3, a3/a4, c1/c2, c2/c3, h1/h2}
+  \draw[fmmflow] (\x.south) -- (\y.north);
+\draw[fmmflow] (G1.south) -- (G2.north);
+\draw[fmmflow] (G2.south) -- (G3.north);
+\draw[fmmflow] (G3.south) -- (G4.north);
+
+% Connectors run down the right of each panel: the group labels sit on the
+% top-left of the borders, so a centred arrow would strike through them.
+\coordinate (x5) at ([xshift=-8mm]G5.north east);
+\coordinate (x6) at ([xshift=-8mm]G6.north east);
+\coordinate (x7) at ([xshift=-8mm]G7.north east);
+\draw[fmmflow] (x6 |- G6.south) -- node[fmmedge, pos=0.5] {\texttt{d\_local} (partial)} (x7);
+
+% the single traversal pass forks into the two interaction lists
+\draw[fmmflow] (x5 |- G4.south) -- node[fmmedge, pos=0.55] {P2P pair list} (x5);
+\draw[fmmflow] (x6 |- G4.south) -- node[fmmedge, pos=0.55] {M2L pair list} (x6);
+
+% and both rejoin in the fused leaf kernel
+\draw[fmmflow] (x5 |- G5.south) -- node[fmmedge, pos=0.9] {near field} (x5 |- G8.north);
+\draw[fmmflow] (x7 |- G7.south) -- node[fmmedge, pos=0.5] {far field} (x7 |- G8.north);
+
+% ---------- lifecycle band (drawn last so it masks the arrow behind it) ------
+\draw[black!45, line width=0.5pt, dash pattern=on 1.6pt off 1.6pt]
+     ([xshift=-6mm,yshift=9.5mm]G3.north west) -- ([xshift=6mm,yshift=9.5mm]G3.north east);
+\node[fmmband, anchor=south west] at ([xshift=-4mm,yshift=10.1mm]G3.north west)
+     {once per solve};
+\node[fmmband, anchor=north west] at ([xshift=-4mm,yshift=8.9mm]G3.north west)
+     {once \emph{per energy term}: $E_{\text{pol}}$, then $E_{\text{ion}}$};
+
+\end{tikzpicture}
+\caption[FMM implementation: pipeline overview]{%
+    \textbf{Overview of the FMM implementation.} Solid boxes are GPU kernels,
+    dashed boxes host steps. Each group is broken out at the level of individual
+    kernels in Figures~\ref{fig:fmm-g1}--\ref{fig:fmm-g8}.}
+\label{fig:fmm-overview}
+\end{figure}

@@ -1,0 +1,41 @@
+% ------------------------------------------------------------------------
+%  Shared styling for the FMM implementation figures:
+%    fmm_overview.tex   -- the whole pipeline, group headlines only
+%    fmm_g1..g8.tex     -- one detailed figure per group
+%  Idempotent: every figure \input{figures/fmm_style} before its tikzpicture.
+%  Needs tikz with the libraries positioning, fit and arrows.meta.
+% ------------------------------------------------------------------------
+
+% Entry macros. The mapping runs on from the kernel name in the same paragraph
+% rather than on its own line -- a forced break per entry doubles the height.
+\providecommand{\fmmH}[1]{{\footnotesize\bfseries #1}\par\vspace{0.5ex}}
+\providecommand{\fmmK}[2]{{\ttfamily\scriptsize #1}\,{\tiny\itshape\color{black!62}#2}\par\vspace{0.35ex}}
+\providecommand{\fmmN}[1]{{\tiny\color{black!62}#1}\par\vspace{0.35ex}}
+
+% Legend, shared by the overview and by any detail figure that wants it.
+\providecommand{\fmmlegend}{{\scriptsize
+   \tikz[baseline=-0.5ex]\node[draw, line width=0.6pt, fill=white,
+        minimum width=4mm, minimum height=2.6mm, inner sep=0pt]{};\;GPU kernel
+   \quad
+   \tikz[baseline=-0.5ex]\node[draw=black!55, line width=0.5pt,
+        dash pattern=on 1.4pt off 1.2pt, fill=black!7,
+        minimum width=4mm, minimum height=2.6mm, inner sep=0pt]{};\;host (CPU) step
+   \quad {\itshape italics} $=$ parallel mapping
+   \quad \texttt{cub::} $=$ CUB device-wide primitive (GPU)}}
+
+\tikzset{
+  fmmgpu/.style  ={draw, line width=0.6pt, fill=white, align=left, inner sep=1.5mm},
+  fmmcpu/.style  ={fmmgpu, draw=black!55, dash pattern=on 1.4pt off 1.2pt,
+                   fill=black!7},
+  fmmnote/.style ={fmmgpu, draw=black!45, fill=black!4, rounded corners=2pt},
+  fmmtag/.style  ={font=\tiny\sffamily, text=black!55, fill=white,
+                   inner sep=0.5mm, anchor=north east},
+  fmmflow/.style ={->, line width=0.7pt, black!70},
+  fmmgrp/.style  ={draw=black!45, line width=0.9pt, rounded corners=2.5pt,
+                   inner sep=2.4mm},
+  fmmlbl/.style  ={font=\small, fill=white, inner sep=1mm, anchor=west},
+  fmmedge/.style ={font=\tiny\sffamily, text=black!60, inner sep=0.7mm,
+                   fill=white},
+  fmmband/.style ={font=\scriptsize\itshape, text=black!60, inner sep=1mm,
+                   fill=white},
+}
