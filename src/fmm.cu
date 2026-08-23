@@ -1256,8 +1256,11 @@ __global__ void p2p_count_kernel(const int2 *__restrict__ pairs, int n_pairs,
 }
 
 // Scatter each near pair's source-leaf B into its target node's CSR segment. Intra-segment
-// order is non-deterministic (atomic fill) -- fine: P2P sum order already differs from the
-// host basis (parity ~1e-10, not bit-exact).
+// order is non-deterministic (atomic fill), so the P2P sum order varies run-to-run and differs
+// from the host basis. Measured cost of that reordering on a realistic near sum (leaf-blocked,
+// mixed-sign charges, kappa ~2e2): ~1e-14 relative, per target point AND aggregated -- the
+// per-point errors are independent, so they partly cancel in the outer reduction rather than
+// accumulating. 
 __global__ void p2p_scatter_kernel(const int2 *__restrict__ pairs, int n_pairs,
                                    const int *__restrict__ off, int *__restrict__ fill,
                                    int *__restrict__ val) {
