@@ -95,6 +95,9 @@ FMM represents a middle ground, which at certain settings achieves 0 additional 
 \label{sec:implementation-energy-calculation-naive-kernels}
 
 The first implementation was to create native kernels for all three energies: the Coulomb, polarization and ionic.
+The result of the polarization energy is reused for the second term of the ionic energy Eq.~\ref{eq:ionic-energy}, as both a point-discrete.
+This mirrors the original implementation.
+The ionic kernel only calculates the first term of the ionic energy, or to be more specific, the triangle-discrete term Eq.~\ref{eq:ionic-energy-discrete}.
 The atoms, charges, flux, triangle corners and normals where put into flat arrays and passed to the kernels as needed.
 Even systems like 6VYB with 44k or 1VSZ 180k atoms fit comfortably into the 10GB of VRAM of an RTX 3080.
 
@@ -144,48 +147,32 @@ As this occurrence is very rare, it did not affect the speed, and even the accur
 \subsection{FMM}
 \label{sec:implementation-energy-calculation-fmm}
 
-It was obvious that in order to retain the level of accuracy a more sophisticated approach was be required to achieve any significant level of speedup.
+Particularly for the polarization and ionic energies, it was obvious that in order to achieve any significant level of speedup, a more sophisticated approach was be required while retaining the level of accuracy.
 For this purpose I implemented a fairly non-standard implementation of FMM, with the only ``normal'' things about it being the overall algorithm.
 It uses a LBVH trees, iterative dual tree traverse with double sided $B_{max}$ MAC, spherical harmonic expansions with both associated-Legendre and pole-free Cartesian recurrence.
 
 \subsubsection{Overview}
+% TODO add overview
+The rough structure of my implementation is as follows:
+On the CPU side, the previously mentioned data packing takes place, as is the case with the naive kernels.
+Then a LBVH source tree is constructed from the molecular particles.
+Directly after its construction, the multipole expansions are passed upwards.
+The source tree is reused for both energy calculations, while two different target tree are constructed for point-discrete and triangle-discrete calculations.
+Then for each target tree, it traverses the source and target using DTT, and creates interaction lists for the far field and near field.
+For the far field interactions, the M2L translations are performed and passed downwards using L2L.
+Finally, both the L2P and P2P interactions are handled in a fused evaluation.
 
+Figures~\ref{fig:fmm-build} and~\ref{fig:fmm-eval} give the same pipeline at the level of individual kernels, grouped into the eight stages the sections below follow, and record for each stage whether it runs on the host or the device and, for the device kernels, how the work is mapped onto blocks and threads.
 
+\input{figures/fmm_build}
 
-\subsubsection{Tree Construction}
-
-Both the source and the target tree are constructed using Karras's LBVH algorithm\cite{karras2012lbvh}, whose prerequisite is a bounding box over all bodies.
-I compute this one the GPU by finding the minimum and maximum coordinates in all the spacial dimensions with the \texttt{bbox\_kernel}.
-In combines custom atomicMinDouble and atomicMaxDouble into 6 shared variables per block, before comparing the result of the block against the global memory.
-Although not efficient, this at least reduces the traffic from once per thread to 6 times the amount of blocks.
-Running 1VYZ and 6VYB, this kernel only took only tens of microseconds.
-% TODO honestly just writing this makes it seem ultra inefficient
-% I might switch to cub Reduce instead, this is embarrassingly bad
-% I also should be vary of being that precise right now
-
-The resulting structure is a binary radix tree, which is different from a traditional octree used in FMM.
-However, it is practically the same spacial decomposition.
-To get an ``octant'' of a node, one must simply descend it three levels, though this does mean that my tree depth is essentially 3x that of an equivalent octree.
-I have to point out though that those ``octants'' aren't actually that, because LBVH creates tight boxes around a cluster of particles, rather than bisected quadrants.
-This has both upsides and downsides.
-On one side I need to traverse 3x as many times as I would with a octree.
-On the other I achieve greater MAC granularity, since I only split nodes two, instead of 8.
-
-Each leaf of the LBVH only contains a single atom.
-However, this is overly granular and wasteful.
-In order to cluster them into leafs with a certain number of atoms, I classified them into nodes on whether they cover enough atoms.
-Logically, a parent node whose child covers enough nodes automatically does so as well.
-These nodes are called the box nodes, and they are the only ones that will be carrying the coefficients and moments of the multipole expansions.
-This not only eases calculation, it also drastically reduces memory consumption, as the non-box nodes far outnumber them.
-For the clustered leaf size, I settled on 256.
+\input{figures/fmm_eval}
 
 \subsubsection{Multipole Expansion}
-% oof those are AI generated explanations, not sure how I feel about that
-% on the other hand, I already accepted a bunch of figure descriptions
-% a bunch of it is complete trash!
+
 Since both polarization energy Eq.~\ref{eq:polarization-energy} and the second term of the ionic energy Eq.~\ref{eq:ionic-energy} are variations of the Laplace kernel, I used spherical harmonics and the translation operators taken from ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}. 
 The first term though has a different shape $r/|r|^3$, which is equal to the gradient of the Laplace kernel $\nabla 1/|r| = r/|r|^3$.
-To compute it, I used forward-mode automatic differentiation, through operator overloading. 
+To compute it, I used forward-mode automatic differentiation, through operator overloading.
 The spherical harmonics of degree n and order m are computed with:
 \begin{equation}
     Y_n^m(\theta, \phi) = \sqrt{\frac{(n-|m|)!}{(n+|m|)!}} \cdot P_n^{|m|}(\cos\theta) e^{im\phi}
@@ -234,10 +221,7 @@ with coefficients
     L_j^k = \sum_{l=1}^{N} q_l \, \frac{Y_j^{-k}(\alpha_l,\beta_l)}{\rho_l^{j+1}}
     \label{eq:local-expansion-coeffs}
 \end{equation}
-% TODO figure out what to do with M2P
-% M2P is not used as a multipole expansion for a single atom is the atom itself (pure monopole).
-% doing M2M on these monopoles is basically M2P but its less efficient
-% The current implementation is inefficient though, so I am keeping these as comments
+
 \subsubsection{M2M}
 M2M translates a multipole expansion with coefficients $O_n^m$, centered at $X_0=(\rho,\alpha,\beta)$, into an equivalent expansion $M_j^k$ centered at the origin, letting a parent node's expansion be assembled from its children's without ever revisiting the original charges:
 \begin{equation}
@@ -275,8 +259,42 @@ A coefficient $M_n^m$ is always the complex conjugate of $M_n^{-m}$.
 This allowed me to pack them in a lower-triangular layout, with interleaving real and imaginary parts, storing only the positive $m$.
 To get the coefficient $M_n^{-m}$, I simply looked up $M_n^m$, and inverted its imaginary part.
 
+\subsubsection{Tree Construction}
+
+Both the source and the target tree are constructed using Karras's LBVH algorithm\cite{karras2012lbvh}, whose prerequisite is a bounding box over all bodies.
+I compute this one the GPU by finding the minimum and maximum coordinates in all the spacial dimensions with the \texttt{bbox\_kernel}.
+In combines custom atomicMinDouble and atomicMaxDouble into 6 shared variables per block, before comparing the result of the block against the global memory.
+Although not efficient, this at least reduces the traffic from once per thread to 6 times the amount of blocks.
+Running 1VYZ and 6VYB, this kernel only took only tens of microseconds.
+% TODO honestly just writing this makes it seem ultra inefficient
+% I might switch to cub Reduce instead, this is embarrassingly bad
+% I also should be vary of being that precise right now
+
+The resulting structure is a binary radix tree, which is different from a traditional octree used in FMM.
+However, it is practically the same spacial decomposition.
+To get an ``octant'' of a node, one must simply descend it three levels, though this does mean that my tree depth is essentially 3x that of an equivalent octree.
+I have to point out though that those ``octants'' aren't actually that, because LBVH creates tight boxes around a cluster of particles, rather than bisected quadrants.
+This has both upsides and downsides.
+On one side I need to traverse 3x as many times as I would with a octree.
+On the other I achieve greater MAC granularity, since I only split nodes two, instead of 8.
+
+Each leaf of the LBVH only contains a single atom.
+However, this is overly granular and wasteful.
+In order to cluster them into leafs with a certain number of atoms, I classified them into nodes on whether they cover enough atoms.
+Logically, a parent node whose child covers enough nodes automatically does so as well.
+These nodes are called the box nodes, and they are the only ones that will be carrying the coefficients and moments of the multipole expansions.
+This not only eases calculation, it also drastically reduces memory consumption, as the non-box nodes far outnumber them.
+% not sure if this belongs into evaluation
+For the clustered leaf size, I settled on 256 through experimentation.
+
+% TODO figure out what to do with M2P
+% M2P is not used as a multipole expansion for a single atom is the atom itself (pure monopole).
+% doing M2M on these monopoles is basically M2P but its less efficient
+% The current implementation is inefficient though, so I am keeping these as comments
+
 \subsubsection{Traversal}
 
+%It's not actually traversal, I just collect the interaction lists
 The traverse is based on DTT \cite{yokota2013dualtree} algorithm described in \ref{sec:alternative-techniques-nbody-fmm-dtt}, using the double sided $B_{max}$ MAC controlled through $\theta$.
 Rather than the $B_{\max}$ of each cell, I use the half-diagonals $r_A$ and $r_B$ of the bounding boxes, accepting a pair when $r_A + r_B < \theta R$
 (Figure~\ref{fig:fmm-mac}).
@@ -294,6 +312,12 @@ If the buffers overflowed it would increase the buffer size by 4 and try again.
 Through some experimentation, I found that the number of P2P interactions per box node only exceeded 64, when $\theta$ was set to 0.1 --- a uselessly small number which slows the algorithm down to a crawl.
 Even in that case the ladder would overstep $64 /cdot n_{box}$ once more, since only the next power of two would be greater.
 This approach is surprisingly robust, and has not lead to overflows, even when calculating the energies for really large systems like H1N1.
+
+After the traversal, the P2P pair interactions are grouped by the target leaf using \texttt{fmm\_build\_p2p\_csr}
+
+\subsubsection{Far Field Evaluation}
+
+
 
 \section{Multi-GPU}
 \label{sec:implementation-multi-gpu}
