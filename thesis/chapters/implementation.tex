@@ -425,6 +425,8 @@ So the target position is loaded once and both contribution are summed in regist
 It takes in both the result of the downward pass and the CSR sorted P2P pairs.
 The P2P pairs are processed by the device function \snakecase{fmm_drain_p2p}, which performs the direct summation over all particles according to the kernels of the original equations Eq.~\ref{eq:polarization-energy} and Eq.~\ref{eq:ionic-energy-discrete}.
 \snakecase{l2p_contract} contracts the local expansions into the potential.
+It rebuilds the regular harmonics using the same Cartesian recurrence as is \snakecase{solid_harmonics}, and evaluates the local expansion according to Eq.~\ref{eq:local-expansion-potential}.
+Finally the result it scattered back in the caller's sequence, so the result are reduced in the original order.
 
 \input{figures/fmm_g7}
 
