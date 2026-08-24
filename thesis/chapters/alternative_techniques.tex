@@ -126,6 +126,23 @@ If none of them are leafs, the pair is tested with the MAC.
 If it passes the multipole interaction is computed, otherwise the pair gets pushed to the stack.
 This approach does not require a quad- or octree to work, and is compatible with bounding volume hierarchies.
 
+\section{Other}
+% TODO dunno where to put this
+
+\subsection{Automatic Differentiation}
+
+Automatic differentiation is a programming trick to compute the differential function.
+It exploits the fact that computer programs at their core use simple arithmetic operations like summation, multiplication, division and so on.
+Thus he derivative can be evaluated using the corresponding derivative rule.
+As is the theme with this thesis, there are two types of automatic differentiation: forward mode, where the the derivative is calculated along side the value, and reverse mode, where 
+after computing the value the derivative is traced back.
+Forward mode can be implemented through operator overloads, where the overloaded arithmetic operation handles both the value and the derivative calculation.
+That means that the program functions themselves don't need to be altered, as the additional calculations are handled through the overloads of the basic arithmetic that they already use.
+
+\subsection{Templating}
+
+% TODO
+
 \section{CUDA optimizations}
 \label{sec:alternative-techniques-cuda-optimizations}
 
@@ -239,6 +256,11 @@ This helps because global memory reads are more efficient when fetching chunks o
 Thus reading tiles of values into shared memory or the registers first, before reading individual values during the calculation is more efficient.
 It is most effective when the computational intensity of the calculation is lower than the needed memory throughput.
 If the computational intensity far outweighs the memory throughput then it is unfortunately not very helpful.
+
+\subsection{Constant Memory}
+\label{sec:alternative-techniques-cuda-constant-memory}
+
+% TODO
 
 \subsection{CUDA linear equation solvers}
 \label{sec:alternative-techniques-cuda-cu-lin-eq-solvers}

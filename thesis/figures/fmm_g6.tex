@@ -1,8 +1,8 @@
-% ------------------------------------------------------------------------
-%  FMM implementation, group 6: M2L accumulation.
-%  Include with \input{figures/fmm_g6}
-%  Companion to the pipeline overview in figures/fmm_overview.tex.
-% ------------------------------------------------------------------------
+%% ------------------------------------------------------------------------
+%%  FMM implementation, group 6: downward pass (M2L and L2L).
+%%  Include with \input{figures/fmm_g6}
+%%  Companion to the pipeline overview in figures/fmm_overview.tex.
+%% ------------------------------------------------------------------------
 \input{figures/fmm_style}
 
 \begin{figure}[!htb]
@@ -12,24 +12,29 @@
     g/.style={fmmgpu, text width=14.6cm},
     c/.style={fmmcpu, text width=14.6cm},
 ]
-\node[c, anchor=north west] (m0) at (0,0) {%
-  \fmmH{\texttt{fmm\_translations<P>()}}
-  \fmmK{switch on $p$}{--- runtime order $\rightarrow$ compile-time \texttt{P}; zeroes \texttt{d\_local}}};
+\node[c, anchor=north west] (d0) at (0,0) {%
+  \fmmH{Host dispatch}
+  \fmmK{fmm\_build\_local()}{--- \texttt{switch} on $p$ $\rightarrow$ compile-time \texttt{P}}
+  \fmmK{fmm\_translations<P>()}{--- zeroes \texttt{d\_local}, then launches both kernels below}};
 
-\node[g, anchor=north west] (m1) at ([yshift=-3mm]m0.south west) {%
-  \fmmH{\texttt{m2l\_accumulate\_kernel<P>}}
+\node[g, anchor=north west] (d1) at ([yshift=-3mm]d0.south west) {%
+  \fmmH{M2L \textnormal{\textemdash\ \texttt{m2l\_accumulate\_kernel<P>}}}
   \fmmK{1 thread / M2L pair}{--- 128 threads / block}
   \fmmK{$S(c_B-c_A)$ to order $2p$}{--- per thread, then \texttt{atomicAdd} into \texttt{d\_local[A]}}};
 
-\foreach \n in {m1}
+\node[g, anchor=north west] (d2) at ([yshift=-3mm]d1.south west) {%
+  \fmmH{L2L \textnormal{\textemdash\ \texttt{l2l\_level\_kernel<P>}}}
+  \fmmK{1 thread / box node at this depth}{--- 64 threads / block, grid from \texttt{d\_l2l\_nodes}}
+  \fmmK{one launch per level}{--- \texttt{lvl} $=1\dots$\texttt{max\_depth} $=$ the level barrier}};
+
+\foreach \n in {d1,d2}
   \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {GPU};
-\foreach \n in {m0}
-  \node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]\n.north east) {CPU};
-\foreach \a/\b in {m0/m1}
+\node[fmmtag] at ([shift={(-1.4mm,-1.2mm)}]d0.north east) {CPU};
+\foreach \a/\b in {d0/d1, d1/d2}
   \draw[fmmflow] (\a.south) -- (\b.north);
 
 \end{tikzpicture}
-\caption[Group 6: M2L accumulation]{\textbf{Group~6: M2L accumulation.} Solid boxes are
+\caption[Group 6: downward pass]{\textbf{Group~6: downward pass.} Solid boxes are
     GPU kernels, dashed boxes host steps; italics give the parallel mapping.}
 \label{fig:fmm-g6}
 \end{figure}

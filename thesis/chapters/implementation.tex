@@ -300,47 +300,25 @@ Lastly, it allocates the buffer for the multipole moments with size $n_box \cdot
 \input{figures/fmm_g1}
 
 \subsubsection{Upward Pass}
-% P2M seeds the box leaves, M2M sweeps upward -- so the moments never touch the
-% sub-frontier radix nodes.
-% Points worth making here:
-%  - P2M is one block per box leaf, one thread per atom in it. The parallelism has
-%    to come from the atoms: at leaf_size=256 a 21k-atom system has only ~83 box
-%    leaves, so a thread-per-box launch would run 83 wide and be serial.
-%  - Each atom's contribution goes into a shared-memory expansion via atomicAdd,
-%    written out once per box, so global traffic is per box and not per atom.
-%  - P2M reuses the M2M shift from a stack monopole {q,0,...} rather than a
-%    separate P2M formula: an atom's expansion about its own position IS a pure
-%    monopole, so it inherits the sign/conjugation conventions verbatim. A
-%    specialised P2M would be faster and is still open.
-%  - M2M is one thread per box leaf climbing parent pointers, with an atomicAdd
-%    handshake: the first child to arrive dies, the second proceeds. Flags are
-%    indexed by BOX SLOT, so n_box ints (~700 kB) rather than n_nodes (~114 MB at
-%    14M atoms).
 
-The P2M seeds the box leaves with a monopole, which is then passed upward using M2M, with is equivalent to using the P2M.
+The \snakecase{src_p2m_kernel} seeds the box leaves with a monopole, which is then passed upward using M2M Eq.~\ref{eq:m2m-potential}, which is equivalent to using the P2M.
+This is not optimal, and using a proper P2M would be more optimal. However this kernel runs once per tree build, and its influence is minimal.
+It is launched one thread per atom, 1 block per box leaf.
+Each atom's contribution goes into a shared-memory expansion via atomicAdd, written out once per box, so global traffic is per box and not per atom.
+The \snakecase{src_m2m_kernel} is launched one thread per box leaf climbing parent pointers, with an atomicAdd handshake, where only the second child proceeds forward.
 
 \input{figures/fmm_g2}
 
 \subsubsection{Target Tree Construction}
-% Built once per energy term (flux points for E_pol, triangle vertices for E_ion),
-% while the source tree is built once and reused.
-% Points worth making here:
-%  - It reuses the source builder's LBVH path almost verbatim: same bbox, Morton,
-%    sort, radix-tree and AABB kernels, same thread mappings.
-%  - It carries no charges, so reorder_geom_kernel replaces reorder_kernel, and it
-%    also records d_orig, the sorted->caller permutation, so per-point weights are
-%    read in the caller's order and results scatter back to the caller's layout.
-%  - Its leaf size is clamped to 256 so one 256-thread block covers a whole box
-%    leaf, one thread per point. The SOURCE leaf_size must stay unclamped, or the
-%    box set would disagree with the traversal's descent cutoff and index slot -1.
-%  - Its downward sweep is level-synchronous, not handshake-driven, so it keeps the
-%    node depth and buckets the box nodes into a per-level worklist (d_l2l_nodes).
-%    Without it every L2L level scanned all n_nodes and the survivors were sparse
-%    enough that each sat alone in its warp.
-%  - d_local is n_box*comp, not N*comp: ~35 MB instead of ~9 GB on a 10^7-vertex
-%    surface.
+
 The target tree is built twice, once for the point-discrete, and once for the triangle-discrete calculations.
 The LBVH path from the source tree builder is reused almost entirely.
+The only difference being the \snakecase{reorder_geom_kernel}, which only reorders the atoms geometrically, as the target tree carries no charges, and also records the original caller's permutation, so the results scatter back to that layout.
+Just like in the source tree, the box and frontier nodes are marked, and a dense slot map for them is created.
+The downward sweep is level-synchronous, so to filter out nodes that do not carry local expansions, it creates a per-level L2L worklist in the form of a CSR, keyed by tree level.
+It does this using a counting sort.
+\snakecase{l2l_count_kernel} counts the near sources of each target, an exclusive scan turns those counts into the CSR row offsets, and \snakecase{l2l_scatter_kernel} writes each pair's source leaf into its target's row.
+Because many threads write into the same row concurrently, each row carries an atomic fill counter that hands out distinct slots within the row.
 
 \input{figures/fmm_g3}
 
@@ -351,11 +329,10 @@ The traverse is a breadth-first-descend based on DTT \cite{yokota2013dualtree} a
 Rather than the $B_{\max}$ of each cell, I use the half-diagonals $r_A$ and $r_B$ of the bounding boxes, accepting a pair when $r_A + r_B < \theta R$
 (Figure~\ref{fig:fmm-mac}).
 \input{figures/mac_criterion}
-Instead of evaluating the interactions during the traverse itself, I construct a list of near field (P2P) and far field (M2L) interaction, essentially doing what traditional FMM does, although using a MAC.
-My version is also recursive, but iterative, which processes the entire frontier in a level-synchronous loop.
-Each iteration calls the \texttt{fmm\_pair\_kernel}, which does the same classifications, as the regular DTT, but emits the M2L, P2P and next frontier pairs.
-An important distinction is also that a ``leaf'' is considered the smallest box node, not the smallest node in the tree.
-Since the buffer size can not be dynamically changed, I started the traversal with an estimate.
+Instead of evaluating the interactions during the traverse itself, I construct a list of near field (P2P) and far field (M2L) interaction, essentially doing what traditional FMM does, although through an MAC instead of relationships within the tree.
+My version is also iterative rather than recursive.
+It processes the all frontier pairs in a level-synchronous loop in parallel inside \texttt{fmm\_pair\_kernel}, which does the same classifications, as the regular DTT, but emits the M2L, P2P and next frontier pairs.
+Since the buffer size can not be dynamically changed, it starts the traversal using an estimate, and retries with a larger buffer in case of an overflow.
 The buffer cap starts out at $2^18$ and climbs a power-of-two ladder until it is either larger than 1 GiB, or $64 \cdot n_{box}$.
 If the buffers overflowed it would increase the buffer size by 4 and try again.
 % For the double sided MAC, the M2L interaction list for a cell forms a constant-thickness shell on a sphere with a radius of roughly $1/\theta$ meaning it list size grows with \(\mathcal{O}(\theta^{-2})\) \cite{yokota2012hierarchical}.
@@ -363,25 +340,27 @@ If the buffers overflowed it would increase the buffer size by 4 and try again.
 % pretty much BS because I don't have an octree
 Through some experimentation, I found that the number of P2P interactions per box node only exceeded 64, when $\theta$ was set to 0.1 --- a uselessly small number which slows the algorithm down to a crawl.
 Even in that case the ladder would overstep $64 \cdot n_{box}$ once more, since only the next power of two would be greater.
-This approach is surprisingly robust, and has not lead to overflows, even when calculating the energies for really large systems like H1N1.
+This approach is surprisingly robust, and handled even very large systems like H1N1 gracefully.
 
 \input{figures/fmm_g4}
 
 \subsubsection{Near-Field List Grouping}
 
 After the traversal the P2P pairs are unsorted. 
-So they are grouped by the target leaf inside \snakecase{fmm_build_p2p_csr} using a counting sort.
+So they are grouped by the target leaf inside \snakecase{fmm_build_p2p_csr}, using the exact same machinery as the L2L worklist.
 A first pass counts the near sources of each target, an exclusive scan turns those counts into the CSR row offsets, and a final scatter pass writes each pair's source leaf into its target's row. 
-This way I avoid a BFS descent later when evaluating P2P.
-Because many threads write into the same row concurrently, each row carries an atomic fill counter that hands out distinct slots within the row.
-This order is non-deterministic, but also does not matter for the P2P evaluation.
+This way I avoided a BFS descent later when evaluating P2P.
 
 \input{figures/fmm_g5}
 
-\subsubsection{M2L Accumulation}
-% Points worth making here:
-%  - fmm_translations<P> switches the runtime p to a compile-time P (per-thread
-%    harmonic buffers are sized at compile time) and zeroes d_local first.
+\subsubsection{Downward Pass}
+% M2L and L2L are one host function, fmm_translations<P>: it zeroes d_local, runs
+% m2l_accumulate_kernel<P>, then the per-level l2l_level_kernel<P> loop. The
+% runtime-p -> compile-time-P switch is one level up, in fmm_build_local.
+% This mirrors the upward pass, which is likewise one host function
+% (src_box_moments = P2M + M2M).
+%
+% M2L, points worth making here:
 %  - One thread per M2L pair. Each thread builds the irregular solid harmonics
 %    S(c_B - c_A) to order 2p in registers/local memory -- 231 complex terms at
 %    p=10 -- then atomicAdds every L_j^k into d_local[d_box_slot[A]]. Many pairs
@@ -391,11 +370,8 @@ This order is non-deterministic, but also does not matter for the P2P evaluation
 %    p=10, at the cost of ~1 ulp per coefficient.
 %  - The per-thread order-2p harmonic build and the atomics are the obvious
 %    optimisation target for this stage.
-
-\input{figures/fmm_g6}
-
-\subsubsection{L2L Sweep}
-% Points worth making here:
+%
+% L2L, points worth making here:
 %  - One kernel launch per tree level, lvl = 1..max_depth, so the launch boundary
 %    IS the level barrier and every node sees a finalised parent.
 %  - One thread per box node at that depth, ids read from the depth-bucketed
@@ -407,7 +383,20 @@ This order is non-deterministic, but also does not matter for the P2P evaluation
 %  - Distinct nodes write distinct d_local slots, so no atomics and no write races
 %    -- and unlike the P2P CSR this stays bit-identical to a naive sweep.
 
-\input{figures/fmm_g7}
+Inside \snakecase{fmm_translations}, \snakecase{m2l_accumulate_kernel} translates the multipole expansions of the source tree to local expansions of the target tree using M2L Eq.~\ref{eq:m2l-potential}.
+It then calls \snakecase{l2l_level_kernel} in a synchronous loop for each level.
+The harmonics buffers are sized to $P$ at compile time with templating, preventing register spills.
+A switch case in \snakecase{fmm_build_local} translates picks the corresponding template from the runtime $p$.
+
+\snakecase{m2l_accumulate_kernel} is launched one thread per M2L pair, emitted by the traverse.
+Each thread builds the irregular solid harmonics to the order 2p, then atomicAdds every $L_j^k$ into the local expansion slot of a target box node.
+Many pairs share a target node, hence the atomics.
+The coefficients $A_n^m$ and $1/A_n^m$ come from the GPU's constant memory, Tabulating the $1/A_n^m$ turns one FP64 division per \(\mathcal{O}(p^{4})\) term into a multiply.
+Despite this, the per-thread order-2p harmonic build and the atomics remain an optimization target for this stage.
+
+\snakecase{l2l_level_kernel} only 
+
+\input{figures/fmm_g6}
 
 \subsubsection{Fused Evaluation}
 % NOTE: this heading is the original one. Group 8 evaluates the NEAR field (P2P)
@@ -429,7 +418,7 @@ This order is non-deterministic, but also does not matter for the P2P evaluation
 %    reduce_sum_host sums them sequentially on the host to match the CPU baseline's
 %    summation order.
 
-\input{figures/fmm_g8}
+\input{figures/fmm_g7}
 
 
 \section{Multi-GPU}

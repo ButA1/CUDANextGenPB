@@ -1,7 +1,7 @@
 % ------------------------------------------------------------------------
 %  FMM implementation: whole-pipeline overview, group headlines only.
 %  Include with \input{figures/fmm_overview}
-%  Each group is broken out in its own detailed figure (fmm_g1 .. fmm_g8).
+%  Each group is broken out in its own detailed figure (fmm_g1 .. fmm_g7).
 % ------------------------------------------------------------------------
 \input{figures/fmm_style}
 
@@ -55,22 +55,19 @@
 \node[fmmgrp, fit=(d1)(d2)] (G4) {};
 
 % =============== 5 / 6  the two interaction lists ===============
+% M2L and L2L share one host function (fmm_translations<P>), so they share a panel.
 \coordinate (p5) at (0,0 |- G4.south);
 \node[b, anchor=north west] (e1) at ([yshift=-11mm]p5) {Near-list CSR};
 \node[b, anchor=north west] (f1) at ([xshift=6mm]e1.north east) {M2L accumulate};
+\node[b, anchor=north west] (f2) at ([yshift=-1.8mm]f1.south west) {L2L level sweep};
 \node[fmmgrp, fit=(e1)] (G5) {};
-\node[fmmgrp, fit=(f1)] (G6) {};
+\node[fmmgrp, fit=(f1)(f2)] (G6) {};
 
-% =============== 7  L2L ===============
-\coordinate (p7) at (f1.west |- G6.south);
-\node[b, anchor=north west] (g1) at ([yshift=-9mm]p7) {L2L level sweep};
-\node[fmmgrp, fit=(g1)] (G7) {};
-
-% =============== 8  fused evaluation ===============
-\coordinate (p8) at (0,0 |- G7.south);
-\node[w,  anchor=north west] (h1) at ([yshift=-11mm]p8) {Fused L2P $+$ P2P leaf kernel};
+% =============== 7  fused evaluation ===============
+\coordinate (p7) at (0,0 |- G6.south);
+\node[w,  anchor=north west] (h1) at ([yshift=-11mm]p7) {Fused L2P $+$ P2P leaf kernel};
 \node[wc, anchor=north west] (h2) at ([yshift=-1.8mm]h1.south west) {Host reduction};
-\node[fmmgrp, fit=(h1)(h2)] (G8) {};
+\node[fmmgrp, fit=(h1)(h2)] (G7) {};
 
 % ---------- group labels on the panel borders ----------
 \node[fmmlbl] at ([xshift=4mm]G1.north west) {\bfseries 1\ \ Source tree construction};
@@ -78,12 +75,11 @@
 \node[fmmlbl] at ([xshift=4mm]G3.north west) {\bfseries 3\ \ Target tree construction};
 \node[fmmlbl] at ([xshift=4mm]G4.north west) {\bfseries 4\ \ Dual-tree traversal};
 \node[fmmlbl] at ([xshift=4mm]G5.north west) {\bfseries 5\ \ P2P CSR};
-\node[fmmlbl] at ([xshift=4mm]G6.north west) {\bfseries 6\ \ M2L};
-\node[fmmlbl] at ([xshift=4mm]G7.north west) {\bfseries 7\ \ L2L};
-\node[fmmlbl] at ([xshift=4mm]G8.north west) {\bfseries 8\ \ Fused evaluation};
+\node[fmmlbl] at ([xshift=4mm]G6.north west) {\bfseries 6\ \ Downward pass};
+\node[fmmlbl] at ([xshift=4mm]G7.north west) {\bfseries 7\ \ Fused evaluation};
 
 % ---------- flow ----------
-\foreach \x/\y in {a1/a2, a2/a3, a3/a4, c1/c2, c2/c3, h1/h2}
+\foreach \x/\y in {a1/a2, a2/a3, a3/a4, c1/c2, c2/c3, f1/f2, h1/h2}
   \draw[fmmflow] (\x.south) -- (\y.north);
 \draw[fmmflow] (G1.south) -- (G2.north);
 \draw[fmmflow] (G2.south) -- (G3.north);
@@ -93,16 +89,14 @@
 % top-left of the borders, so a centred arrow would strike through them.
 \coordinate (x5) at ([xshift=-8mm]G5.north east);
 \coordinate (x6) at ([xshift=-8mm]G6.north east);
-\coordinate (x7) at ([xshift=-8mm]G7.north east);
-\draw[fmmflow] (x6 |- G6.south) -- node[fmmedge, pos=0.5] {\texttt{d\_local} (partial)} (x7);
 
 % the single traversal pass forks into the two interaction lists
 \draw[fmmflow] (x5 |- G4.south) -- node[fmmedge, pos=0.55] {P2P pair list} (x5);
 \draw[fmmflow] (x6 |- G4.south) -- node[fmmedge, pos=0.55] {M2L pair list} (x6);
 
 % and both rejoin in the fused leaf kernel
-\draw[fmmflow] (x5 |- G5.south) -- node[fmmedge, pos=0.9] {near field} (x5 |- G8.north);
-\draw[fmmflow] (x7 |- G7.south) -- node[fmmedge, pos=0.5] {far field} (x7 |- G8.north);
+\draw[fmmflow] (x5 |- G5.south) -- node[fmmedge, pos=0.5] {near field} (x5 |- G7.north);
+\draw[fmmflow] (x6 |- G6.south) -- node[fmmedge, pos=0.5] {far field} (x6 |- G7.north);
 
 % ---------- lifecycle band (drawn last so it masks the arrow behind it) ------
 \draw[black!45, line width=0.5pt, dash pattern=on 1.6pt off 1.6pt]
@@ -116,6 +110,6 @@
 \caption[FMM implementation: pipeline overview]{%
     \textbf{Overview of the FMM implementation.} Solid boxes are GPU kernels,
     dashed boxes host steps. Each group is broken out at the level of individual
-    kernels in Figures~\ref{fig:fmm-g1}--\ref{fig:fmm-g8}.}
+    kernels in Figures~\ref{fig:fmm-g1}--\ref{fig:fmm-g7}.}
 \label{fig:fmm-overview}
 \end{figure}
