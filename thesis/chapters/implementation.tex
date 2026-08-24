@@ -384,17 +384,18 @@ This way I avoided a BFS descent later when evaluating P2P.
 %    -- and unlike the P2P CSR this stays bit-identical to a naive sweep.
 
 Inside \snakecase{fmm_translations}, \snakecase{m2l_accumulate_kernel} translates the multipole expansions of the source tree to local expansions of the target tree using M2L Eq.~\ref{eq:m2l-potential}.
-It then calls \snakecase{l2l_level_kernel} in a synchronous loop for each level.
 The harmonics buffers are sized to $P$ at compile time with templating, preventing register spills.
 A switch case in \snakecase{fmm_build_local} translates picks the corresponding template from the runtime $p$.
-
 \snakecase{m2l_accumulate_kernel} is launched one thread per M2L pair, emitted by the traverse.
 Each thread builds the irregular solid harmonics to the order 2p, then atomicAdds every $L_j^k$ into the local expansion slot of a target box node.
 Many pairs share a target node, hence the atomics.
 The coefficients $A_n^m$ and $1/A_n^m$ come from the GPU's constant memory, Tabulating the $1/A_n^m$ turns one FP64 division per \(\mathcal{O}(p^{4})\) term into a multiply.
 Despite this, the per-thread order-2p harmonic build and the atomics remain an optimization target for this stage.
 
-\snakecase{l2l_level_kernel} only 
+Afterwards comes the downward pass with \snakecase{l2l_level_kernel} in a level-synchronous loop according to Eq.~\ref{eq:l2l-potential}.
+The kernels are launched with one thread per box node at one level, with only 64 threads per block, because each level is relatively narrow.
+This way it should spread across multiple SMs instead of landing on two or three blocks.
+Since each write to the local moments is distinct, no atomics are needed at this step.
 
 \input{figures/fmm_g6}
 
@@ -417,6 +418,13 @@ Despite this, the per-thread order-2p harmonic build and the atomics remain an o
 %  - Results scatter through d_orig into the caller's point order, then
 %    reduce_sum_host sums them sequentially on the host to match the CPU baseline's
 %    summation order.
+
+Both the P2P and L2P evaluation are rolled into a single kernel \snakecase{l2p_p2p_kernel} launched per block for every box target leaf, with every thread handling at most one atom.
+So the target position is loaded once and both contribution are summed in registers
+\snakecase{launch_l2p_p2p} handles the compile-time $P$ selection, just like in the downward pass.
+It takes in both the result of the downward pass and the CSR sorted P2P pairs.
+The P2P pairs are processed by the device function \snakecase{fmm_drain_p2p}, which performs the direct summation over all particles according to the kernels of the original equations Eq.~\ref{eq:polarization-energy} and Eq.~\ref{eq:ionic-energy-discrete}.
+\snakecase{l2p_contract} contracts the local expansions into the potential.
 
 \input{figures/fmm_g7}
 
