@@ -30,7 +30,30 @@ The call structure mirrors the other solvers as well, plugging in next to \snake
 \subsection{Upload Method}
 
 Despite not much to be done inside the code there was still a decision to be made how the linear equation should be uploaded to the device.
-The AMGX reference may make it seem easy to use multiple ranks with a single GPU.
+Essentially there are two ways: distribute the entire thing at once using \snakecase{AMGX_matrix_upload_all} or in parts using \snakecase{AMGX_matrix_upload_distributed}
+The AMGX reference % TODO cite
+may make it seem easy to upload the matrix parts from each rank using the latter.
+However, each \snakecase{AMGX_matrix_upload_distributed} calls \snakecase{renumberMatrixOneRing} which calls \snakecase{reorder_matrix_owned}.
+The last one create a second full array of values and column indices, while the original is still in memory.
+This leads to overly inflated VRAM usage.
+So instead I gathered the entire matrix to rank 0 and uploaded the matrix from there.
+
+\subsection{Configurations}
+
+Through experimentation I settled on 2 configurations: one that focuses on speed, and the other that focuses on being memory efficient.
+
+The memory efficient configuration can be seen in % TODO insert block jacobi here
+.
+It uses preconditioned CG with Block-Jacobi as the preconditioner, which creates very little overhead.
+It needs a lot of iterations (around 500 for 6VYB) but all of them are extremely cheap, resulting in a surprisingly fast config, beating a similar configuration, also with PCG, but using V-cycle AMG preconditioning with a coarsening factor of \snakecase{SIZE_2}. 
+Despite it needing fewer iterations, those iterations were very expensive.
+
+The ``fast'' configuration can be seen in % TODO insert AMG PCGF config
+.
+This one uses flexible preconditioned CG using V-cycle AMG preconditioning, with Block Jacobi smoothing, \snakecase{SIZE_4} coarsening.
+The memory overhead on it is not too bad, and for 6VYB it even fits into 10 GB of VRAM.
+Originally I planned on using \snakecase{POLYNOMIAL} smoothing, but it turned out that it is only compatible with a different polynomial called \snakecase{KPZ_POLYNOMIAL}.
+The commends in the AMGX source code point out that  \snakecase{KPZ_POLYNOMIAL} only works on explicit matrices, giving me another reason not to trust the very outdated AMGX reference.
 
 \section{Create Markers}
 \label{sec:implementation-create-markers}
