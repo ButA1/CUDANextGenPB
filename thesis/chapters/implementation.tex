@@ -42,23 +42,79 @@ So instead I gathered the entire matrix to rank 0 and uploaded the matrix from t
 
 Through experimentation I settled on 2 configurations: one that focuses on speed, and the other that focuses on being memory efficient.
 
-The memory efficient configuration can be seen in % TODO insert block jacobi here
-.
+The memory efficient configuration can be seen in Listing~\ref{lst:amgx-block-jacobi-default}.
 It uses preconditioned CG with Block-Jacobi as the preconditioner, which creates very little overhead.
-It needs a lot of iterations (around 500 for 6VYB) but all of them are extremely cheap, resulting in a surprisingly fast config, beating a similar configuration, also with PCG, but using V-cycle AMG preconditioning with a coarsening factor of \snakecase{SIZE_2}. 
+It needs a lot of iterations (around 500 for 6VYB) but all of them are extremely cheap, resulting in a surprisingly fast config, beating a similar configuration, also with PCG, but using V-cycle AMG preconditioning with a coarsening factor of \snakecase{SIZE_2}.
 Despite it needing fewer iterations, those iterations were very expensive.
+This is also the built-in fallback configuration compiled into \snakecase{amgx_solver.cu}, used whenever no \texttt{amgx\_config} file is given, or the given one fails to load.
 
-The ``fast'' configuration can be seen in % TODO insert AMG PCGF config
-.
+\begin{lstlisting}[style=configstyle,caption={Built-in default AMGX configuration: PCG with a Block-Jacobi preconditioner.},label={lst:amgx-block-jacobi-default}]
+{
+    "config_version": 2,
+    "solver": {
+        "scope": "main",
+        "solver": "PCG",
+        "max_iters": 1000,
+        "tolerance": 1e-10,
+        "norm": "L2",
+        "convergence": "RELATIVE_INI_CORE",
+        "preconditioner": {
+            "scope": "amg",
+            "solver": "BLOCK_JACOBI",
+            "max_iters": 1
+        }
+    }
+}
+\end{lstlisting}
+
+The ``fast'' configuration can be seen in Listing~\ref{lst:amgx-pcgf-amg-block-jacobi}.
 This one uses flexible preconditioned CG using V-cycle AMG preconditioning, with Block Jacobi smoothing, \snakecase{SIZE_4} coarsening.
 The memory overhead on it is not too bad, and for 6VYB it even fits into 10 GB of VRAM.
 Originally I planned on using \snakecase{POLYNOMIAL} smoothing, but it turned out that it is only compatible with a different polynomial called \snakecase{KPZ_POLYNOMIAL}.
 The commends in the AMGX source code point out that  \snakecase{KPZ_POLYNOMIAL} only works on explicit matrices, giving me another reason not to trust the very outdated AMGX reference.
 
+\begin{lstlisting}[style=configstyle,caption={``Fast'' AMGX configuration: flexible PCG with V-cycle AMG preconditioning, Block-Jacobi smoothing, and \snakecase{SIZE\_4} coarsening.},label={lst:amgx-pcgf-amg-block-jacobi}]
+{
+    "config_version": 2,
+    "solver": {
+        "scope": "main",
+        "solver": "PCGF",
+        "max_iters": 1000,
+        "tolerance": 1e-10,
+        "norm": "L2",
+        "convergence": "RELATIVE_INI_CORE",
+        "preconditioner": {
+            "scope": "amg",
+            "solver": "AMG",
+            "algorithm": "AGGREGATION",
+            "selector": "SIZE_4",
+            "cycle": "V",
+            "max_iters": 1,
+            "max_levels": 24,
+            "min_coarse_rows": 32,
+            "smoother": "BLOCK_JACOBI",
+            "relaxation_factor": 0.8,
+            "presweeps": 1,
+            "postsweeps": 1,
+            "coarsest_sweeps": 2,
+            "coarse_solver": "DENSE_LU_SOLVER"
+        }
+    }
+}
+\end{lstlisting}
+
 \section{Create Markers}
 \label{sec:implementation-create-markers}
 
-Create markers casts rays 
+Create markers checks whether a ray is present in the ray cache using \snakecase{is_in_ns_surf} and casts a new ray if it is not present.
+As rank 0 owns the NanoShaper instance, it is the only rank that can cast rays.
+The other ranks request new rays from rank 0 by putting them in a rays list.
+This is done during for each iteration while classifying the quadrants of the domain at the same time.
+It is faster to collect all the possibly new rays first and then cast them in a bundle and distribute them to the individual ranks, and then classify them afterwards.
+In a first pass, I collected all the necessary rays using a new helper function \snakecase{ensure_ray}, that still checks the ray cache for their presence but does not compute it yet, if it is absent.
+Other ranks still insert their ray requests into the rays list, as was the case before.
+After the collection pass, all pending rays are computed in bulk and all the requested rays are passed to the other ranks once.
+Finally, the quadrants are classified, still with \snakecase{is_in_ns_surf}, but this does not cast any new rays.
 
 \section{BIMPP}
 \label{sec:implementation-bimpp}
@@ -377,34 +433,6 @@ This way I avoided a BFS descent later when evaluating P2P.
 \input{figures/fmm_g5}
 
 \subsubsection{Downward Pass}
-% M2L and L2L are one host function, fmm_translations<P>: it zeroes d_local, runs
-% m2l_accumulate_kernel<P>, then the per-level l2l_level_kernel<P> loop. The
-% runtime-p -> compile-time-P switch is one level up, in fmm_build_local.
-% This mirrors the upward pass, which is likewise one host function
-% (src_box_moments = P2M + M2M).
-%
-% M2L, points worth making here:
-%  - One thread per M2L pair. Each thread builds the irregular solid harmonics
-%    S(c_B - c_A) to order 2p in registers/local memory -- 231 complex terms at
-%    p=10 -- then atomicAdds every L_j^k into d_local[d_box_slot[A]]. Many pairs
-%    share a target node A, hence the atomics.
-%  - A_n^m and 1/A_n^m come from __constant__. Tabulating the RECIPROCAL turns one
-%    FP64 division per O(p^4) term into a multiply: worth 1.5x on this kernel at
-%    p=10, at the cost of ~1 ulp per coefficient.
-%  - The per-thread order-2p harmonic build and the atomics are the obvious
-%    optimisation target for this stage.
-%
-% L2L, points worth making here:
-%  - One kernel launch per tree level, lvl = 1..max_depth, so the launch boundary
-%    IS the level barrier and every node sees a finalised parent.
-%  - One thread per box node at that depth, ids read from the depth-bucketed
-%    worklist built at tree-construction time, so every lane has real work. The
-%    grid is sized by the level's actual node count, not by n_nodes.
-%  - 64 threads/block rather than the usual 256, because the levels are small: a
-%    mid-size level still spreads across many SMs instead of landing on two or
-%    three blocks.
-%  - Distinct nodes write distinct d_local slots, so no atomics and no write races
-%    -- and unlike the P2P CSR this stays bit-identical to a naive sweep.
 
 Inside \snakecase{fmm_translations}, \snakecase{m2l_accumulate_kernel} translates the multipole expansions of the source tree to local expansions of the target tree using M2L Eq.~\ref{eq:m2l-potential}.
 The harmonics buffers are sized to $P$ at compile time with templating, preventing register spills.
@@ -423,24 +451,6 @@ Since each write to the local moments is distinct, no atomics are needed at this
 \input{figures/fmm_g6}
 
 \subsubsection{Fused Evaluation}
-% NOTE: this heading is the original one. Group 8 evaluates the NEAR field (P2P)
-% and the far field (L2P) in one fused kernel, so "Fused Evaluation" may fit better.
-% Points worth making here:
-%  - One block per target box leaf, one thread per target point; threads past the
-%    leaf's point count idle. The near/far split was settled by the traversal, so
-%    there is no descent, no MAC test and no shared frontier here.
-%  - Near: fmm_drain_p2p walks the leaf's CSR row and direct-sums over the atoms
-%    under each near source box leaf -- its LBVH leaves, contiguous in Morton
-%    order. Sources and targets are disjoint, so no self-exclusion is needed.
-%  - Far: l2p_contract builds the regular solid harmonics of (point - leaf centre)
-%    column-major, so the live set is O(p) NAMED registers instead of an O(p^2)
-%    array spilled to local memory. T=double gives Phi; T=dual gives grad Phi by
-%    forward-mode AD, so E = -grad Phi needs no second expansion.
-%  - Fusing them means the target position is loaded once and both contributions
-%    are summed in registers before a single write.
-%  - Results scatter through d_orig into the caller's point order, then
-%    reduce_sum_host sums them sequentially on the host to match the CPU baseline's
-%    summation order.
 
 Both the P2P and L2P evaluation are rolled into a single kernel \snakecase{l2p_p2p_kernel} launched per block for every box target leaf, with every thread handling at most one atom.
 So the target position is loaded once and both contribution are summed in registers
@@ -452,7 +462,6 @@ It rebuilds the regular harmonics using the same Cartesian recurrence as is \sna
 Finally the result it scattered back in the caller's sequence, so the result are reduced in the original order.
 
 \input{figures/fmm_g7}
-
 
 \section{Multi-GPU}
 \label{sec:implementation-multi-gpu}
