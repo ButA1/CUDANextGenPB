@@ -139,10 +139,6 @@ after computing the value the derivative is traced back.
 Forward mode can be implemented through operator overloads, where the overloaded arithmetic operation handles both the value and the derivative calculation.
 That means that the program functions themselves don't need to be altered, as the additional calculations are handled through the overloads of the basic arithmetic that they already use.
 
-\subsection{Templating}
-
-% TODO
-
 \section{CUDA optimizations}
 \label{sec:alternative-techniques-cuda-optimizations}
 
@@ -197,6 +193,15 @@ Negative values set the sign bit, which has two consequences.
 Among themselves they sort in reverse, since a larger magnitude means a larger bit pattern, and reinterpreted as unsigned integers they all outrank every non-negative value.
 Both effects are cancelled at once by switching to the opposite operation on the unsigned type, so a single branch on the sign of the incoming value is all that is needed.
 Either branch computes the correct result regardless of the sign of the value currently held at the address, which means that threads contributing values of mixed sign still reduce correctly.
+
+\subsection{Templating}
+
+Templating is a technique in c++ for creating generic classes or functions.
+It is mainly used for writing code that supports different data types.
+The compiler then automatically creates a versions of the template for every type that is used in the code base.
+Here is the twist: it can also be used to create static buffer sizes, by templating a function with the quant of that buffer.
+This is particularly useful to avoid register spills, as the buffer size is already known at compile time.
+
 
 \subsection{Optimized Tree Construction}
 \label{sec:alternative-techniques-cuda-optimizations-lbhv}

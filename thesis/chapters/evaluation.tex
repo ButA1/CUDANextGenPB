@@ -124,7 +124,7 @@ Mesh settings were mostly kept at the given values, though I already pointed out
 \end{table}
 
 Naturally, the versions of the dependencies had to be kept static. I settled on using NanoShaper version 1.5 taken from the master branch instead of 0.8, as version 1.5 features much greater performance, without affecting accuracy.
-Since BIMPP was also partially optimized, I needed to switch between the unmodified and modified versions.
+Since the optimizations to BIMPP benefit both the original code and the CUDA-accelerated versions without affecting the accuracy, I will accept them into the baseline.
 The versions of the remaining dependencies were kept according to the Dockerfile within the NGPB repository.
 
 \subsection{Comparing performance}
@@ -132,7 +132,8 @@ The versions of the remaining dependencies were kept according to the Dockerfile
 
 Thankfully, NGPB already prints out the time that each stage took. 
 This is done using two helper macros called TIC() and TOC(), which are portable throughout the code base. 
-Those rough timings are enough to show whether an optimization is faster, since the computation time for the larger molecules is a lot longer than small timer randomness, or other run-to-run-variances. 
+Those rough timings are enough to show whether an optimization is faster, since the computation time for the larger molecules is a lot longer than small timer randomness, or other run-to-run-variances.
+For 1CCM though I will use an average of multiple runs.
 
 For more exact timings in the GPU-specific optimizations, I profiled the CUDA kernels using \texttt{ncu}, which runs them multiple times, eliminating runtime variances.
 Additionally it provides detailed information about their utilization of GPU resources and gives suggestions on how to optimize them. 
@@ -183,7 +184,12 @@ The analytical reference values, seen in Table~\ref{tab:ngpb-analytical-values},
 The combination of my modifications to NGPB and its subsystems must not increase those magnitudes for all analytical test cases, meaning the magnitude of their error contributions must be at the same order or lower. 
 On the other hand, error magnitudes smaller than or equal to $10^{-16}$ are considered FP64 machine-level noise, so aiming for those is not necessary, giving me some wiggle room between $10^{-10}$ and $10^{-16}$ for possible approximations.
 
-Comparing the accuracy between the linear solvers is also unnecessary, since all linear solvers aim to converge towards a set residual or accuracy value, which is completely independent of the solver or preconditioning. 
+Comparing the accuracy between the linear solvers should be unnecessary, since in theory all linear solvers aim to converge towards a set residual or accuracy value, which is completely independent of the solver or preconditioning.
+However in practice, I noticed that LIS was somehow achieving higher accuracy than AMGX despite the same target accuracy of $10^{-6}$.
+Upon closer inspection, LIS oversteps its target and achieves a residual of $10^{-8}$, while AMGX quits right after reaching it.
+To rule out any degradation of the Kirkwood test result through AMGX, I pinned its accuracy to $10^{-10}$.
+Still this makes accuracy comparisons obsolete because AMGX was set to a lower tolerance.
+This does put AMGX at a theoretical disadvantage, since higher accuracy requires more iterations, but LIS's strange overstepping-behavior already makes this comparisons more difficult than it should have been.
 
 The accuracy of the energy calculation can be verified independently using the comparative test cases.
 Since it is supposed to follow the math exactly and the triangulation between the baseline and GPU optimization didn't change, both results should only deviate by the aforementioned error magnitudes, as long as the intermediate results of the previous stages stayed the same.
@@ -209,6 +215,13 @@ It was seen more as a correctness criterion: ``Did it fit into VRAM at all?'', e
 \subsection{Linear Equation Solver}
 \label{sec:evaluation-results-lin-eq-solver}
 
+
+
+\subsection{Energy Calculation}
+\label{sec:evaluation-results-energy-calculation}
+
+\subsubsection{FMM parameters}
+
 \subsection{Create Markers}
 \label{sec:evaluation-results-create-markers}
 
@@ -219,7 +232,4 @@ It was seen more as a correctness criterion: ``Did it fit into VRAM at all?'', e
 
 \subsubsection{bim3a\_solution\_with\_ghosts}
 
-\subsection{Energy Calculation}
-
-\subsubsection{FMM parameters}
-
+\subsection{Overall}
