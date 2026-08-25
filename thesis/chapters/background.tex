@@ -350,8 +350,9 @@ It is not a particularly fast method and is nowadays often relegated to the role
 \subsubsection{Preconditioners}
 
 Since the speed of iterative solvers depends on the number of iterations, so-called preconditioners are used to reduce them by improving the rate of convergence.
-They come up with a matrix $M$, which is an easily invertible approximation of $A$.
-An example would be matrix $D$ from the Jacobi Method, which is purely diagonal.
+They come up with a linear operator like a matrix $M$, which is an easily invertible approximation of $A$.
+An example would be matrix $D$ from the Jacobi Method, which is purely diagonal. 
+Other times the operator would be calculated implicitly using a preconditioner algorithm, like with algebraic multigrid.
 Instead of solving $Ax=b$ directly, Krylov methods apply this operator to the equation on every iteration.
 This is done either through left preconditioning ($M^{-1}Ax = M^{-1}b$), right preconditioning ($AM^{-1}u = b$ where $u=Mx$), or --- specifically for CG --- split conditioning ($L^{-1}AL^{T}v = L^{-1}b$ with $M=LL^T$ and $v=L^Tx$).
 

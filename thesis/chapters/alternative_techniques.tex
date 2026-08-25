@@ -262,10 +262,13 @@ If the computational intensity far outweighs the memory throughput then it is un
 
 % TODO
 
-\subsection{CUDA linear equation solvers}
-\label{sec:alternative-techniques-cuda-cu-lin-eq-solvers}
+\section{CUDA Linear Equation Solvers}
+\label{sec:alternative-techniques-cu-lin-eq-solvers}
 
 Among their library eco-system, Nvidia offers two ready-to-use linear equation solvers, those being cuDSS and AMGX.
+
+\subsection{cuDSS}
+\label{sec:alternative-techniques-cu-lin-eq-solvers-cuDSS}
 
 % not sure if I'll keep this here
 cuDSS is a direct solver that can use either LU- or Cholesky factorization.
@@ -274,7 +277,17 @@ For \texttt{6VYB} with \texttt{perfil1} of 0.95 and \texttt{scale} of 0.5, the r
 With the scaling of dense methods for 3D meshes of \(\mathcal{O}(n^{4/3})\), the size of the solver balloons to 8.4 billion, meaning a size of about 64 GB for double precision float.
 As this is too big even for an Nvidia A100 GPU, which has 40 GB of VRAM, I dropped cuDSS very quickly.
 
-AMGX is Nvidia's latest iterative solver CUDA library, featuring customizable solvers, preconditioners and algorithms, including the name giving ``algebraic multigrid'' methods.
+\subsection{AMGX}
+\label{sec:alternative-techniques-cu-lin-eq-solvers-amgx}
 
-The algebraic multigrid method is less of a concrete mathematical principle or an algorithm based on one. 
-Rather it is flexible algorithm involving the following steps
+AMGX is Nvidia's latest iterative solver CUDA library, featuring numerous solvers, preconditioners, including the name giving ``algebraic multigrid'' (AMG) algorithm.
+AMG is a preconditioning algorithm used primarily for Krylov methods.
+It can be roughly summarized as a recursive application of coarsening, smoothing, and dense solvation to the linear system.
+% if this sounds a bit like "random bullshit go!" that's because it kinda is
+Smoothers are also solvers that solve the same $Ax=b$ linear equation.
+Their purposed is to remove high frequency error through local relaxation.
+The algorithm begins by creating a hierarchy of progressively coarser versions of the matrix, which reduces low frequency error.
+Then it enters a recursive cycle with a certain shape.
+There are many different cycle shapes, the most basic being the V shape, where the system is smoothed and coarsened until it becomes small enough to be solved using a dense solver, after which the result is scaled back up, while also getting smoothed out.
+Other shapes include W, which is basically 2 consecutive V cycles and F, which is a blend of both.
+V is the cheapest cycle, while W achieves better convergence, with F being somewhere in the middle.
