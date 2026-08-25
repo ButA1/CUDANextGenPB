@@ -124,9 +124,9 @@ FMM represents a middle ground, which at certain settings achieves 0 additional 
 \label{sec:implementation-energy-calculation-naive-kernels}
 
 The first implementation was to create native kernels for all three energies: the Coulomb, polarization and ionic.
-The result of the polarization energy is reused for the second term of the ionic energy Eq.~\ref{eq:ionic-energy}, as both a point-discrete.
+The result of the polarization energy is reused for the second term of the ionic energy Eq.~\eqref{eq:ionic-energy}, as both a point-discrete.
 This mirrors the original implementation.
-The ionic kernel only calculates the first term of the ionic energy, or to be more specific, the triangle-discrete term Eq.~\ref{eq:ionic-energy-discrete}.
+The ionic kernel only calculates the first term of the ionic energy, or to be more specific, the triangle-discrete term Eq.~\eqref{eq:ionic-energy-discrete}.
 The atoms, charges, flux, triangle corners and normals where put into flat arrays and passed to the kernels as needed.
 Even systems like 6VYB with 44k or 1VSZ 180k atoms fit comfortably into the 10GB of VRAM of an RTX 3080.
 
@@ -198,7 +198,7 @@ Each group is then broken out at the level of individual kernels in its own subs
 
 \subsubsection{Multipole Expansion}
 
-Since both polarization energy Eq.~\ref{eq:polarization-energy} and the second term of the ionic energy Eq.~\ref{eq:ionic-energy} are variations of the Laplace kernel, I used spherical harmonics and the translation operators taken from ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}. 
+Since both polarization energy Eq.~\eqref{eq:polarization-energy} and the second term of the ionic energy Eq.~\eqref{eq:ionic-energy} are variations of the Laplace kernel, I used spherical harmonics and the translation operators taken from ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}. 
 The first term though has a different shape $r/|r|^3$, which is equal to the gradient of the Laplace kernel $\nabla 1/|r| = r/|r|^3$.
 To compute it, I used forward-mode automatic differentiation, through operator overloading.
 The spherical harmonics of degree n and order m are computed with:
@@ -330,7 +330,7 @@ Lastly, it allocates the buffer for the multipole moments with size $n_box \cdot
 
 \subsubsection{Upward Pass}
 
-The \snakecase{src_p2m_kernel} seeds the box leaves with a monopole, which is then passed upward using M2M Eq.~\ref{eq:m2m-potential}, which is equivalent to using the P2M.
+The \snakecase{src_p2m_kernel} seeds the box leaves with a monopole, which is then passed upward using M2M Eq.~\eqref{eq:m2m-potential}, which is equivalent to using the P2M.
 This is not optimal, and using a proper P2M would be more optimal. However this kernel runs once per tree build, and its influence is minimal.
 It is launched one thread per atom, 1 block per box leaf.
 Each atom's contribution goes into a shared-memory expansion via atomicAdd, written out once per box, so global traffic is per box and not per atom.
@@ -384,7 +384,7 @@ This way I avoided a BFS descent later when evaluating P2P.
 
 \subsubsection{Downward Pass}
 
-Inside \snakecase{fmm_translations}, \snakecase{m2l_accumulate_kernel} translates the multipole expansions of the source tree to local expansions of the target tree using M2L Eq.~\ref{eq:m2l-potential}.
+Inside \snakecase{fmm_translations}, \snakecase{m2l_accumulate_kernel} translates the multipole expansions of the source tree to local expansions of the target tree using M2L Eq.~\eqref{eq:m2l-potential}.
 The harmonics buffers are sized to $P$ at compile time with templating, preventing register spills.
 A switch case in \snakecase{fmm_build_local} translates picks the corresponding template from the runtime $p$.
 \snakecase{m2l_accumulate_kernel} is launched one thread per M2L pair, emitted by the traverse.
@@ -393,7 +393,7 @@ Many pairs share a target node, hence the atomics.
 The coefficients $A_n^m$ and $1/A_n^m$ come from the GPU's constant memory, Tabulating the $1/A_n^m$ turns one FP64 division per \(\mathcal{O}(p^{4})\) term into a multiply.
 Despite this, the per-thread order-2p harmonic build and the atomics remain an optimization target for this stage.
 
-Afterwards comes the downward pass with \snakecase{l2l_level_kernel} in a level-synchronous loop according to Eq.~\ref{eq:l2l-potential}.
+Afterwards comes the downward pass with \snakecase{l2l_level_kernel} in a level-synchronous loop according to Eq.~\eqref{eq:l2l-potential}.
 The kernels are launched with one thread per box node at one level, with only 64 threads per block, because each level is relatively narrow.
 This way it should spread across multiple SMs instead of landing on two or three blocks.
 Since each write to the local moments is distinct, no atomics are needed at this step.
@@ -406,9 +406,9 @@ Both the P2P and L2P evaluation are rolled into a single kernel \snakecase{l2p_p
 So the target position is loaded once and both contribution are summed in registers
 \snakecase{launch_l2p_p2p} handles the compile-time $P$ selection, just like in the downward pass.
 It takes in both the result of the downward pass and the CSR sorted P2P pairs.
-The P2P pairs are processed by the device function \snakecase{fmm_drain_p2p}, which performs the direct summation over all particles according to the kernels of the original equations Eq.~\ref{eq:polarization-energy} and Eq.~\ref{eq:ionic-energy-discrete}.
+The P2P pairs are processed by the device function \snakecase{fmm_drain_p2p}, which performs the direct summation over all particles according to the kernels of the original equations Eq.~\eqref{eq:polarization-energy} and Eq.~\eqref{eq:ionic-energy-discrete}.
 \snakecase{l2p_contract} contracts the local expansions into the potential.
-It rebuilds the regular harmonics using the same Cartesian recurrence as is \snakecase{solid_harmonics}, and evaluates the local expansion according to Eq.~\ref{eq:local-expansion-potential}.
+It rebuilds the regular harmonics using the same Cartesian recurrence as is \snakecase{solid_harmonics}, and evaluates the local expansion according to Eq.~\eqref{eq:local-expansion-potential}.
 Finally the result it scattered back in the caller's sequence, so the result are reduced in the original order.
 
 \input{figures/fmm_g7}

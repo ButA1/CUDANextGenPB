@@ -10,7 +10,7 @@ Kernels do not depend on each other and can be computed in any order.
 Naturally a problem, where $n$ elements are interacting with each other, is going to have a time complexity of \(\mathcal{O}(n^2)\), meaning that computing interactions for large $n$'s becomes really expensive.
 
 BEM type solvers compute the interaction between each boundary element, meaning N-Body is a core part of their solve.
-Although most FEM solvers avoid N-Body calculations entirely, NGPB has this problem type at least twice as demonstrated in Eq.~\ref{eq:polarization-energy} and \ref{eq:ionic-energy}.
+Although most FEM solvers avoid N-Body calculations entirely, NGPB has this problem type at least twice as demonstrated in Eq.~\eqref{eq:polarization-energy} and \ref{eq:ionic-energy}.
 
 One the one hand, many approximation techniques have been developed, which are all roughly based on the following idea:
 Kernels generally have an inverse dependency on distance.
@@ -66,7 +66,7 @@ The higher the order, the more the expansions converges towards the original fun
 An interesting observation is that the 0-th order is equal to the sum of the bodies, meaning that the original BH technically used a 0-order-expansion.
 
 There are many ways to formulate multipole expansions, each with their own upsides and downsides.
-The electrostatic Coulomb potential Eq.~\ref{eq:coulomb-potential} is a form of laplacian kernel $1/|r|$, which the fundamental solution to the laplace operator $\Delta = \nabla \cdot \nabla$, essentially the same operator that appears in the PBE Eq.~\ref{eq:pbe-basic}.
+The electrostatic Coulomb potential Eq.~\eqref{eq:coulomb-potential} is a form of laplacian kernel $1/|r|$, which the fundamental solution to the laplace operator $\Delta = \nabla \cdot \nabla$, essentially the same operator that appears in the PBE Eq.~\eqref{eq:pbe-basic}.
 Multipole expansions the laplace kernel (also called the or Green's function)are well known.
 
 \subsubsection{Cartesian Taylor}

@@ -61,7 +61,7 @@ Putting it all together yields the full PBE:
     \label{eq:pbe-full}
 \end{equation}
 
-The de-facto linearized version of the PBE is the Debye-Hückel approximation, which assumes that $K_b T \gg e z_j \phi(\mathbf{r})$, removing the exponential term from Eq.~\ref{eq:charge-density-solvent} and replacing it with the Debye factor:
+The de-facto linearized version of the PBE is the Debye-Hückel approximation, which assumes that $K_b T \gg e z_j \phi(\mathbf{r})$, removing the exponential term from Eq.~\eqref{eq:charge-density-solvent} and replacing it with the Debye factor:
 \begin{equation}
     \kappa_D^2 = \frac{e^2}{\varepsilon_0 \varepsilon_{r,s} K_b T} \sum_{j=1}^J \rho_j^b z_j^2
     \label{eq:debye-factor}
@@ -100,7 +100,7 @@ They solve a linear system with a dense matrix, that is integral operator.
 The far-field boundary condition is exactly satisfied at spatial infinity.
 
 Solvers need to avoid the so called self-energy singularity, which is an artifact of the point charge model, where the electrostatic potential explodes when it is evaluated at the position of the charge.
-Looking at Eq.~\ref{eq:coulomb-potential} for the basic Coulomb potential, one can identify the problem, that if $\mathbf{r_i}$ in the $\mathbf{r} - \mathbf{r}_i$ term equals $\mathbf{r}$, the divisor drops to 0 and the potential diverges to infinity.
+Looking at Eq.~\eqref{eq:coulomb-potential} for the basic Coulomb potential, one can identify the problem, that if $\mathbf{r_i}$ in the $\mathbf{r} - \mathbf{r}_i$ term equals $\mathbf{r}$, the divisor drops to 0 and the potential diverges to infinity.
 \begin{equation}
     \phi(\mathbf{r}) = \frac{q}{4\pi\varepsilon \lVert \mathbf{r} - \mathbf{r}_i \rVert}
     \label{eq:coulomb-potential}
