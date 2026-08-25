@@ -119,13 +119,15 @@ The message passing interface (MPI) is an API standard for data communication be
 It is not a single library.
 Rather it has many different versions and implementations of standard specifications set by the MPI Forum, which is an open consortium of vendors, researchers, and national labs.
 It is conceptualized for clusters with multiple compute nodes, and distributed memory architectures, but it is very flexible and works with all kinds of different architectures, even heterogenous ones.
-On a single machine, it can still provide quasi-multicore parallelization, though without shared memory.
+On a single machine, it can still provide quasi-multicore parallelization, though each rank's memory is still treated as separate.
 For this use case another API called OpenMP is the better choice \cite{openmp_spec}.
 
 Programs utilizing MPI need to be compiled with the language-appropriate compiler.
 In the case of C++ this is either \texttt{mpiCC} or \texttt{mpicxx}.
 Running these programs also requires the use of the \texttt{mpirun} or \texttt{mpiexec} command.
 Each process is called a rank, and their number can be specified by passing the \texttt{-n} flag when launching a program.
+The total number of ranks is called the ``world size''.
+In a cluster, multiple ranks can run on each node in the same sense as the single machine environment.
 Communication between them is done through specialized functions and types provided by an MPI library.
 
 \section{CUDA}

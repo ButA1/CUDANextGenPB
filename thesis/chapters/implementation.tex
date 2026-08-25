@@ -1,7 +1,7 @@
 \chapter{Implementation}
 \label{sec:implementation}
 
-In this section I go over my optimizations to the individual submodules of NGPB.
+In this section I go over my optimizations to some of the individual of NGPB, starting off with the CUDA related optimizations, before going over the work on the host-side.
 
 \section{Enabling CUDA}
 \label{sec:implementation-enabling-cuda}
@@ -103,59 +103,6 @@ The commends in the AMGX source code point out that  \snakecase{KPZ_POLYNOMIAL} 
 }
 \end{lstlisting}
 
-\section{Create Markers}
-\label{sec:implementation-create-markers}
-
-Create markers checks whether a ray is present in the ray cache using \snakecase{is_in_ns_surf} and casts a new ray if it is not present.
-As rank 0 owns the NanoShaper instance, it is the only rank that can cast rays.
-The other ranks request new rays from rank 0 by putting them in a rays list.
-This is done during for each iteration while classifying the quadrants of the domain at the same time.
-It is faster to collect all the possibly new rays first and then cast them in a bundle and distribute them to the individual ranks, and then classify them afterwards.
-In a first pass, I collected all the necessary rays using a new helper function \snakecase{ensure_ray}, that still checks the ray cache for their presence but does not compute it yet, if it is absent.
-Other ranks still insert their ray requests into the rays list, as was the case before.
-After the collection pass, all pending rays are computed in bulk and all the requested rays are passed to the other ranks once.
-Finally, the quadrants are classified, still with \snakecase{is_in_ns_surf}, but this does not cast any new rays.
-
-\section{BIMPP}
-\label{sec:implementation-bimpp}
-
-Though it is just a dependency of NGPB, some systems of BIMPP were in dire need of optimization.
-These optimizations ended up being CPU only.
-I created a private fork of it, which I used instead of the special NGPB release.
-
-\subsection{sparse\_matrix\_template}
-\label{sec:implementation-bimpp-sparse-matrix-template}
-
-BIMPP stores both local and non-local values of the distributed sparse matrix in a \texttt{std::vector} of \texttt{std::map<int, double>}.
-In \texttt{x86\_64} \texttt{libstdc++}, \texttt{std::map} is implemented using a red-black tree, whose node is comprised of 3 pointers, a color enum, and a \texttt{std::pair}.
-The three pointers exist for the parent, left and right at take up 24 Bytes.
-The color enum, including padding takes up 8 Bytes.
-In the context of the distributed sparse matrix, the \texttt{std::pair} is a tuple of type \texttt{<int const, double>}.
-So 4 Bytes for the integer, plus 4 Bytes for padding and 8 Bytes for the double comes out to 16 Bytes.
-All together this totals 48 Bytes.
-
-In comes \texttt{flat\_map} from the already reference \texttt{boost} library.
-It is a vector based implementation rather than a tree based one.
-Its memory footprint is just 24 B, essentially half.
-This change is also minimally invasive, only changing an underlying data type in the \texttt{sparse\_matrix\_template} of BIMPP.
-
-This does not solve the issue of the global row being replicated on each rank.
-For this a more sophisticated communication patter needs to be used, as was demonstrated in the SHIRO paper \cite{zhuang2025shiro}.
-
-\subsection{bim3a\_solution\_with\_ghosts}
-\label{sec:implementation-bimpp-bim3a-solution-with-ghosts}
-
-As explained before in \ref{sec:nextgenpb-libraries-bimpp-bim3a-solution-with-ghosts}, this function is used throughout NGPB because it handles the exchange of non-local- and ghost values through a lot of expensive calculations.
-First it updates every quadrant and its neighbors with \texttt{quadrant\_t::update()} hidden inside \texttt{quadrant\_iterator::operator++()}, without skipping those that have been already updated as the neighbor.
-This also computes the physical vertex positions through \texttt{p8est\_qcoord\_to\_vertex}, which go completely unused.
-
-Turns out, this is not necessary at all. 
-\texttt{p4est} already stores this information.
-All I did is reuse it.
-To get all the non-owned nodes reference by the local ones, I referenced \texttt{lnodes->nonlocal\_nodes}.
-For the ghost layer quadrants, I iterated through \texttt{tmesh\_3d::ghost\_data}, which is always 40 entries long per ghost.
-This drastically reduces the runtime at multiple points in the code.
-
 \section{Energy Calculation}
 \label{sec:implementation-energy-calculation}
 
@@ -165,6 +112,9 @@ They are essentially just lookups on the ray cache, which take very little time.
 Reformulating them was not worth it. 
 Besides, the true weight of the computational effort lies in the pairwise interactions themselves.
 Thus the idea was to collect the necessary data into flat arrays, to then do execute those on the GPU.
+Handling multiple ranks here is trivial when compared to AMGX.
+All ranks intrinsically launch their kernels in parallel on one GPU, with no gathering necessary.
+
 At the end, I settled on 3 implementations, each being a viable option in different scenarios.
 The naive implementation or kernels are surprisingly useful on workstation GPUs, which are not held back by poor FP64 performance. 
 For gaming GPUs, mixed precision is a very good option if some loss of accuracy is acceptable.
@@ -463,5 +413,91 @@ Finally the result it scattered back in the caller's sequence, so the result are
 
 \input{figures/fmm_g7}
 
-\section{Multi-GPU}
+\subsection{Multi-GPU/Multi-Node}
 \label{sec:implementation-multi-gpu}
+
+So far the implementations focused on single nodes with just one GPU, but NGPB was intended to work on multiple nodes. 
+On top of that, each node could have one or more GPUs.
+Thus the most difficult part is actually figuring out the topology.
+Everything else is relatively trivial.
+
+I created a new \snakecase{gpu_topology} module, that analyzes the topology at the start of NGPB.
+For every rank, it first analyzes its environment: what position it is in the MPI ``world'' and which ranks it shares a node with.
+Then it detects the number of available GPUs per node with \snakecase{cudaGetDeviceCount}, and assigns each to a range of node ranks through \snakecase{cudaSetDevice}.
+The first ranks of those ranges become the group leaders.
+This results in a hierarchy with 3 scope layers: the world layer, the node layers, and their group layers.
+Additionally, the group leader form a separate solver layer, which is important for AMGX.
+Figure~\ref{fig:gpu-topology} shows this hierarchy for an example job with 2 nodes and 2 GPUs per node.
+
+\input{figures/gpu_topology}
+
+\subsubsection{AMGX}
+
+Similarly to the single-node single-gpu case, each group sub-gathers their partition of the matrix to each either corresponding GPU through.
+This time it is done through \snakecase{AMGX_matrix_upload_distributed}, since the entire system is solved on all GPUs, thus they need to communicate their changes to the non-locals amongst each other.
+To know which group or GPU hold which part of the data, a \snakecase{ partition_offsets} is computed and passed to AMGX.
+Every group leader also sets their \snakecase{device_id} through \snakecase{AMGX_resources_create}.
+
+\subsubsection{Energy Calculation}
+
+There is not much to say here.
+Since the device is already set for all ranks during \snakecase{gpu_topology}, all kernels are automatically launched on the correct GPU.
+
+\section{Host Side Optimizations}
+\label{sec:implementation-host-side}
+
+Besides the CUDA optimizations, I also did a couple optimizations on the host side.
+They are mainly low hanging fruit, which were easy to implement, but nonetheless they helped bring up the overall time down significantly.
+
+\subsection{Create Markers}
+\label{sec:implementation-host-side-create-markers}
+
+Create markers checks whether a ray is present in the ray cache using \snakecase{is_in_ns_surf} and casts a new ray if it is not present.
+As rank 0 owns the NanoShaper instance, it is the only rank that can cast rays.
+The other ranks request new rays from rank 0 by putting them in a rays list.
+This is done during for each iteration while classifying the quadrants of the domain at the same time.
+It is faster to collect all the possibly new rays first and then cast them in a bundle and distribute them to the individual ranks, and then classify them afterwards.
+In a first pass, I collected all the necessary rays using a new helper function \snakecase{ensure_ray}, that still checks the ray cache for their presence but does not compute it yet, if it is absent.
+Other ranks still insert their ray requests into the rays list, as was the case before.
+After the collection pass, all pending rays are computed in bulk and all the requested rays are passed to the other ranks once.
+Finally, the quadrants are classified, still with \snakecase{is_in_ns_surf}, but this does not cast any new rays.
+
+\subsection{BIMPP}
+\label{sec:implementation-host-side-bimpp}
+
+Though it is just a dependency of NGPB, some systems of BIMPP were in dire need of optimization.
+These optimizations ended up being CPU only.
+I created a private fork of it, which I used instead of the special NGPB release.
+
+\subsubsection{sparse\_matrix\_template}
+\label{sec:implementation-host-side-bimpp-sparse-matrix-template}
+
+BIMPP stores both local and non-local values of the distributed sparse matrix in a \texttt{std::vector} of \texttt{std::map<int, double>}.
+In \texttt{x86\_64} \texttt{libstdc++}, \texttt{std::map} is implemented using a red-black tree, whose node is comprised of 3 pointers, a color enum, and a \texttt{std::pair}.
+The three pointers exist for the parent, left and right at take up 24 Bytes.
+The color enum, including padding takes up 8 Bytes.
+In the context of the distributed sparse matrix, the \texttt{std::pair} is a tuple of type \texttt{<int const, double>}.
+So 4 Bytes for the integer, plus 4 Bytes for padding and 8 Bytes for the double comes out to 16 Bytes.
+All together this totals 48 Bytes.
+
+In comes \texttt{flat\_map} from the already reference \texttt{boost} library.
+It is a vector based implementation rather than a tree based one.
+Its memory footprint is just 24 B, essentially half.
+This change is also minimally invasive, only changing an underlying data type in the \texttt{sparse\_matrix\_template} of BIMPP.
+
+This does not solve the issue of the global row being replicated on each rank.
+For this a more sophisticated communication patter needs to be used, as was demonstrated in the SHIRO paper \cite{zhuang2025shiro}.
+
+\subsubsection{bim3a\_solution\_with\_ghosts}
+\label{sec:implementation-host-side-bimpp-bim3a-solution-with-ghosts}
+
+As explained before in \ref{sec:nextgenpb-libraries-bimpp-bim3a-solution-with-ghosts}, this function is used throughout NGPB because it handles the exchange of non-local- and ghost values through a lot of expensive calculations.
+First it updates every quadrant and its neighbors with \texttt{quadrant\_t::update()} hidden inside \texttt{quadrant\_iterator::operator++()}, without skipping those that have been already updated as the neighbor.
+This also computes the physical vertex positions through \texttt{p8est\_qcoord\_to\_vertex}, which go completely unused.
+
+Turns out, this is not necessary at all. 
+\texttt{p4est} already stores this information.
+All I did is reuse it.
+To get all the non-owned nodes reference by the local ones, I referenced \texttt{lnodes->nonlocal\_nodes}.
+For the ghost layer quadrants, I iterated through \texttt{tmesh\_3d::ghost\_data}, which is always 40 entries long per ghost.
+This drastically reduces the runtime at multiple points in the code.

@@ -1,0 +1,78 @@
+% ------------------------------------------------------------------------
+%  gpu_topology: the 3 nested communicator scopes (world/node/group) built
+%  by setup_gpu_topology(), and the one physical GPU each group_comm owns.
+%  Include with \input{figures/gpu_topology}
+% ------------------------------------------------------------------------
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}[
+    x=1cm, y=1cm,
+    >={Latex[length=2.0mm]},
+    world/.style ={draw=black,    line width=0.9pt, rounded corners=3pt, fill=white},
+    node/.style  ={draw=black!70, line width=0.7pt, rounded corners=2.5pt, fill=white},
+    group/.style ={draw=black!55, line width=0.5pt, rounded corners=2pt, fill=white},
+    toplbl/.style   ={font=\small\bfseries, fill=white, inner sep=0.6mm, anchor=west},
+    grouplbl/.style ={font=\scriptsize\bfseries, fill=white, inner sep=0.5mm, anchor=west},
+    subcap/.style   ={font=\scriptsize, text=black!55, anchor=west},
+    groupsub/.style ={font=\tiny, text=black!55},
+    divider/.style  ={black!35, line width=0.4pt},
+    rank/.style   ={circle, draw=black, fill=white, line width=0.45pt,
+                    minimum size=7mm, inner sep=0pt, font=\scriptsize},
+    leader/.style ={rank, line width=1.3pt},
+    gpu/.style    ={draw=black, fill=white, line width=0.6pt,
+                    minimum width=2cm, minimum height=1cm, font=\scriptsize},
+    conn/.style   ={->, black!65, line width=0.6pt},
+]
+
+% ---------- legend ----------
+\node[anchor=south] at (7.5,7.9) {\scriptsize
+   \tikz[baseline=-0.5ex]\node[circle, draw=black, fill=white, line width=0.45pt,
+        minimum size=3.2mm, inner sep=0pt]{};\;MPI rank (world rank)
+   \quad
+   \tikz[baseline=-0.5ex]\node[circle, draw=black, fill=white, line width=1.1pt,
+        minimum size=3.2mm, inner sep=0pt]{};\;group leader (\texttt{group\_rank}~0)
+   \quad
+   \tikz[baseline=-0.5ex]\node[draw=black, fill=white, line width=0.6pt,
+        minimum width=5mm, minimum height=3mm, inner sep=0pt]{};\;physical GPU
+};
+
+% ---------- world_comm ----------
+\draw[world] (0,0) rectangle (15,7.6);
+\node[toplbl] at (0.5,7.6) {\texttt{world\_comm}};
+\node[subcap] at (0.5,7.15) {\texttt{MPI\_COMM\_WORLD} $\cdot$ every rank in the job (8 ranks)};
+
+% ---------- node_comm x2 ----------
+\draw[node] (0.4,0.4) rectangle (7.25,6.6);
+\node[toplbl] at (0.7,6.6) {\texttt{node\_comm}};
+\node[subcap] at (0.7,6.22) {\texttt{node\_id}~=~0 $\cdot$ shared memory $\cdot$ 4 ranks};
+
+\draw[node] (7.75,0.4) rectangle (14.6,6.6);
+\node[toplbl] at (8.05,6.6) {\texttt{node\_comm}};
+\node[subcap] at (8.05,6.22) {\texttt{node\_id}~=~4 $\cdot$ shared memory $\cdot$ 4 ranks};
+
+% ---------- group_comm x4: box, ranks, and the one GPU it owns ----------
+\foreach \gx/\gid/\dev/\lo/\hi in
+  {0.675/0/0/0/1, 3.975/1/1/2/3, 8.025/2/0/4/5, 11.325/3/1/6/7}
+{
+  \draw[group] (\gx,0.7) rectangle (\gx+3,5.75);
+  \node[grouplbl] at (\gx+0.15,5.75) {\texttt{group\_comm}};
+  \node[groupsub] at (\gx+1.5,5.38) {\texttt{group\_id} \gid\ $\cdot$ GPU \dev};
+  \draw[divider] (\gx+0.15,5.20) -- (\gx+2.85,5.20);
+
+  \node[leader] at (\gx+0.85,4.25) {\lo};
+  \node[rank]   at (\gx+2.15,4.25) {\hi};
+
+  \node[gpu] at (\gx+1.5,2.30) {GPU \dev};
+  \draw[conn] (\gx+1.5,3.90) -- (\gx+1.5,2.80);
+}
+
+\end{tikzpicture}
+\caption[Rank-to-GPU topology]{\textbf{Rank-to-GPU topology.} Ranks nest into three
+    communicator scopes: \texttt{world\_comm} (every rank in the job),
+    \texttt{node\_comm} (ranks sharing a physical node), and \texttt{group\_comm}
+    (ranks block-mapped onto the same GPU). Each group's rank~0 (thick ring) is
+    that group's \emph{leader}, used only for the distributed AMGX solve.
+    Example shown: 2 nodes $\times$ 2 GPUs/node $\times$ 2 ranks/GPU, assuming the
+    contiguous rank layout Slurm/mpirun use by default.}
+\label{fig:gpu-topology}
+\end{figure}
