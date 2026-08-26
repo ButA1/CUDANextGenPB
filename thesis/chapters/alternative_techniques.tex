@@ -241,14 +241,14 @@ The final result can then be seen in Figure~\ref{fig:karras-node-layout}.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.85\textwidth]{figures/karras2012_radix_tree.png}
+    \includegraphics[width=0.6\textwidth]{figures/karras2012_radix_tree.png}
     \caption[Ordered binary radix tree]{Ordered binary radix tree. Leaf nodes, numbered 0--7, store a set of 5-bit keys in lexicographical order, and the internal nodes represent their common prefixes. Each internal node covers a linear range of keys, which it partitions into two subranges according to their first differing bit. Reproduced from \cite{karras2012lbvh}, \textcopyright{} 2012 The Eurographics Association.}
     \label{fig:karras-radix-tree}
 \end{figure}
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.85\textwidth]{figures/karras2012_node_layout.png}
+    \includegraphics[width=0.6\textwidth]{figures/karras2012_node_layout.png}
     \caption[Node layout for the ordered binary radix tree]{Node layout for the tree of Figure~\ref{fig:karras-radix-tree}. Each internal node has been assigned an index between 0--6, and aligned horizontally with a leaf node of the same index. The range of keys covered by each node is indicated by a horizontal bar, and the split position, corresponding to the first bit that differs between the keys, is indicated by a red circle. Reproduced from \cite{karras2012lbvh}, \textcopyright{} 2012 The Eurographics Association.}
     \label{fig:karras-node-layout}
 \end{figure}
