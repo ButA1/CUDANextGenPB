@@ -12,23 +12,25 @@ In this section, I will describe the experimental setup and the methods used to 
 Testing was done both locally on my own machine, and on specific nodes of the TU Berlin HPC. 
 The specifications of both systems can be seen in Table~\ref{tab:test-systems}. 
 As already mentioned in \ref{sec:background-cuda-gpu-architecture}, FP64 performance on gaming/consumer such as the RTX 3080 is neutered when compared to the A100, despite both chips being part of the same architecture generation.
-On the other hand, the Intel Xeon E5-2630v4 of the cluster is quite old, and is handily beaten by the R7 5800X3D in both single-core and multi-core performance, which makes comparing performance a little awkward.
+On the other hand, the Intel Xeon E5-2630v4 of the A100 clusters is quite old, and is handily beaten by the R7 5800X3D in both single-core and multi-core performance, which makes comparing performance a little awkward.
 To compare both systems fairly I needed to benchmark the pure C++ and CUDA codes separately.
 
 \begin{table}[htbp]
     \centering
-    \begin{tabular}{lccc}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{lccccc}
         \toprule
-         & Local & gpu[022,025,026] & gpu[023,024,027] \\
+         & Local & gpu[022,025,026] & gpu[023,024,027] & gpu068 & gpu[069-072] \\
         \midrule
-        CPU & AMD R7 5800X3D & \multicolumn{2}{c}{Intel Xeon E5-2630v4} \\
-        RAM & 32 GB DDR4 & \multicolumn{2}{c}{512 GB DDR4} \\
-        GPU & RTX 3080 & Tesla A100 & 2xTesla A100 \\
-        VRAM & 10GB & 40GB & 80GB \\
-        FP32:FP64 & 64:1 & \multicolumn{2}{c}{2:1} \\
-        Driver / CUDA & 580.173.02 / 13.0 & \multicolumn{2}{c}{570.86.10 / 12.8} \\
+        CPU & AMD R7 5800X3D & \multicolumn{2}{c}{Intel Xeon E5-2630v4} & \multicolumn{2}{c}{AMD EPYC 9555} \\
+        RAM & 32 GB DDR4 & \multicolumn{2}{c}{512 GB DDR4} & \multicolumn{2}{c}{1.1 TB DDR5} \\
+        GPU & RTX 3080 & Tesla A100 & 2xTesla A100 & 4xH200 NVL & 2xH200 NVL \\
+        VRAM & 10GB & 40GB & 80GB & 564GB & 282GB \\
+        FP32:FP64 & 64:1 & \multicolumn{2}{c}{2:1} & \multicolumn{2}{c}{2:1} \\
+        Driver / CUDA & 580.173.02 / 13.0 & \multicolumn{2}{c}{570.86.10 / 12.8} & \multicolumn{2}{c}{---} \\
         \bottomrule
-    \end{tabular}
+    \end{tabular}%
+    }
     \caption{Specifications of the systems used for testing.}
     \label{tab:test-systems}
 \end{table}
@@ -188,7 +190,8 @@ Comparing the accuracy between the linear solvers should be unnecessary, since i
 However in practice, I noticed that LIS was somehow achieving higher accuracy than AMGX despite the same target accuracy of $10^{-6}$.
 Upon closer inspection, LIS oversteps its target and achieves a residual of $10^{-8}$, while AMGX quits right after reaching it.
 To rule out any degradation of the Kirkwood test result through AMGX, I pinned its accuracy to $10^{-10}$.
-Still this makes accuracy comparisons obsolete because AMGX was set to a lower tolerance.
+%Still this makes accuracy comparisons obsolete because AMGX was set to a lower tolerance.
+%nah I'll actually compare accuracy
 This does put AMGX at a theoretical disadvantage, since higher accuracy requires more iterations, but LIS's strange overstepping-behavior already makes this comparisons more difficult than it should have been.
 
 The accuracy of the energy calculation can be verified independently using the comparative test cases.
@@ -212,15 +215,34 @@ It was seen more as a correctness criterion: ``Did it fit into VRAM at all?'', e
 \section{Results}
 \label{sec:evaluation-results}
 
+One general observation I made is that the number of atoms does not automatically correlate
+
 \subsection{Linear Equation Solver}
 \label{sec:evaluation-results-lin-eq-solver}
 
+Despite being set to a much smaller residual, the default configuration for AMGX manages to beat LIS at every sample size, running on the local system.
+The tuned AMGX configuration runs faster than the default one, also at every sample size.
+Although running AMGX together with the original implementation on the test 3 didn't lower the error at all.
+% I suspect there is no change
+% ok but what else do I say here? It runs faster, great...
+Switching from the local system to a single cluster node with one A100 GPU actually did not yield much lower times for 6VYB (test 1 vs test 5).
+I omitted the runtime for LIS on the cluster, since it ran much slower due to their old CPUs.
+% TODO say by how much
+Running LIS on my local machine gives it the best opportunity.
+Even two A100s managed to only be 1 second faster.
+This clearly demonstrates the strong scaling wall of Krylov methods.
+It is still surprising that the untamed GA100 chip of the A100 did not manage to beat its cut-down sibling GA102 of the RTX 3080 by all that much, despite the lack of FP64 performance of the latter.
 
+\input{figures/solver_bench.tex}
+\input{figures/solver_bench_table.tex}
 
 \subsection{Energy Calculation}
 \label{sec:evaluation-results-energy-calculation}
 
 \subsubsection{FMM parameters}
+
+\input{figures/fmm_sweep_test1.tex}
+\input{figures/fmm_sweep_test1_table.tex}
 
 \subsection{Create Markers}
 \label{sec:evaluation-results-create-markers}
