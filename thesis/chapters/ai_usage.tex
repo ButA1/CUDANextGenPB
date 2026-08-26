@@ -1,2 +1,133 @@
 \chapter{AI Usage}
 \label{sec:ai-usage}
+
+For this thesis I utilized Anthropic's Claude Code in various ways.
+I used it for code exploration, assisting with research, writing scripts, agentic engineering, and many of the small tedious tasks when writing a thesis.
+I will be using the terms ``AI'' and ``LLM'' interchangeably.
+
+I want to open this chapter up with a personal anecdote:
+I personally believe that LLM is not a productivity multiplier, but it is an output multiplier.
+In the hands of a disciplined and capable engineer, who already produces good work on their own, it can enable them to produce that good work faster.
+Conversely a sloppy and incapable engineer will produce a lot of garbage a lot faster.
+However, it takes true determination to not just ``vibe code'' everything, and call it a day.
+During this thesis, I have slipped up repeatedly and let Claude take precedence over my decisions.
+LLM cannot replace a good engineer, at least not yet.
+Every time I was mindlessly prompting Claude, hoping to fix some issue, I had to take a step back, and actually think through the problem myself.
+Only then have I managed to make progress.
+
+\section{Token Efficiency}
+
+From a user's perspective, the main cost of using LLM comes through tokens, which are essentially chunks of data an LLM processes.
+Different models use different token sizes, which also influences their cost.
+Over the course of a prompt session, tokens accumulate into the ``context'', which needs to be reprocessed with every new prompt.
+The AI industry has been pushing the narrative that more tokens equals more work. % add a quote of Jensen saying it
+Many people in executive-level positions believed this narrative, but it is obviously absurd.
+To be efficient with LLM means to be efficient with one's token usage.
+The fewer tokens one uses to achieve a particular task, the better.
+
+One way to do this is to avoid long running sessions with many token-heavy prompts, by starting new sessions or compacting the existing session after each task.
+This is the most effective one, as it not only helps conserve tokens, but it also avoids so-called ``context-rot'', which appears as a drop in LLM's performance.
+On top of that, it keeps the response time low, because the model needs to process a smaller context.
+
+Another is to keep track of the progress through memory.
+Claude stores information for each project it is used on inside of markdown files.
+Keeping that knowledge base up to date helps avoid explaining things that have been cleared up in another session.
+I made markdown notes myself during the making of this thesis and shared them with Claude.
+Claude can explore the project structure and memorize general locations, enabling it to find relevant sections faster.
+
+A third one is to use an appropriate model for the task: using a large model on a simple task is overkill, while a small one might not be able to assist with the task at all.
+This is a difficult balancing act that is a learned intuition rather than a hard science.
+This is also compounded by the constant changes in the available LLM models. 
+I started this thesis out on Claude's Opus 4.7 and Sonnet 4.6.
+Now both models are up to version 5.0.
+
+\section{Code Exploration}
+
+This is an underrated way of using LLM, and something even opponents of vibe-coding should use.
+%Ex-Netflix engineer M. B. Paulson, better known under his alias ``ThePrimeagen''
+It lowers the barrier to entry into any code base dramatically.
+Within a month of exploring NGPB, the main author of it was so impressed by my knowledge of the code base that he made a humorous remark that I know the code base better than he does at this point.
+It may even search outside of the code base, inside its dependencies for answers.
+This is especially useful for undocumented (like BIMPP) or poorly documented code bases (like AMGX).
+The ability of LLM to understand a code base is truly impressive, though it cannot be blindly trusted.
+It is always worth double-checking the claims.
+
+\section{Research}
+
+All industry leading models have knowledge about abstracts of scientific work.
+This makes finding related research a lot more convenient than the traditional way of using Google Scholar, which looks like it has not been updated since 2005.
+They do not have access to the full content though, if it is behind a paywall.
+Thus acquiring that is still up to the user.
+Once the full content is acquired, AI can be used similarly to the code base exploration, by explaining difficult-to-understand passages, or concepts that are required to read it.
+This speeds up research a lot.
+I do not recommend using AI to simply summarize the content, outside of determining whether the content is relevant to one's work.
+This helps avoid spending time trying to understand a scientific work, only to realize that it does not feature the solution one is looking for.
+
+\section{Discussion}
+
+Large language models can be good discussion partners, and Claude's Opus is more willing to tell you that you are wrong.
+This is perhaps my favorite aspect of Opus, since many other LLM models, especially smaller ones, will simply play along.
+Larger models are also better at capturing the scope of the problem, noticing inconsistencies one might have missed.
+It can also offer a new perspective.
+I encountered many instances where I drew a conclusion too carelessly, where AI helped me see my own flaws.
+
+\section{Writing Code}
+
+This is the most controversial section, and frequently frowned upon by many software engineers and computer scientists.
+This is often justified, as some people use AI to carelessly generate code, without inspecting it, which is commonly referred to as ``vibe-coding''.
+However, AI can generate prototypes and refactor/rewrite code sections extremely quickly.
+Some proponents of vibe-coding equate generating code with using a compiler to generate machine-readable code from a high-level language, and although I do have some objections to that, I do understand the underlying argument here.
+
+So the answer is simple: just avoid vibe-coding.
+My approach to this was to do ``agentic engineering'': I would take the role of a chief architect while Claude would be both my consultant and construction worker.
+I would keep track of the overall architecture, work out specification through consultation, and then order them to be implemented.
+At the same time I would also frequently explore new paths through prototyping, without needing to understand all of them in detail, just the overarching functionality.
+Generating code almost completely removes the sunken-cost fallacy.
+This allowed me to painlessly move from a slow Barnes-Hut implementation, to FMM.
+Knowing myself, I would have stubbornly held on to Barnes-Hut.
+Once I settled on a path, that is where I would actually dig deeper and request specific improvements, before moving on to the next part of the construction site.
+No plan survives first contact with the enemy, the enemy being my own laziness.
+At the beginning I procrastinated on inspecting the code until it was too late, and I lost valuable time rolling back code that I had a poor understanding of.
+
+\subsection{Plan Mode}
+
+Implementation was done almost exclusively through Claude's ``plan mode'', where the engineer specifies a feature, after which Claude explores all the necessary changes, and displays them in a plan.
+It then allows the engineer to ask questions and make suggestions to the plan.
+Claude then updates the plan accordingly, and displays it, allowing for further questions and suggestions.
+This back-and-forth is also referred to as ``prompt tennis''.
+When the engineer is satisfied with the plan, Claude switches into automatic editing mode and implements the plan.
+These plans always exist as markdown files, making it possible to inspect them after the fact.
+I have discovered that this is not exactly perfect, as Claude may encounter issues along the way and make adjustments.
+It may display these changes after finishing the implementation, but it might understate them, making them easy to miss.
+This also applies to the initial planning phase itself, where Claude may make questionable implementation choices, that might not be immediately obvious and only become so after inspection of the result.
+
+\subsection{Optimizations}
+
+One of Claude's biggest weaknesses is judging which parts of the code take the longest.
+Without concrete timing it attempts to guess by time complexity, which is not always the best metric.
+This repeatedly misidentified areas in the code, which when optimized brought no speedup.
+With concrete timings this becomes much less of an issue.
+However, it may focus too much on sections with the longest runtime, ignoring parts that take less time, but could be optimized more effectively.
+
+It is much better at identifying high memory usage, as it can estimate it more effectively.
+Feeding it concrete numbers from a profile still helps.
+
+\subsection{Debugging}
+
+As LLMs understand the code base very well, they can often identify issues through sheer static analysis.
+This allows them to uncover issues, that might be hidden inside a dependency, rather than the project itself.
+However, if static analysis fails, it is easy to fall into the trap of repeated prompting without actually achieving anything.
+False positives were also most common in this use case.
+In this case, it is not enough to describe the problem.
+Giving it information like stacktraces and debug prints is a must.
+The more information, the better.
+In desperate situations, it is worth asking it which debug prints could help identify the problem.
+
+\section{Thesis Writing}
+
+I wrote the block text myself, only using AI to correct mistakes, generate figures and tables, and add references.
+Generating text is where I personally draw the line, since asking AI to generate the thesis would be proof of me not being able to describe the work myself.
+Besides, to generate human speech would involve me prompting those requests using the same human speech.
+Even prompting it to turn my notes into full sentences removes a layer of control that is important to making sure that I understood the work.
+However, the other things can be very time-consuming, and break the flow of writing.
+When using latex, all of these issues essentially reduce to the same coding issues as mentioned before.
