@@ -3,45 +3,45 @@
 
 \section{N-Body}
 \label{sec:alternative-techniques-nbody}
-Many scientific calculations, from electric forces between electron to gravitational forces between astral bodies, consist of sums of pairwise interaction between a large number of bodies or particles.
+Many scientific calculations, from electric forces between electrons to gravitational forces between astral bodies, consist of sums of pairwise interactions between a large number of bodies or particles.
 This class of problems is called ``N-Body''.
 The function describing the individual interaction is called the ``kernel''.
-Kernels do not depend on each other and can be computed in any order.
-Naturally a problem, where $n$ elements are interacting with each other, is going to have a time complexity of \(\mathcal{O}(n^2)\), meaning that computing interactions for large $n$'s becomes really expensive.
+The pairwise evaluations of the kernel do not depend on each other and can be computed in any order.
+Naturally, a problem, where $n$ elements are interacting with each other, is going to have a time complexity of \(\mathcal{O}(n^2)\), meaning that computing interactions for large $n$'s becomes computationally expensive.
 
-BEM type solvers compute the interaction between each boundary element, meaning N-Body is a core part of their solve.
+BEM type solvers compute the interaction between each boundary element, meaning N-Body is a core part of solving the system.
 Although most FEM solvers avoid N-Body calculations entirely, NGPB has this problem type at least twice as demonstrated in Eq.~\eqref{eq:polarization-energy} and \ref{eq:ionic-energy}.
 
-One the one hand, many approximation techniques have been developed, which are all roughly based on the following idea:
+On the one hand, many approximation techniques have been developed, which are all roughly based on the following idea:
 Kernels generally have an inverse dependency on distance.
 The further the distance between the bodies, the less individual interactions matter.
 These techniques range from being very simple, like the Cut-Off method, to fairly complex like Barnes Hut (BH) or Fast Multipole Method (FMM).
 
 On the other hand, the nature of the kernels means that N-Body problems are perfect for highly-parallel architectures, primarily GPUs.
-This works so well in fact that naively running kernels in parallel often beats intricate optimizations.
+This works so well, in fact, that naively running kernels in parallel often beats intricate optimizations.
 
 \subsection{Cut-Off}
 \label{sec:alternative-techniques-nbody-cut-off}
 
-This is the least sophisticated optimization technique, that takes the previously mentioned idea to its extreme.
-If to bodies are far enough away it simply aborts the calculation between these two entirely.
-While it does reduce the number of calculations, it leads to a very large, and very hard to control error.
-This technique only makes sense when the result it so small, it lives at the noise floor for floating point numbers.
+This is the least sophisticated optimization technique that takes the previously mentioned idea to its extreme.
+If two bodies are far enough away, it simply aborts the calculation between these two entirely.
+While it does reduce the number of calculations, it leads to a large and hard-to-control error.
+This technique only makes sense when the result is so small that it lives at the noise floor for floating point numbers.
 This fact relies on the system being very large, which is hardly ever the case.
 
 \subsection{Treecode Barnes-Hut}
 \label{sec:alternative-techniques-nbody-bh}
 
-If a cluster of bodies is far enough away from a target body, the cluster could be summarized as a single body, that interacts with the target.
+If a cluster of bodies is far enough away from a target body, the cluster could be summarized as a single body that interacts with the target.
 This is the core idea behind Barnes-Hut (BH).
 First the domain is organized into a tree.
-It walks through the tree of body clusters for all bodies, and decides whether certain clusters are far enough away to calculate the interaction using their summary instead of ever individual interaction of every body within it.
-Originally these summaries are approximated with simple sums of all the bodies in the cluster concentrated at their center of gravity.
+It walks through the tree of body clusters for all bodies. For each cluster, it decides whether it is far enough away to calculate the interaction using its summary instead of every individual interaction of every body within it.
+Originally, these summaries were approximated with simple sums of all the bodies in the cluster concentrated at their center of gravity.
 The distance criterion, commonly denoted as $\theta$, controls the accuracy of the algorithm.
-The higher $\theta$ is, the more summaries of clusters are accepted, and the more the algorithm approaches its theoretical peak completely of \(\mathcal{O}(n log n)\).
+The higher $\theta$ is, the more summaries of clusters are accepted, and the more the algorithm approaches its theoretical peak complexity of \(\mathcal{O}(n log n)\).
 Since these summaries are approximations, increasing $\theta$ also increases the error.
-In contrast, lowering $\theta$ makes the result more accurate as more interactions are computed directly, but also making the complexity approach the original \(\mathcal{O}(n^2)\).
-Traditionally, a cluster is far enough away when $\theta > s/d$, where $s$ is the size of the cluster, and $d$ is the distance between the cluster and target.
+In contrast, lowering $\theta$ makes the result more accurate as more interactions are computed directly, but also makes the complexity approach the original \(\mathcal{O}(n^2)\).
+Traditionally, a cluster is considered far enough away when $\theta > s/d$, where $s$ is the size of the cluster, and $d$ is the distance between the cluster and target.
 
 To make higher $\theta$ more acceptable, the simple sum was replaced by multipole expansions (M2P), which are more computationally expensive, but also more accurately summarized the interaction with the cluster.
 With that, the acceptance criterion now became the multipole acceptance criterion (MAC).
@@ -50,46 +50,55 @@ More sophisticated criteria have been developed in order to help increase $\thet
 \subsection{Alternative MACs}
 \label{sec:alternative-techniques-alternative-macs}
 
-In the paper \cite{salmon1994skeletons} John Salmon and Michael Warren investigated the effectiveness between three different MACs: the classic BH criterion, ``minimum distance'' and ``Bmax''.
+In the paper \cite{salmon1994skeletons}, John Salmon and Michael Warren compared the effectiveness of three different MACs: the classic BH criterion, ``minimum distance'', and ``Bmax''.
 They found that none of these reduced the error to a significant degree and concluded that an increase in multipole expansion order is much more effective.
 % TODO what about their "sum squares MAC"?
 % again I am afraid I didn't do something optimally enough, how does it compare to the doubles sided Bmax?
 
 \subsection{Multipole Expansions}
 \label{sec:alternative-techniques-nbody-multipole-expansions}
-Multipole expansions refer to functions higher order function expansions.
-One can imagine them as a lobe patterns originating from a central point.
+Multipole expansions are a type of higher-order function expansion.
+One can imagine them as lobe patterns originating from a central point.
 % TODO a picture would be nice
-They approximate a function by expanding it into a sum of repetitive terms.
-Generally speaking, the number of terms is equal to the order $P$ of the expansion.
-The higher the order, the more the expansions converges towards the original function, becoming exact if the order is infinite.
-An interesting observation is that the 0-th order is equal to the sum of the bodies, meaning that the original BH technically used a 0-order-expansion.
+They approximate a function by expanding it into a sum of successive terms, truncated at some order $P$:
+\begin{equation}
+f(\mathbf{r}) \approx \sum_{l=0}^{P} M_l(\mathbf{r})
+\label{eq:generic-multipole-expansion}
+\end{equation}
+Generally speaking, the number of terms in this sum correlates with the order $P$ of the expansion.
+The higher the order, the more the expansion converges towards the original function, becoming exact if the order is infinite.
+An interesting observation is that the 0-th order term $M_0(\mathbf{r})$ is equal to the sum of the bodies, meaning that the original BH technically used a 0-order-expansion.
 
 There are many ways to formulate multipole expansions, each with their own upsides and downsides.
-The electrostatic Coulomb potential Eq.~\eqref{eq:coulomb-potential} is a form of laplacian kernel $1/|r|$, which the fundamental solution to the laplace operator $\Delta = \nabla \cdot \nabla$, essentially the same operator that appears in the PBE Eq.~\eqref{eq:pbe-basic}.
-Multipole expansions the laplace kernel (also called the or Green's function)are well known.
+The electrostatic Coulomb potential Eq.~\eqref{eq:coulomb-potential} is a form of Laplacian kernel $1/|r|$, which is the fundamental solution to the Laplace operator $\Delta = \nabla \cdot \nabla$, essentially the same operator that appears in the PBE Eq.~\eqref{eq:pbe-basic}.
+Multipole expansions of the Laplace kernel (also called the Green's function) are well known.
 
 \subsubsection{Cartesian Taylor}
-The Taylor expansions is perhaps the best known function expansion.
-The cartesian Taylor expansion is the same core concept applied to all 3 dimensions of the cartesian coordinates.
+The Taylor expansion is perhaps the best known function expansion.
+The Cartesian Taylor expansion is the same core concept applied to all 3 dimensions of the Cartesian coordinates.
 They are mathematically simple and pole-free, without the need for complex numbers or trigonometry, making them genuinely GPU-friendly.
-Their storage complexity is \(\mathcal{O}(p^3)\), meaning they grow pretty quickly as the order increases.
-This is not a big deal in case of treecoded BH, because the multipole gets evaluated at every particle.
-It is much less suited for Fast Multipole Expansion methods, because the storage complexity bites in two different ways: once purely because FMM usually requires higher P, and a second time during the translation of the multipole expansion into a local expansion.
+Their storage complexity is \(\mathcal{O}(p^3)\), meaning they grow quickly as the order increases.
+This is not a significant drawback for treecoded BH, because the multipole gets evaluated at every particle.
+It is much less suited for Fast Multipole methods, because the storage complexity bites in two different ways: once purely because FMM usually requires higher P, and a second time during the translation of the multipole expansion into a local expansion.
 
-Treecode Barnes combination was already implemented in a BEM LPBE solver by W. Geng and R. Krasny \cite{geng2013tabipb}.
-Dubbed TABI-PB 1.0, it is based of previous work involving Krasny \cite{li2009cartesian}, allowing for an expansion order of up to 10.
-Though the treecode could reach error magnitudes of $e^-6$ with a $theta$ of 0.5, it still need to turn down $theta$ all the way down to 0.2 to reach an error of $e^-10$.
+The combination of treecode Barnes-Hut with Cartesian Taylor expansion was already implemented in a BEM LPBE solver by W. Geng and R. Krasny \cite{geng2013tabipb}.
+Dubbed TABI-PB 1.0, it is based on previous work involving Krasny \cite{li2009cartesian}, allowing for an expansion order of up to 10.
+Though the treecode could reach error magnitudes of $e^-6$ with a $\theta$ of 0.5, it still needed to turn down $\theta$ all the way down to 0.2 to reach an error of $e^-10$ (Figure~\ref{fig:tabipb-kirkwood-error}).
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/geng2013_kirkwood_error.png}
+    \caption[Treecode CPU time versus approximation error for the Kirkwood sphere]{Effect of the MAC parameter $\theta$ and Taylor expansion order $p$ on treecode CPU time versus approximation error in electrostatic solvation energy, for the Kirkwood-sphere test case ($N=81{,}920$ faces). Solid lines are the full PB equation, dashed lines are the simpler Poisson equation; each line sweeps $p=1$ to $10$ from right to left. Reproduced from Geng and Krasny \cite{geng2013tabipb}, \textcopyright{} 2013 Elsevier Inc.}
+    \label{fig:tabipb-kirkwood-error}
+\end{figure}
 
 \subsubsection{Spherical Harmonics}
-Spherical harmonics use spherical coordinates as opposed to cartesian.
+Spherical harmonics use spherical coordinates as opposed to Cartesian.
 Their storage complexity is \(\mathcal{O}(p^2)\), needing fewer moments than Cartesian Taylor, which allows for higher orders while using the same amount of storage.
 They require complex numbers and trigonometry, due to the use of associated-Legendre recurrences, making them more computationally expensive than Cartesian.
 They also have a pole at $\theta=0,\pi$.
-However, these trade offs are wroth it in FMM due to the lower storage complexity.
-
-A spherical harmonic expansion for the Coulomb potential, as well as the screened potential, is given in ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}.
-% not sure if I can find a paper that actually has JUST the spherical harmonics
+However, these trade-offs are worth it in FMM due to the lower storage complexity.
+A spherical harmonic expansion for the Coulomb potential, as well as the screened potential, is given in the paper ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' \cite{cheng1999fastadaptive}.
 
 \subsection{Fast Multipole Method}
 \label{sec:alternative-techniques-nbody-fmm}
@@ -97,33 +106,33 @@ A spherical harmonic expansion for the Coulomb potential, as well as the screene
 Introduced in 1987 by Leslie Greengard and Vladimir Rokhlin \cite{greengard1987fmm}, the Fast Multipole Method (FMM) takes the idea of Barnes-Hut and expands on it.
 Instead of evaluating the cluster multipole expansion against a single target body (as M2P does), it now also summarizes the targets into clusters as well, called the local expansion.
 This eliminates the need to traverse the tree for every body.
-Thus FMM does not iterate over each particle, it iterates over each leaf cluster, and computes their multipole expansion using the P2M operator.
+Thus FMM does not iterate over each particle, but rather iterates over each leaf cluster, and computes their multipole expansion using the P2M operator.
 
-When it then moves to the higher level in the tree, it does not compute the multipole expansion from scratch.
-Instead it uses the M2M operator, that translation the multipole expansion of a parent cluster from its children's multipoles.
+When it then moves to a higher level in the tree, it does not compute the multipole expansion from scratch.
+Rather it uses the M2M operator, that translates the multipole expansion of a parent cluster from its children's multipoles.
 This is the upward pass, and it continues until it reaches the root of the tree in just \(\mathcal{O}(n)\) steps.
-Next the well-separated clusters convert their multipole expansions into local expansion with the M2L operator.
+Next, the well-separated clusters convert their multipole expansions into local expansions with the M2L operator.
 Then comes the downward pass, where the local expansions of the parent clusters get passed down to their children using the L2L operator, also in \(\mathcal{O}(n)\) steps.
-Thus the ideal overall time complexity is just \(\mathcal{O}(n)\).
+Therefore the ideal overall time complexity is just \(\mathcal{O}(n)\).
 
 Classical FMM does not use an MAC, instead controlling the error entirely through the order of the expansion $P$.
-Thus the use of spherical harmonics, as well as other more storage efficient expansions like planewaves, is preferred over cartesian Taylor, though this is not the only reason.
-The M2L operator iterates over all multiple expansion moments for every moment of the local expansion.
-For cartesian Taylor with a space complexity of \(\mathcal{O}(p^3)\), this means the M2L would have the arithmetic complexity of \(\mathcal{O}(p^6)\), while spherical harmonics only end up with \(\mathcal{O}(p^4)\).
+Hence the use of spherical harmonics, as well as other more storage-efficient expansions like planewaves, is preferred over Cartesian Taylor, though this is not the only reason.
+The M2L operator iterates over all multipole expansion moments for every moment of the local expansion.
+For Cartesian Taylor with a space complexity of \(\mathcal{O}(p^3)\), this means the M2L would have the arithmetic complexity of \(\mathcal{O}(p^6)\), while spherical harmonics only end up with \(\mathcal{O}(p^4)\).
 Moreover, this complexity can be further reduced to \(\mathcal{O}(p^3)\) through rotational operators.
 Whether two clusters are considered well separated is purely based on whether they are touching, and which tree level they are on, rather than their geometry.
-This approach already had been applied multiple times to the BEM to solve for the electrostatic potential of biomolecular systems \cite{bharadwaj1995fmbem, cheng1999fastadaptive}.
+This approach had already been applied multiple times to the BEM to solve for the electrostatic potential of biomolecular systems \cite{bharadwaj1995fmbem, cheng1999fastadaptive}.
 
 \subsubsection{Dual Tree Traverse}
 \label{sec:alternative-techniques-nbody-fmm-dtt}
 
-However, there are also alternative approaches like R. Yokota's et. al. dual tree traverse (DTT) FMM \cite{yokota2012hierarchical, yokota2013dualtree}, which classifies interactions using MACs into P2P and M2L interactions.
-For this it constructs two trees: a source and target tree, and initializes the interaction stack with the two root nodes.
+However, there are also alternative approaches like R. Yokota et al.'s dual tree traverse (DTT) FMM \cite{yokota2012hierarchical, yokota2013dualtree}, which classifies interactions using MACs into P2P and M2L interactions.
+For this it constructs two trees: a source- and target tree, and initializes the interaction stack with the two root nodes.
 Until the stack is empty, it pops a pair from it and subdivides the largest node, which creates new interaction pairs. 
 This is a necessary condition to maintain \(\mathcal{O}(n)\) complexity.
-For each pair, it first checks whether both nodes of a pair are leafs, in which case a direct calculation P2P is performed.
-If none of them are leafs, the pair is tested with the MAC.
-If it passes the multipole interaction is computed, otherwise the pair gets pushed to the stack.
+For each pair, it first checks whether both nodes of a pair are leaves, in which case a direct calculation P2P is performed.
+If none of them are leaves, the pair is tested with the MAC.
+If it passes, the multipole interaction is computed; otherwise, the pair gets pushed to the stack.
 This approach does not require a quad- or octree to work, and is compatible with bounding volume hierarchies.
 
 \section{Other}
@@ -131,13 +140,13 @@ This approach does not require a quad- or octree to work, and is compatible with
 
 \subsection{Automatic Differentiation}
 
-Automatic differentiation is a programming trick to compute the differential function.
+Automatic differentiation is a programming technique to compute the differential function.
 It exploits the fact that computer programs at their core use simple arithmetic operations like summation, multiplication, division and so on.
-Thus he derivative can be evaluated using the corresponding derivative rule.
-As is the theme with this thesis, there are two types of automatic differentiation: forward mode, where the the derivative is calculated along side the value, and reverse mode, where 
-after computing the value the derivative is traced back.
+Thus the derivative can be evaluated using the corresponding derivative rule.
+As is the theme with this thesis, there are two types of automatic differentiation: forward mode, where the derivative is calculated alongside the value, and reverse mode, where 
+after computing the value, the derivative is traced back.
 Forward mode can be implemented through operator overloads, where the overloaded arithmetic operation handles both the value and the derivative calculation.
-That means that the program functions themselves don't need to be altered, as the additional calculations are handled through the overloads of the basic arithmetic that they already use.
+That means that the program functions themselves do not need to be altered, as the additional calculations are handled through the overloads of the basic arithmetic that they already use.
 
 \section{CUDA optimizations}
 \label{sec:alternative-techniques-cuda-optimizations}
@@ -148,20 +157,20 @@ That means that the program functions themselves don't need to be altered, as th
 Mixed precision is the practice of using a mix of FP32 and FP64 operations.
 In the context of the N-body problem, mixed precision is employed to off-load the distance calculation to the FP32 units.
 The error is hard to quantify, but is guaranteed to be at least at the FP32 noise floor, which is around $10^{-7}$.
-This is particularly effective on gaming GPUs, where FP64 performance is severely neutered, and FP32 performance is better when compared to workstation GPUs.
+This is particularly effective on gaming GPUs, where FP64 performance is severely limited, and FP32 performance is better when compared to workstation GPUs.
 
 \subsection{Atomics}
 \label{sec:alternative-techniques-cuda-optimizations-atomics}
 
 Atomic operations such as \texttt{atomicAdd} are operations used to prevent data-races on write operations.
-For instance, when multiple parallel threads add a value to the same memory address, some of them may add their value to the content of the address that has already been updated by that time, meaning they would override the address based on its old value.
-The downside of atomics are that they force the operations on one address to be done sequentially, blocking competing threads from writing in parallel, which naturally leads to performance loss.
-The folklore of ``never use atomics'' is much less relevant today, as atomics have become much more flexible, being usable not only on the global memory, but the shared memory as well.
-The should still be avoided on highly contested global memory addresses though.
+For instance, when multiple parallel threads add a value to the same memory address, some of them may add their value to the content of the address that has already been updated by that time, meaning they would overwrite the address based on its old value.
+The downside of atomics is that they force the operations on one address to be done sequentially, blocking competing threads from writing in parallel, which naturally leads to performance loss.
+The conventional wisdom of ``never use atomics'' is much less relevant today, as atomics have become much more flexible, being usable not only on global memory, but on shared memory as well.
+They should still be avoided on highly contested global memory addresses though.
 
 % TODO I think this might need to move into implementation instead
-Two inconveniently missing atomic operations are floating point variants of \texttt{atomicMin} and \texttt{atomicMax}, which store the minimum and maximum between two numbers.
-They do exist for integers, and with the help of typecasting, one can create a workaround for floating point numbers:
+Two inconveniently missing atomic operations are floating-point variants of \texttt{atomicMin} and \texttt{atomicMax}, which store the minimum and maximum of two numbers.
+They do exist for integers, and with the help of typecasting, one can create a workaround for floating-point numbers:
 
 \begin{lstlisting}[style=cudastyle,caption={FP64 minimum and maximum atomics assembled from the native 64-bit integer atomics.},label={lst:atomic-min-max-double}]
 typedef long long          i64;  // signed reinterpretation
@@ -186,7 +195,7 @@ double atomicMaxDouble(double *addr, double val) {
 }
 \end{lstlisting}
 
-The trick rests on the layout of IEEE-754 floating point numbers, which places the sign in the highest bit, followed by the exponent and then the mantissa.
+The technique rests on the layout of IEEE-754 floating-point numbers, which places the sign in the highest bit, followed by the exponent and then the mantissa.
 For non-negative values this layout is monotonic: comparing the bit patterns as integers yields the same ordering as comparing the numbers themselves.
 Two non-negative doubles reinterpreted as signed integers therefore sort exactly like the doubles, and a native integer \texttt{atomicMin} already does the right thing.
 Negative values set the sign bit, which has two consequences.
@@ -196,24 +205,24 @@ Either branch computes the correct result regardless of the sign of the value cu
 
 \subsection{Templating}
 
-Templating is a technique in c++ for creating generic classes or functions.
+Templating is a technique in C++ for creating generic classes or functions.
 It is mainly used for writing code that supports different data types.
-The compiler then automatically creates a versions of the template for every type that is used in the code base.
-Here is the twist: it can also be used to create static buffer sizes, by templating a function with the quant of that buffer.
+The compiler then automatically creates a version of the template for every type that is used in the code base.
+Additionally, it can be used to create static buffer sizes, by templating a function with the factor that scales the buffer size, e.g. the number of doubles $n$, giving a buffer of $8n$ bytes.
 This is particularly useful to avoid register spills, as the buffer size is already known at compile time.
 
 
 \subsection{Optimized Tree Construction}
 \label{sec:alternative-techniques-cuda-optimizations-lbhv}
 
-Since both Barnes-Hut and FMM are treecode based, constructing a tree is of course and important first step.
-Nvidia Researcher Tero Karras presented a highly optimized linear bounding volume hierarchy implementation in both blog~\cite{karras2012thinkingparallel} and paper~\cite{karras2012lbvh} form.
-It uses morton codes~\cite{morton1966geodetic}, aka the Z-order curve to sort objects in a domain, and then partition them into a tree.
+Since both Barnes-Hut and FMM are treecode based, constructing a tree is of course an important first step.
+Nvidia researcher Tero Karras presented a highly optimized linear bounding volume hierarchy implementation in both blog~\cite{karras2012thinkingparallel} and paper~\cite{karras2012lbvh} form.
+It uses Morton codes~\cite{morton1966geodetic}, also known as the Z-order curve, to sort objects in a domain, and then partition them into a tree.
 
-Morton codes are a technique to create a space filling curve, that maps a objects in higher-dimensional space onto a single dimension.
-In case of the LBVH, those are the bounding volumes (BV) around the objects.
-It does this by interleaving the binary fixed point representations of their coordinates, as seen in Figure~\ref{fig:morton-z-curve}.
-Sorting the BV by those morton codes gives a very advantageous way of iterating over them.
+Morton codes are a technique to create a space-filling curve that maps objects in higher-dimensional space onto a single dimension.
+In the case of the LBVH, those are the bounding volumes (BV) around the objects.
+It does this by interleaving the binary fixed-point representations of their coordinates, as seen in Figure~\ref{fig:morton-z-curve}.
+Sorting the BVs by those Morton codes gives a very advantageous way of iterating over them.
 
 \begin{figure}[htbp]
     \centering
@@ -222,21 +231,21 @@ Sorting the BV by those morton codes gives a very advantageous way of iterating 
     \label{fig:morton-z-curve}
 \end{figure}
 
-Traditional top-down approaches divide this ordered list by the value first most significant bit (MSB) that differs between them, so that one side contains all BVs, whose first uncommon MSB is 0 and those of the other side is 1.
-This is then recursively repeated until the individual objects or leafs are reached.
+Traditional top-down approaches divide this ordered list by the value of the first most significant bit (MSB) that differs between them, so that one side contains all BVs, whose first uncommon MSB is 0 and those of the other side are 1.
+This is then recursively repeated until the individual objects or leaves are reached.
 Such an approach does not use the GPU's resources optimally, since it starts with one top node and grows by powers of two, meaning that for the upper rows the GPU is severely underutilized.
 
-Karras flipped the algorithm to a bottom-up approach. This is possible because the number of internal nodes --- those that are not the leafs ---
+Karras reformulated the algorithm to a bottom-up approach. This is possible because the number of internal nodes --- those that are not the leaves ---
 is always $n-1$ where $n$ is the number of objects in the scene.
 His algorithm then leverages another property of the partitioning: the length of the common prefix shared between the children of a node.
 Descending through the tree, the shared prefix always becomes longer with each level, as can be seen in Figure~\ref{fig:karras-radix-tree}.
-Every internal node can be then thought of covering a range of keys with the same prefix.
-It then determines the range for every internal node in parallel, by first evaluating at which end of the range they sit, by comparing the length of the prefix between the leaf node with the same index as the internal node, and its left and right siblings in the list of leafs.
-If the prefix with the left sibling is longer, it means the internal node sits on the end of the range, and vice-versa.
+Every internal node can then be thought of as covering a range of keys with the same prefix.
+It then determines the range for every internal node in parallel, by first evaluating at which end of the range they sit, by comparing the length of the prefix between the leaf node with the same index as the internal node, and its left and right siblings in the list of leaves.
+If the prefix with the left sibling is longer, it means the internal node sits at the end of the range, and vice-versa.
 This means those leaf nodes are descendants of that internal node.
 The length of the prefix with the other sibling is remembered as the minimum prefix length.
 Then it searches for the opposite end of the range by looking for the furthest leaf node, whose common prefix with the same-index leaf is still greater than the minimum prefix length.
-Finally it does the same division as in the traditional top down approach.
+Finally, it does the same division as in the traditional top-down approach.
 The final result can then be seen in Figure~\ref{fig:karras-node-layout}.
 
 \begin{figure}[htbp]
@@ -256,9 +265,9 @@ The final result can then be seen in Figure~\ref{fig:karras-node-layout}.
 \subsection{Tiling}
 \label{sec:alternative-techniques-cuda-tiling}
 
-Tiling is a standard optimization technique in CUDA programming, that improves memory throughput by loading ``tiles'' of the total problem from global memory into the smaller and faster memories.
+Tiling is a standard optimization technique in CUDA programming that improves memory throughput by loading ``tiles'' of the total problem from global memory into the smaller and faster memories.
 This helps because global memory reads are more efficient when fetching chunks of data, instead of individual values.
-Thus reading tiles of values into shared memory or the registers first, before reading individual values during the calculation is more efficient.
+Consequently reading tiles of values into shared memory or the registers first, before reading individual values during the calculation is more efficient.
 It is most effective when the computational intensity of the calculation is lower than the needed memory throughput.
 If the computational intensity far outweighs the memory throughput then it is unfortunately not very helpful.
 
@@ -270,7 +279,7 @@ If the computational intensity far outweighs the memory throughput then it is un
 \section{CUDA Linear Equation Solvers}
 \label{sec:alternative-techniques-cu-lin-eq-solvers}
 
-Among their library eco-system, Nvidia offers two ready-to-use linear equation solvers, those being cuDSS and AMGX.
+Among their library eco-system, Nvidia offers two ready-to-use linear equation solvers, namely cuDSS and AMGX.
 
 \subsection{cuDSS}
 \label{sec:alternative-techniques-cu-lin-eq-solvers-cuDSS}
@@ -278,21 +287,21 @@ Among their library eco-system, Nvidia offers two ready-to-use linear equation s
 % not sure if I'll keep this here
 cuDSS is a direct solver that can use either LU- or Cholesky factorization.
 However, in my limited testing the high memory usage immediately became a problem.
-For \texttt{6VYB} with \texttt{perfil1} of 0.95 and \texttt{scale} of 0.5, the resulting sparse matrix has an $n$ of 28 million and a $nnz$ of almost 200 million, with a total raw size of roughly 2.4 GB.
-With the scaling of dense methods for 3D meshes of \(\mathcal{O}(n^{4/3})\), the size of the solver balloons to 8.4 billion, meaning a size of about 64 GB for double precision float.
+For \texttt{6VYB} with \texttt{perfil1} of 0.95 and \texttt{scale} of 0.5, the resulting sparse matrix has an $n$ of 28 million and an $nnz$ of almost 200 million, with a total raw size of roughly 2.4 GB.
+With the scaling of dense methods for 3D meshes of \(\mathcal{O}(n^{4/3})\), the size of the solver balloons to 8.4 billion, meaning a size of about 64 GB for double-precision float.
 As this is too big even for an Nvidia A100 GPU, which has 40 GB of VRAM, I dropped cuDSS very quickly.
 
 \subsection{AMGX}
 \label{sec:alternative-techniques-cu-lin-eq-solvers-amgx}
 
-AMGX is Nvidia's latest iterative solver CUDA library, featuring numerous solvers, preconditioners, including the name giving ``algebraic multigrid'' (AMG) algorithm.
+AMGX is Nvidia's flagship iterative solver CUDA library, featuring numerous solvers and preconditioners, including the eponymous ``algebraic multigrid'' (AMG) algorithm.
 AMG is a preconditioning algorithm used primarily for Krylov methods.
-It can be roughly summarized as a recursive application of coarsening, smoothing, and dense solvation to the linear system.
+It can be roughly summarized as a recursive application of coarsening, smoothing, and a direct solve to the linear system.
 % if this sounds a bit like "random bullshit go!" that's because it kinda is
 Smoothers are also solvers that solve the same $Ax=b$ linear equation.
-Their purposed is to remove high frequency error through local relaxation.
-The algorithm begins by creating a hierarchy of progressively coarser versions of the matrix, which reduces low frequency error.
+Their purpose is to remove high-frequency error through local relaxation.
+The algorithm begins by creating a hierarchy of progressively coarser versions of the matrix, which reduces low-frequency error.
 Then it enters a recursive cycle with a certain shape.
-There are many different cycle shapes, the most basic being the V shape, where the system is smoothed and coarsened until it becomes small enough to be solved using a dense solver, after which the result is scaled back up, while also getting smoothed out.
-Other shapes include W, which is basically 2 consecutive V cycles and F, which is a blend of both.
+There are many different cycle shapes, the most basic being the V shape, where the system is smoothed and coarsened until it becomes small enough to be solved using a dense solver, after which the result is scaled back up, while also being smoothed.
+Other shapes include W, which recurses into the coarse-grid correction twice at every level instead of once, visiting the coarsest levels far more often than a V cycle does, and F, which is a blend of both.
 V is the cheapest cycle, while W achieves better convergence, with F being somewhere in the middle.
