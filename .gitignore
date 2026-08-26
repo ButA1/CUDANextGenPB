@@ -111,3 +111,19 @@ thesis/*.toc
 thesis/main.bbl-SAVE-ERROR
 .gitignore
 thesis/main.bcf-SAVE-ERROR
+
+# generated plot data for the thesis figures -- needed to compile, so it has to
+# survive the blanket data/ rule above
+!thesis/figures/data/
+
+# fmm_replay build artifacts and energy dumps
+src/fmm_replay
+src/tools/*.o
+*.rank[0-9]*.bin
+
+# bench_sweep.py outputs
+test*/bench_runs.csv
+test*/bench_runs_summary.csv
+test*/bench_meta.json
+test*/bench_logs/
+test*/options.prm.bench_backup

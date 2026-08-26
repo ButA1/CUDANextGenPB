@@ -38,6 +38,7 @@ const double p4esttol = 1 / std::pow (2, P8EST_QMAXLEVEL);
 
 #include "raytracer.h"
 #include "gpu_topology.h"
+#include "energy_dump.h"
 #include <nanoshaper.h>
 
 
@@ -150,6 +151,10 @@ struct
   double fmm_mac = 0.4;           // FMM opening angle (multipole acceptance criterion)
   int fmm_multipole_order = 6;    // FMM multipole truncation order (1..FMM_MAX_P)
   int fmm_leaf_size = 32;         // FMM max atoms per terminal cluster (P2P cutoff)
+  // Path prefix for the phase-1 energy-input dump; empty = no dump. Each rank
+  // writes <prefix>.rank<K>.bin, which src/tools/fmm_replay.cpp replays to sweep
+  // the fmm_* parameters without re-running the pipeline. See energy_dump.h.
+  std::string energy_dump;
 
   MPI_Comm mpicomm;
   gpu_topology gpu_topo;   // set once in main() via setup_gpu_topology (multi-GPU binding/dispatch)
@@ -779,6 +784,14 @@ struct
 
   void
   energy_fast (ray_cache_t & ray_cache);
+
+  // Phase 1 of the uniform-grid energy path: filter the charged atoms and sweep
+  // border_quad to collect the flux points and marching-cubes triangles. Depends
+  // on the mesh, phi and the ray cache; independent of energy_method and of every
+  // fmm_* parameter, which is what makes the FMM sweep replayable. Consumes (and
+  // frees) the charge_atoms / pos_atoms members, so it must be called only once.
+  energy_inputs_t
+  collect_energy_inputs_fast (ray_cache_t & ray_cache);
 
   void
   energy_cuda_fast (ray_cache_t & ray_cache);

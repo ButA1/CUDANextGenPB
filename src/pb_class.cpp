@@ -975,6 +975,7 @@ poisson_boltzmann::parse_options (int argc, char **argv)
   fmm_mac = g2 ( (alg_options + "fmm_mac").c_str (), 0.4);
   fmm_multipole_order = g2 ( (alg_options + "fmm_multipole_order").c_str (), 6);
   fmm_leaf_size = g2 ( (alg_options + "fmm_leaf_size").c_str (), 32);
+  energy_dump = g2 ( (alg_options + "energy_dump").c_str (), "");
 
   const std::string out_options = "output/";
   p4estfilename = g2 ( (out_options + "p4estfilename").c_str (), "poisson_boltzmann_p4est");
@@ -3530,14 +3531,21 @@ poisson_boltzmann::energy_fast (ray_cache_t & ray_cache)
   }
 }
 
-void
-poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
+// ====================================================================
+//  Phase 1 of the uniform-grid energy path.
+//
+//  Split out of energy_cuda_fast so that phase 2 -- the only part that depends
+//  on energy_method and the fmm_* parameters -- can be replayed on its own from
+//  a dump, instead of re-running a pipeline in which the energy stage is under
+//  4% of the wall time. See include/energy_dump.h and src/tools/fmm_replay.cpp.
+//
+//  The collection loop below is unchanged; its six output vectors are bound by
+//  reference to their slots in the returned struct.
+// ====================================================================
+energy_inputs_t
+poisson_boltzmann::collect_energy_inputs_fast (ray_cache_t & ray_cache)
 {
-  int rank;
-  MPI_Comm_rank (mpicomm, &rank);
-
-  if (rank == 0)
-    std::cout << "\n================ [ Electrostatic Energy (CUDA) ] =================\n";
+  energy_inputs_t in;
 
   const double inv_4pi = 1.0 / (4.0 * pi);
   const double eps0 = e_0;
@@ -3548,11 +3556,13 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   const double k2 = 2.0 * C0 * Angs * Angs * e * e / (eps0 * e_out * kb * T);
   const double k = std::sqrt (k2);
 
-  const double den_in = 1.0 / eps_in;
-  const double constant_pol = (1.0 / eps_out - 1.0 / eps_in) * inv_4pi;
-  const double constant_react = (1.0 / eps_out) * inv_4pi;
+  in.inv_4pi        = inv_4pi;
+  in.den_in         = 1.0 / eps_in;
+  in.constant_pol   = (1.0 / eps_out - 1.0 / eps_in) * inv_4pi;
+  in.constant_react = (1.0 / eps_out) * inv_4pi;
+  in.net_charge     = net_charge;
 
-  double charge_pol = 0.0;
+  double &charge_pol = in.charge_pol;
 
   // --- Filter charged atoms ---
   std::vector<double> charge_atoms_tmp;
@@ -3569,34 +3579,14 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   std::vector<double>().swap (charge_atoms);
   std::vector<std::array<double, 3>>().swap (pos_atoms);
 
-  // --- Pack atoms into flat arrays and upload to GPU once ---
-  std::vector<double> h_atoms(num_atoms * 3);
-  std::vector<double> h_charges(num_atoms);
+  // --- Pack atoms into flat arrays (the caller uploads them to the GPU) ---
+  in.atoms.resize (num_atoms * 3);
+  in.charges.resize (num_atoms);
   for (size_t ia = 0; ia < num_atoms; ++ia) {
-    h_atoms[3*ia]     = pos_atoms_tmp[ia][0];
-    h_atoms[3*ia + 1] = pos_atoms_tmp[ia][1];
-    h_atoms[3*ia + 2] = pos_atoms_tmp[ia][2];
-    h_charges[ia]     = charge_atoms_tmp[ia];
-  }
-
-  double *d_atoms = nullptr, *d_charges = nullptr;
-  atoms_to_device((int)num_atoms, h_atoms.data(), h_charges.data(),
-                  &d_atoms, &d_charges);
-
-  // --- Build the FMM atom-tree once (the source tree for the FMM energy path) ---
-  fmm_tree *fmm = nullptr;
-  if (energy_method == 2)
-    fmm_build_atom_tree((int)num_atoms, d_atoms, d_charges, fmm_mac, fmm_multipole_order,
-                        fmm_leaf_size, &fmm);
-
-  // --- Coulombic energy (naive O(N^2) atom pairs; atom count is small) ---
-  // Atoms are replicated on every rank, so this sum is identical on all ranks and
-  // is deliberately NOT part of the MPI_Reduce below -- only rank 0 prints it.
-  // Compute it on rank 0 only, to avoid redundant O(N^2) work on every GPU when
-  // running multi-GPU (each rank would otherwise recompute the same value).
-  if (calc_coulombic == 1 && rank == 0) {
-    double coul_raw = coulombic_energy_cuda_dev((int)num_atoms, d_atoms, d_charges);
-    this->coul_energy = coul_raw * den_in;
+    in.atoms[3*ia]     = pos_atoms_tmp[ia][0];
+    in.atoms[3*ia + 1] = pos_atoms_tmp[ia][1];
+    in.atoms[3*ia + 2] = pos_atoms_tmp[ia][2];
+    in.charges[ia]     = charge_atoms_tmp[ia];
   }
 
   // ====================================================
@@ -3619,16 +3609,17 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   }
 
   // --- Collect flux surface points ---
-  std::vector<double> h_V_pol;
-  std::vector<double> h_flux_pol;
+  std::vector<double> &h_V_pol    = in.V_pol;
+  std::vector<double> &h_flux_pol = in.flux_pol;
 
   // --- Collect triangle vertex data (ionic) ---
-  std::vector<double> h_vert_ion;
-  std::vector<double> h_norms_ion;
-  std::vector<double> h_phi_ion;
-  std::vector<double> h_area_ion;
+  std::vector<double> &h_vert_ion  = in.vert_ion;
+  std::vector<double> &h_norms_ion = in.norms_ion;
+  std::vector<double> &h_phi_ion   = in.phi_ion;
+  std::vector<double> &h_area_ion  = in.area_ion;
 
   const bool do_ionic = (calc_energy == 2 && k > 1.e-5);
+  in.do_ionic = do_ionic;
 
   for (const int ii : border_quad) {
     quadrant[ii];
@@ -3716,34 +3707,93 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
     }
   }
 
+  return in;
+}
+
+// ====================================================================
+//  Phase 2 of the uniform-grid energy path: evaluate the two integrals
+//  against the atom charges. Everything here reads only the energy_inputs_t
+//  that phase 1 produced -- no mesh, no phi, no ray cache -- which is what
+//  lets src/tools/fmm_replay.cpp sweep the fmm_* parameters from a dump.
+// ====================================================================
+void
+poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
+{
+  int rank, size;
+  MPI_Comm_rank (mpicomm, &rank);
+  MPI_Comm_size (mpicomm, &size);
+
+  if (rank == 0)
+    std::cout << "\n================ [ Electrostatic Energy (CUDA) ] =================\n";
+
+  energy_inputs_t in = collect_energy_inputs_fast (ray_cache);
+
+  const int num_atoms = in.num_atoms ();
+
+  // --- Upload the atoms once; every kernel below shares them ---
+  double *d_atoms = nullptr, *d_charges = nullptr;
+  atoms_to_device(num_atoms, in.atoms.data(), in.charges.data(),
+                  &d_atoms, &d_charges);
+
+  // --- Coulombic energy (naive O(N^2) atom pairs; atom count is small) ---
+  // Atoms are replicated on every rank, so this sum is identical on all ranks and
+  // is deliberately NOT part of the MPI_Reduce below -- only rank 0 prints it.
+  // Compute it on rank 0 only, to avoid redundant O(N^2) work on every GPU when
+  // running multi-GPU (each rank would otherwise recompute the same value).
+  if (calc_coulombic == 1 && rank == 0) {
+    double coul_raw = coulombic_energy_cuda_dev(num_atoms, d_atoms, d_charges);
+    this->coul_energy = coul_raw * in.den_in;
+    in.coul_energy = this->coul_energy;
+  }
+
+  // --- Optionally dump phase 1 so the fmm_* sweep can replay phase 2 offline ---
+  // A failed dump is reported and ignored: it must never cost a completed solve.
+  if (!energy_dump.empty ()) {
+    const std::string path = energy_dump_path (energy_dump, rank);
+    std::string err;
+
+    if (write_energy_inputs (in, path, rank, size, err))
+      std::cout << "  [energy_dump] rank " << rank << " -> " << path
+                << "  (" << in.num_pts () << " flux pts, "
+                << in.num_tri_verts () / 3 << " triangles)\n";
+    else
+      std::cerr << "  [energy_dump] rank " << rank << ": " << err << "\n";
+  }
+
+  // --- Build the FMM atom-tree once (the source tree for the FMM energy path) ---
+  fmm_tree *fmm = nullptr;
+  if (energy_method == 2)
+    fmm_build_atom_tree(num_atoms, d_atoms, d_charges, fmm_mac, fmm_multipole_order,
+                        fmm_leaf_size, &fmm);
+
   // ====================================================
   // GPU: polarization first_int
   // ====================================================
-  int num_pts = (int)h_flux_pol.size();
+  int num_pts = in.num_pts ();
   double first_int;
   if (energy_method == 2)
-    first_int = fmm_polarization_energy(fmm, num_pts, h_V_pol.data(), h_flux_pol.data());
+    first_int = fmm_polarization_energy(fmm, num_pts, in.V_pol.data(), in.flux_pol.data());
   else
-    first_int = polarization_energy_cuda_dev(num_pts, h_V_pol.data(), h_flux_pol.data(),
-                                             (int)num_atoms, d_atoms, d_charges);
+    first_int = polarization_energy_cuda_dev(num_pts, in.V_pol.data(), in.flux_pol.data(),
+                                             num_atoms, d_atoms, d_charges);
 
-  this->energy_pol = 0.5 * constant_pol * first_int;
+  this->energy_pol = 0.5 * in.constant_pol * first_int;
 
   // ====================================================
   // GPU: ionic second_int (only if calc_energy==2 && k>eps)
   // ====================================================
-  if (do_ionic) {
-    int num_tri_verts = (int)h_phi_ion.size();
+  if (in.do_ionic) {
+    int num_tri_verts = in.num_tri_verts ();
     double second_int;
     if (energy_method == 2)
-      second_int = fmm_ionic_energy(fmm, num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
-                                    h_phi_ion.data(), h_area_ion.data(), inv_4pi);
+      second_int = fmm_ionic_energy(fmm, num_tri_verts, in.vert_ion.data(), in.norms_ion.data(),
+                                    in.phi_ion.data(), in.area_ion.data(), in.inv_4pi);
     else
-      second_int = ionic_energy_cuda_dev(num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
-                                         h_phi_ion.data(), h_area_ion.data(),
-                                         (int)num_atoms, d_atoms, d_charges, inv_4pi);
+      second_int = ionic_energy_cuda_dev(num_tri_verts, in.vert_ion.data(), in.norms_ion.data(),
+                                         in.phi_ion.data(), in.area_ion.data(),
+                                         num_atoms, d_atoms, d_charges, in.inv_4pi);
 
-    this->energy_react = 0.5 * (second_int - first_int * constant_react);
+    this->energy_react = 0.5 * (second_int - first_int * in.constant_react);
   }
 
   // --- Free the tree and shared device atoms ---
@@ -3753,6 +3803,8 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   // ====================================================
   // MPI reduction
   // ====================================================
+  double charge_pol = in.charge_pol;
+
   auto reduce_double = [&] (double &x) {
     MPI_Reduce (rank == 0 ? MPI_IN_PLACE : &x, &x, 1, MPI_DOUBLE, MPI_SUM, 0, mpicomm);
   };

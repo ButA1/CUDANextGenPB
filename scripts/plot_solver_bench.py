@@ -1,0 +1,491 @@
+#!/usr/bin/env python3
+"""
+Turn the sweep-A (linear solver) rows of a bench_sweep.py run into a pgfplots
+column chart and a booktabs table.
+
+Sweep A is three configurations -- LIS, AMGX on its built-in defaults, and AMGX
+with the tuned config file -- each run ten times with energy_method pinned to 1.
+The chart compares the solve stage across them; the table carries the detail that
+explains the difference (iteration count, the AMGX setup/solve split, and the
+residual each solver actually reached, which is not the same for all three).
+
+Give it one folder for a single-molecule chart, or several to get one group of
+columns per molecule:
+
+    python3 scripts/plot_solver_bench.py test0
+    python3 scripts/plot_solver_bench.py test0 test1 test2 --relative
+
+Writes, relative to the thesis directory:
+    figures/data/<tag>.dat        one row per molecule, one column trio per config
+    figures/data/<tag>_ref.tex    reference values as macros
+    figures/<tag>.tex             the figure, \\input-able like the others
+    figures/<tag>_table.tex       the accompanying table
+"""
+
+import argparse
+import csv
+import math
+import os
+import statistics
+import sys
+from collections import defaultdict
+
+# The two AMGX entries are the same solver under different configuration, so they
+# share a hue and separate by lightness; LIS is a different solver and gets a
+# different hue. Blue against orange stays legible under the common CVD types,
+# and the three differ enough in lightness to survive a greyscale print.
+CONFIGS = [
+    ("lis",     "LIS",             "solverlis",  "D95F02"),
+    ("amgx",    "AMGX (default)",  "solveramgx", "9DC3E0"),
+    ("amgxcfg", "AMGX (tuned)",    "solvercfg",  "2C5F8D"),
+]
+CONFIG_ORDER = [c[0] for c in CONFIGS]
+
+METRICS = {
+    "solve": ("t_solve", "solve stage"),
+    "wall": ("wall_s", "total run"),
+    "assemble": ("t_assemble", "matrix assembly"),
+}
+
+
+def classify(row):
+    """Map a sweep-A row onto one of the three configuration keys."""
+    solver = (row.get("linear_solver") or "").strip().lower()
+    if solver == "lis":
+        return "lis"
+    if solver == "amgx":
+        return "amgxcfg" if (row.get("amgx_config") or "").strip() else "amgx"
+    return None
+
+
+def collect(folder, csv_path, metric_col):
+    with open(csv_path, newline="") as fh:
+        rows = [r for r in csv.DictReader(fh)
+                if r.get("status") == "ok" and r.get("sweep") == "A"]
+    if not rows:
+        return None
+
+    molecule = os.path.splitext(rows[0].get("molecule", "") or "")[0] or \
+        os.path.basename(os.path.normpath(folder))
+
+    groups = defaultdict(list)
+    for r in rows:
+        key = classify(r)
+        if key:
+            groups[key].append(r)
+
+    def stat(grp, col, fn=statistics.median):
+        vals = []
+        for r in grp:
+            raw = r.get(col, "")
+            if raw not in ("", None):
+                try:
+                    vals.append(float(raw))
+                except ValueError:
+                    pass
+        return fn(vals) if vals else None
+
+    out = {"molecule": molecule, "folder": folder, "configs": {}}
+    for key, grp in groups.items():
+        times = [float(r[metric_col]) for r in grp if r.get(metric_col)]
+        if not times:
+            continue
+        out["configs"][key] = {
+            "n": len(grp),
+            "med": statistics.median(times),
+            "min": min(times),
+            "max": max(times),
+            "iters": stat(grp, "solver_iters"),
+            "resid": stat(grp, "solver_final_residual"),
+            "setup": stat(grp, "amgx_setup_s"),
+            "solve": stat(grp, "amgx_solve_s"),
+            "total": stat(grp, "amgx_total_s"),
+            "wall": stat(grp, "wall_s"),
+        }
+    return out if out["configs"] else None
+
+
+def write_dat(path, datasets, relative):
+    """Wide layout: one row per molecule, one (value, err-, err+, iters) column
+    group per configuration. Every series then reads its own columns and no row
+    filtering is needed, which keeps the pgfplots side trivial."""
+    header = ["molecule"]
+    for key, _, _, _ in CONFIGS:
+        header += [key, key + "_em", key + "_ep", key + "_it"]
+    with open(path, "w") as fh:
+        fh.write(" ".join(header) + "\n")
+        for ds in datasets:
+            for cells in [_dat_row(ds, relative)]:
+                fh.write(" ".join(cells) + "\n")
+
+
+def _dat_row(ds, relative):
+    present = [c["med"] for c in ds["configs"].values()]
+    scale = min(present) if (relative and present) else 1.0
+    cells = [ds["molecule"].replace(" ", "")]
+    for key, _, _, _ in CONFIGS:
+        c = ds["configs"].get(key)
+        if not c:
+            # pgfplots draws nothing for a nan coordinate
+            cells += ["nan", "0", "0", "nan"]
+            continue
+        med, lo, hi = c["med"] / scale, c["min"] / scale, c["max"] / scale
+        cells += ["{:.6g}".format(med), "{:.6g}".format(med - lo),
+                  "{:.6g}".format(hi - med),
+                  "nan" if c["iters"] is None else "{:.0f}".format(c["iters"])]
+    return cells
+
+
+def write_long_dat(path, ds, relative):
+    """Long layout for the single-molecule chart: one row per configuration, with
+    a numeric index so the bars can sit on a numeric x axis."""
+    present = [c["med"] for c in ds["configs"].values()]
+    scale = min(present) if (relative and present) else 1.0
+    with open(path, "w") as fh:
+        fh.write("idx config value em ep iters\n")
+        for idx, (key, _, _, _) in enumerate(CONFIGS):
+            c = ds["configs"].get(key)
+            if not c:
+                continue
+            med, lo, hi = c["med"] / scale, c["min"] / scale, c["max"] / scale
+            fh.write("{} {} {:.6g} {:.6g} {:.6g} {}\n".format(
+                idx, key, med, med - lo, hi - med,
+                "nan" if c["iters"] is None else "{:.0f}".format(c["iters"])))
+
+
+def write_ref_tex(path, datasets, metric, relative, nrep):
+    with open(path, "w") as fh:
+        fh.write("% generated by scripts/plot_solver_bench.py -- do not edit\n")
+        fh.write("\\def\\solverMetric{%s}\n" % METRICS[metric][1])
+        fh.write("\\def\\solverRepeats{%s}\n" % nrep)
+        fh.write("\\def\\solverUnit{%s}\n" %
+                 ("relative to the fastest" if relative else "seconds"))
+        fh.write("\\def\\solverMolecules{%s}\n" %
+                 ", ".join(ds["molecule"] for ds in datasets))
+
+
+FIGURE_TEMPLATE = r"""% ------------------------------------------------------------------------
+%  Linear solver comparison (bench_sweep.py sweep A).
+%  Generated by scripts/plot_solver_bench.py -- regenerate rather than edit.
+%  Include with \input{figures/TAG}
+%  Needs \usepackage{pgfplots} in the preamble.
+% ------------------------------------------------------------------------
+\input{figures/data/TAG_ref}
+
+\pgfplotsset{compat=1.16}
+
+% Keep only the rows whose column #1 equals #2.
+\pgfplotsset{
+  discard if not/.style 2 args={
+    x filter/.code={%
+      \edef\tempa{\thisrow{#1}}\edef\tempb{#2}%
+      \ifx\tempa\tempb\else\def\pgfmathresult{inf}\fi
+    }
+  }
+}
+
+COLORDEFS
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    width=WIDTH, height=6.4cm,
+    bar width=BARWIDTH,
+    enlarge x limits=ENLARGE,
+    ymin=0, ymax=YMAX,
+    ylabel={YLABEL},
+    ylabel style={font=\footnotesize},
+    AXISX
+    xticklabel style={font=\footnotesize, align=center},
+    tick label style={font=\scriptsize},
+    ymajorgrids=true,
+    major grid style={black!12},
+    LEGENDSTYLE
+    % Run-to-run spread is only a few percent, so the upper whisker is 1-2 mm and
+    % the lower half is buried in the bar fill. Caps nearly as wide as the bar
+    % are what make it read as an error bar rather than a stray tick.
+    % T-caps. rotate=90 is required: pgfplots draws the cap perpendicular to the
+    % error direction by itself, but any mark size given here clobbers that, and
+    % the cap then renders vertically -- which reads as a longer whisker rather
+    % than a wider cap. Setting error mark explicitly does not help; the rotation
+    % is what matters.
+    error bars/error bar style={black!85, line width=0.8pt},
+    error bars/error mark options={
+      mark size=CAPSIZE, rotate=90, line width=0.8pt, black!85,
+    },
+    every node near coord/.append style={
+      font=\tiny, color=black!60, anchor=south, yshift=NEARSHIFT,
+    },
+]
+SERIES
+\end{axis}
+\end{tikzpicture}
+
+\caption[Linear solver comparison]{\textbf{Linear solver comparison on
+    \solverMolecules{}.} Median \solverMetric{} time over \solverRepeats{} runs
+    per configuration, with whiskers spanning the fastest and slowest of those
+    runs; the small figure above each column is the iteration count. All three
+    configurations use the same discretisation and the same energy path
+    (\texttt{energy\_method\,=\,1}), so the bars differ only in the linear
+    solver. Note that they do not all converge to the same residual --
+    table~\ref{tab:solver-bench} gives the residual each one actually reached,
+    without which the times are not comparable.}
+\label{fig:solver-bench}
+\end{figure}
+"""
+
+# Grouped layout (several molecules): one series per configuration, each reading
+# its own column group. nodes near coords carries the iteration count as explicit
+# meta, so pgfplots places each label over its own bar -- positioning them by hand
+# would need the per-series bar shift.
+SERIES_TEMPLATE = r"""  \addplot+[
+    ybar, fill=COLOR, draw=COLOR!70!black, line width=0.4pt,
+    nodes near coords, point meta=explicit symbolic,
+    error bars/.cd, y dir=both, y explicit,
+  ] table[x=molecule, y=KEY, y error minus=KEY_em, y error plus=KEY_ep,
+          meta=KEY_it] {figures/data/TAG.dat};
+  \addlegendentry{LABEL}
+"""
+
+# Single-molecule layout: configurations go on the x axis, one bar each, so the
+# axis is not mostly empty and the tick labels do the legend's job.
+#
+# bar shift=0pt is load-bearing. ybar treats several \addplot as a group and
+# shifts each series sideways so they sit next to each other -- which is what the
+# multi-molecule layout wants, but here each series is already its own x
+# position, so the shift would slide every bar off its own tick.
+SERIES_ONE_TEMPLATE = r"""  \addplot+[
+    ybar, bar shift=0pt, fill=COLOR, draw=COLOR!70!black, line width=0.4pt,
+    nodes near coords, point meta=explicit symbolic,
+    error bars/.cd, y dir=both, y explicit,
+  ] table[x=idx, y=value, y error minus=em, y error plus=ep, meta=iters,
+          discard if not={config}{KEY}] {figures/data/TAG.dat};
+"""
+
+
+def build_figure(tag, datasets, metric, relative, out_path):
+    colordefs = "\n".join(
+        "\\definecolor{%s}{HTML}{%s}" % (name, hexv)
+        for _, _, name, hexv in CONFIGS
+    )
+    single = len(datasets) == 1
+    present_keys = [k for k, _, _, _ in CONFIGS
+                    if any(k in ds["configs"] for ds in datasets)]
+
+    # Headroom for the iteration label sitting above the top whisker.
+    tops = []
+    for ds in datasets:
+        vals = [c["med"] for c in ds["configs"].values()]
+        scale = min(vals) if (relative and vals) else 1.0
+        tops += [c["max"] / scale for c in ds["configs"].values()]
+    ymax = "{:.6g}".format(max(tops) * 1.14)
+
+    if single:
+        labels = {k: lbl for k, lbl, _, _ in CONFIGS}
+        axis_x = (
+            "xtick={%s},\n    xticklabels={%s},\n    xmin=-0.7, xmax=%.1f,"
+            % (",".join(str(i) for i, (k, _, _, _) in enumerate(CONFIGS)
+                        if k in present_keys),
+               ",".join("{%s}" % labels[k].replace(" (", "\\\\(")
+                        for k in present_keys),
+               len(CONFIGS) - 0.3)
+        )
+        series = "".join(
+            SERIES_ONE_TEMPLATE
+            .replace("COLOR", name).replace("KEY", key).replace("TAG", tag)
+            for key, _, name, _ in CONFIGS if key in present_keys
+        )
+        width, bar_width, enlarge, legend = "9.6cm", "26pt", "0.18", ""
+        cap = "6pt"
+    else:
+        coords = ",".join(ds["molecule"].replace(" ", "") for ds in datasets)
+        axis_x = "symbolic x coords={%s},\n    xtick=data," % coords
+        series = "".join(
+            SERIES_TEMPLATE
+            .replace("COLOR", name).replace("KEY", key)
+            .replace("LABEL", label).replace("TAG", tag)
+            for key, label, name, _ in CONFIGS if key in present_keys
+        )
+        n_mol = len(datasets)
+        width = "{:.1f}cm".format(min(15.0, max(8.0, 3.2 * n_mol + 3.5)))
+        bar_width = "16pt" if n_mol <= 2 else "10pt"
+        enlarge = "0.28"
+        cap = "3.5pt" if n_mol <= 2 else "2.5pt"
+        legend = ("legend style={\n"
+                  "      at={(0.5,-0.16)}, anchor=north, draw=none,\n"
+                  "      legend columns=3, font=\\footnotesize, column sep=0.8em,\n"
+                  "    },")
+
+    ylabel = ("\\solverMetric{} time, relative to the fastest"
+              if relative else "\\solverMetric{} time [s]")
+
+    body = (FIGURE_TEMPLATE
+            .replace("COLORDEFS", colordefs)
+            .replace("SERIES", series)
+            .replace("AXISX", axis_x)
+            .replace("LEGENDSTYLE", legend)
+            # BARWIDTH before WIDTH: the latter is a substring of the former
+            .replace("BARWIDTH", bar_width)
+            .replace("WIDTH", width)
+            .replace("ENLARGE", enlarge)
+            .replace("CAPSIZE", cap)
+            .replace("NEARSHIFT", "5pt")
+            .replace("YMAX", ymax)
+            .replace("YLABEL", ylabel)
+            .replace("TAG", tag))
+
+    # An omitted substitution leaves a line of bare indentation, and TeX reads a
+    # whitespace-only line as \par -- which ends the axis options early. Drop
+    # those; genuinely empty lines (between top-level blocks) are kept.
+    body = "\n".join(ln for ln in body.split("\n") if ln.strip() or ln == "")
+
+    with open(out_path, "w") as fh:
+        fh.write(body)
+
+
+def fmt(v, spec="{:.4f}", dash="--"):
+    return dash if v is None or (isinstance(v, float) and math.isnan(v)) \
+        else spec.format(v)
+
+
+def fmt_sci(v, dash="--"):
+    """Residuals as proper math: 8.8e-07 -> $8.8\\times10^{-7}$."""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return dash
+    if v == 0:
+        return "$0$"
+    exp = int(math.floor(math.log10(abs(v))))
+    mant = v / 10 ** exp
+    return "${:.1f}\\times10^{{{}}}$".format(mant, exp)
+
+
+def write_table(path, datasets, metric, out_tex):
+    lines = [
+        "% generated by scripts/plot_solver_bench.py -- do not edit",
+        "\\begin{table}[!htb]",
+        "\\centering",
+        "\\caption[Linear solver comparison]{\\textbf{Linear solver comparison.} "
+        "Median over \\solverRepeats{} runs per configuration. \\emph{stage} is "
+        "the whole \\solverMetric{} including assembly and host--device "
+        "transfer; \\emph{setup} and \\emph{solve} are AMGX's own internal "
+        "timers and so cover only part of it. \\emph{rel.} is the stage time "
+        "relative to the fastest configuration for that molecule. The residuals "
+        "differ by orders of magnitude, so the times are not a like-for-like "
+        "comparison.}",
+        "\\label{tab:solver-bench}",
+        "\\begin{tabular}{llrrrrrl}",
+        "\\toprule",
+        "molecule & configuration & iters & setup [s] & solve [s] & stage [s] "
+        "& rel. & residual \\\\",
+        "\\midrule",
+    ]
+    for di, ds in enumerate(datasets):
+        if di:
+            lines.append("\\midrule")
+        present = [c["med"] for c in ds["configs"].values()]
+        best = min(present) if present else None
+        first = True
+        for key, label, _, _ in CONFIGS:
+            c = ds["configs"].get(key)
+            if not c:
+                continue
+            mol = ds["molecule"].replace("_", "\\_") if first else ""
+            first = False
+            rel = c["med"] / best if best else None
+            lines.append(
+                "{} & {} & {} & {} & {} & {} & {} & {} \\\\".format(
+                    mol, label,
+                    fmt(c["iters"], "{:.0f}"),
+                    fmt(c["setup"]),
+                    fmt(c["solve"]),
+                    fmt(c["med"]),
+                    fmt(rel, "{:.2f}$\\times$"),
+                    fmt_sci(c["resid"]),
+                ))
+    lines += ["\\bottomrule", "\\end{tabular}", "\\end{table}", ""]
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines))
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("folders", nargs="+", help="test folders holding bench_runs.csv")
+    ap.add_argument("--thesis", default="thesis",
+                    help="thesis directory to write into (default: thesis)")
+    ap.add_argument("--tag", default="solver_bench",
+                    help="basename for the generated files (default: solver_bench)")
+    ap.add_argument("--metric", default="solve", choices=sorted(METRICS),
+                    help="which stage the columns show (default: solve)")
+    ap.add_argument("--relative", action="store_true",
+                    help="plot each molecule relative to its fastest configuration "
+                         "instead of absolute seconds")
+    args = ap.parse_args()
+
+    metric_col = METRICS[args.metric][0]
+    datasets = []
+    for folder in args.folders:
+        csv_path = os.path.join(folder, "bench_runs.csv")
+        if not os.path.exists(csv_path):
+            print("skipping {}: no bench_runs.csv".format(folder), file=sys.stderr)
+            continue
+        ds = collect(folder, csv_path, metric_col)
+        if ds is None:
+            print("skipping {}: no sweep A rows".format(folder), file=sys.stderr)
+            continue
+        datasets.append(ds)
+
+    if not datasets:
+        sys.exit("no sweep A data found -- run bench_sweep.py --sweeps a first")
+
+    scales = [min(c["med"] for c in ds["configs"].values()) for ds in datasets]
+    if not args.relative and len(scales) > 1 and max(scales) / min(scales) > 5:
+        print("note: the molecules' {} times differ by {:.0f}x -- the small ones "
+              "will be unreadable on a shared linear axis. Consider --relative."
+              .format(args.metric, max(scales) / min(scales)), file=sys.stderr)
+
+    nrep = int(statistics.median(
+        c["n"] for ds in datasets for c in ds["configs"].values()))
+
+    data_dir = os.path.join(args.thesis, "figures", "data")
+    os.makedirs(data_dir, exist_ok=True)
+    dat = os.path.join(data_dir, args.tag + ".dat")
+    reftex = os.path.join(data_dir, args.tag + "_ref.tex")
+    fig = os.path.join(args.thesis, "figures", args.tag + ".tex")
+    tab = os.path.join(args.thesis, "figures", args.tag + "_table.tex")
+
+    if len(datasets) == 1:
+        write_long_dat(dat, datasets[0], args.relative)
+    else:
+        write_dat(dat, datasets, args.relative)
+    write_ref_tex(reftex, datasets, args.metric, args.relative, nrep)
+    build_figure(args.tag, datasets, args.metric, args.relative, fig)
+    write_table(tab, datasets, args.metric, tab)
+
+    label = {k: lbl for k, lbl, _, _ in CONFIGS}
+    for ds in datasets:
+        print("\n{}  ({} runs per configuration)".format(ds["molecule"], nrep))
+        print("  %-16s %9s %8s %7s %10s %10s %11s" % (
+            "configuration", "stage s", "spread", "iters", "setup s", "solve s",
+            "residual"))
+        best = min(c["med"] for c in ds["configs"].values())
+        for key, _, _, _ in CONFIGS:
+            c = ds["configs"].get(key)
+            if not c:
+                continue
+            print("  %-16s %9.4f %8s %7s %10s %10s %11s   %.2fx" % (
+                label[key], c["med"],
+                "+{:.3f}/-{:.3f}".format(c["max"] - c["med"], c["med"] - c["min"]),
+                fmt(c["iters"], "{:.0f}"), fmt(c["setup"]), fmt(c["solve"]),
+                fmt(c["resid"], "{:.1e}"), c["med"] / best))
+
+    print("\nwrote {}\n      {}\n      {}\n      {}".format(dat, reftex, fig, tab))
+    print("\n\\input{figures/%s}\n\\input{figures/%s_table}"
+          % (args.tag, args.tag))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

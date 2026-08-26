@@ -47,12 +47,30 @@ ngpb : $(patsubst %.cpp, %.o, $(wildcard *.cpp)) $(CUDA_OBJECTS)
 	$(NVCC) -dlink $(patsubst %.cpp, %.o, $(wildcard *.cpp)) $(CUDA_OBJECTS) -o device_link.o
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(patsubst %.cpp, %.o, $(wildcard *.cpp)) $(CUDA_OBJECTS) device_link.o -o $@ $(LIBS)
 
+# ----------------------------------------------------------------------
+#  fmm_replay: offline sweep of the fmm_* parameters over a phase-1 energy
+#  dump (see include/energy_dump.h). Lives in tools/ so it stays out of the
+#  $(wildcard *.cpp) that feeds ngpb -- it has its own main().
+#
+#  fmm.cu and energy_cuda.cu include nothing but CUDA and libstdc++, so this
+#  links against -lcudart alone: no bimpp, p8est, LIS, AMGX, Octave or
+#  NanoShaper. That keeps it buildable on its own in the cluster image.
+#
+#  Not part of `all` on purpose -- a break here should never block ngpb.
+#  Build it with:  make fmm_replay
+# ----------------------------------------------------------------------
+REPLAY_OBJECTS = tools/fmm_replay.o fmm.o energy_cuda.o
+
+fmm_replay : $(REPLAY_OBJECTS)
+	$(NVCC) -dlink $(REPLAY_OBJECTS) -o tools/device_link_replay.o
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(REPLAY_OBJECTS) tools/device_link_replay.o -o $@ -lcudart
+
 .PHONY : clean distclean cuda
 
 clean :
-	$(RM) *.o
+	$(RM) *.o tools/*.o
 
 distclean : clean
-	$(RM) ngpb device_link.o
+	$(RM) ngpb device_link.o fmm_replay
 
 
