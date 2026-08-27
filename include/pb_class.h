@@ -151,6 +151,8 @@ struct
   double fmm_mac = 0.4;           // FMM opening angle (multipole acceptance criterion)
   int fmm_multipole_order = 6;    // FMM multipole truncation order (1..FMM_MAX_P)
   int fmm_leaf_size = 32;         // FMM max atoms per terminal cluster (P2P cutoff)
+  int fmm_target_leaf_size = 0;   // FMM max points per target leaf; 0 = follow fmm_leaf_size
+  int fmm_ionic_target_leaf_size = 0;  // override for the ionic target tree; 0 = fmm_target_leaf_size
   // Path prefix for the phase-1 energy-input dump; empty = no dump. Each rank
   // writes <prefix>.rank<K>.bin, which src/tools/fmm_replay.cpp replays to sweep
   // the fmm_* parameters without re-running the pipeline. See energy_dump.h.

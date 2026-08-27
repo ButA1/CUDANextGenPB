@@ -36,13 +36,14 @@
 //  Constant-memory tables (populated once on first build). Kept here (not in
 //  fmm.h) because nvcc whole-program mode -- no -rdc, to preserve cross-function
 //  device inlining -- rejects an extern __constant__ decl + definition as a
-//  redefinition, so the tables and their fact_dev/A_nm accessors stay TU-local:
-//    c_fact[k] = k!                      (k up to (2p)! ; doubles)
+//  redefinition, so the tables and their A_nm accessors stay TU-local:
 //    c_A[idx]  = A_n^m = (-1)^n / sqrt((n-m)!(n+m)!)   (CGR'99 Eq. 14)
 //                idx = n*n + (m+n), m in [-n, n]
 //    c_Ainv[idx] = 1 / A_n^m = (-1)^n * sqrt((n-m)!(n+m)!)   (same layout)
+//  NB: the factorials themselves are no longer uploaded. The only device consumer was
+//  sqrt(fact_dev(n-m)/fact_dev(n+m)) in the irregular harmonics, now served by c_norm below,
+//  so k! stays a host-side build ingredient (h_fact) for c_A/c_Ainv/c_norm and nothing more.
 // ====================================================================
-__constant__ double c_fact[FMM_FACT_MAX + 1];
 // A_n^m table to degree 2p: M2L (Eq.17) indexes A_{j+n}^{m-k} with degree j+n up to 2p.
 __constant__ double c_A[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
 // Reciprocal of c_A. M2L (Eq.17) and L2L (Eq.21) divide by an A_n^m whose indices vary with the
@@ -54,7 +55,20 @@ __constant__ double c_A[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
 // accumulated linearly across the inner sum, far under the ~1e-10 energy tolerance.
 __constant__ double c_Ainv[(FMM_MAX_2P + 1) * (FMM_MAX_2P + 1)];
 
-__device__ __forceinline__ double fact_dev(int k) { return c_fact[k]; }
+// Recurrence coefficients for solid_harmonics. These depend only on (n,m), but the loop bounds there
+// come from the RUNTIME argument maxn, so nvcc cannot constant-fold them the way it does inside the
+// fully-unrolled l2p_contract -- every M2M/L2L shift was evaluating ~66 FP64 sqrt+div and every M2L
+// pair ~650 of them, at the 3080's 1:64 FP64 rate and as a live MUFU source feeding the short-scoreboard
+// stalls. Tabulating costs ~7.6 KB of __constant__ and reads broadcast perfectly (control flow in
+// solid_harmonics is uniform, so every lane hits the same address).
+// All are indexed by sph_slot(n,m) to degree 2p, so one table serves both the order-p (M2M/L2L/P2M)
+// and order-2p (M2L) instantiations. Entries outside a table's valid (n,m) region are zero-filled.
+__constant__ double c_diag[FMM_MAX_2P + 1];   // -sqrt((2m-1)/(2m))                       (diagonal seed)
+__constant__ double c_va  [FMM_NMOM_2MAX];    // (2n-1)/sqrt((n-m)(n+m))                  (R vertical, a)
+__constant__ double c_vb  [FMM_NMOM_2MAX];    // sqrt((n+m-1)(n-m-1)/((n+m)(n-m)))        (R vertical, b)
+__constant__ double c_lrec[FMM_NMOM_2MAX];    // 1/(n-m)                                  (Legendre divide)
+__constant__ double c_norm[FMM_NMOM_2MAX];    // sqrt((n-m)!/(n+m)!)                      (Y normalization)
+
 __device__ __forceinline__ double A_nm(int n, int m) { return c_A[n * n + (m + n)]; }
 __device__ __forceinline__ double A_inv(int n, int m) { return c_Ainv[n * n + (m + n)]; }
 
@@ -81,9 +95,39 @@ static void init_constant_tables() {
     }
   }
 
-  CUDA_CHECK(cudaMemcpyToSymbol(c_fact, h_fact, sizeof(h_fact)));
+  // Recurrence-coefficient tables. Each expression below is written EXACTLY as the device code it
+  // replaces, so with correctly-rounded IEEE div/sqrt on both sides the tabulated values are
+  // bit-identical to what solid_harmonics used to compute inline. The ONE exception is c_lrec, which
+  // turns a division by (n-m) into a multiply by its reciprocal -- two roundings instead of one, ~1 ulp,
+  // exactly the tradeoff already taken for c_Ainv above and far under the e-10 energy budget.
+  double h_diag[FMM_MAX_2P + 1] = {0.0};
+  double h_va[FMM_NMOM_2MAX]    = {0.0};
+  double h_vb[FMM_NMOM_2MAX]    = {0.0};
+  double h_lrec[FMM_NMOM_2MAX]  = {0.0};
+  double h_norm[FMM_NMOM_2MAX]  = {0.0};
+  for (int m = 1; m <= FMM_MAX_2P; ++m)
+    h_diag[m] = -sqrt((2.0 * m - 1.0) / (2.0 * m));
+  for (int m = 0; m <= FMM_MAX_2P; ++m)
+    for (int n = m; n <= FMM_MAX_2P; ++n) {
+      const int s = sph_slot(n, m);
+      h_norm[s] = sqrt(h_fact[n - m] / h_fact[n + m]);
+      if (n > m) {
+        h_va[s] = (2.0 * n - 1.0) / sqrt((double)(n - m) * (double)(n + m));
+        if (n - 2 >= m) {
+          h_vb[s] = sqrt(((double)(n + m - 1) * (double)(n - m - 1))
+                       / ((double)(n + m) * (double)(n - m)));
+          h_lrec[s] = 1.0 / (double)(n - m);
+        }
+      }
+    }
+
   CUDA_CHECK(cudaMemcpyToSymbol(c_A,    h_A,    sizeof(h_A)));
   CUDA_CHECK(cudaMemcpyToSymbol(c_Ainv, h_Ainv, sizeof(h_Ainv)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_diag, h_diag, sizeof(h_diag)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_va,   h_va,   sizeof(h_va)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_vb,   h_vb,   sizeof(h_vb)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_lrec, h_lrec, sizeof(h_lrec)));
+  CUDA_CHECK(cudaMemcpyToSymbol(c_norm, h_norm, sizeof(h_norm)));
   initialized = true;
 }
 
@@ -117,16 +161,15 @@ __device__ void solid_harmonics(int maxn, T x, T y, T z, cT<T>* out) {
     cT<T> w(x, y);                                   // x + i y
     out[sph_slot(0, 0)] = cT<T>(T(1.0), T(0.0));
     for (int m = 1; m <= maxn; ++m) {                // diagonal seeds R_m^m
-      double c = -sqrt((2.0 * m - 1.0) / (2.0 * m));
+      double c = c_diag[m];                          // = -sqrt((2m-1)/(2m))
       out[sph_slot(m, m)] = T(c) * (w * out[sph_slot(m - 1, m - 1)]);
     }
     for (int m = 0; m <= maxn; ++m)                  // climb n at fixed m
       for (int n = m + 1; n <= maxn; ++n) {
-        double a = (2.0 * n - 1.0) / sqrt((double)(n - m) * (double)(n + m));
+        double a = c_va[sph_slot(n, m)];             // = (2n-1)/sqrt((n-m)(n+m))
         cT<T> acc = T(a) * (z * out[sph_slot(n - 1, m)]);
         if (n - 2 >= m) {
-          double b = sqrt(((double)(n + m - 1) * (double)(n - m - 1))
-                        / ((double)(n + m) * (double)(n - m)));
+          double b = c_vb[sph_slot(n, m)];           // = sqrt((n+m-1)(n-m-1)/((n+m)(n-m)))
           acc = acc + (T(-b) * (r2 * out[sph_slot(n - 2, m)]));
         }
         out[sph_slot(n, m)] = acc;
@@ -153,10 +196,14 @@ __device__ void solid_harmonics(int maxn, T x, T y, T z, cT<T>* out) {
     P[sph_slot(m, m)] = (-(2.0 * m - 1.0)) * (st * P[sph_slot(m - 1, m - 1)]);
   for (int m = 0; m < maxn; ++m)
     P[sph_slot(m + 1, m)] = (2.0 * m + 1.0) * (ct * P[sph_slot(m, m)]);
+  // The trailing 1/(n-m) is a table lookup rather than a divide: ~190 FP64 divisions per M2L pair,
+  // all with runtime (n,m). This is the one place in the tabulation that is not bit-identical --
+  // x*(1/c) carries two roundings where x/c carries one (~1 ulp), the same tradeoff already taken
+  // for c_Ainv at the top of this file.
   for (int m = 0; m <= maxn; ++m)
     for (int n = m + 2; n <= maxn; ++n)
       P[sph_slot(n, m)] = ((2.0 * n - 1.0) * (ct * P[sph_slot(n - 1, m)])
-                          - (n + m - 1.0) * P[sph_slot(n - 2, m)]) / (double)(n - m);
+                          - (n + m - 1.0) * P[sph_slot(n - 2, m)]) * c_lrec[sph_slot(n, m)];
 
   // e^{i m φ}, m = 0..maxn
   cT<T> eim[DEGCAP + 1];
@@ -172,7 +219,7 @@ __device__ void solid_harmonics(int maxn, T x, T y, T z, cT<T>* out) {
 
   for (int n = 0; n <= maxn; ++n)
     for (int m = 0; m <= n; ++m) {
-      double c = sqrt(fact_dev(n - m) / fact_dev(n + m));   // sqrt((n-m)!/(n+m)!)
+      double c = c_norm[sph_slot(n, m)];                    // = sqrt((n-m)!/(n+m)!)
       T a = c * (P[sph_slot(n, m)] * rad[n]);
       out[sph_slot(n, m)] = a * eim[m];
     }
@@ -359,9 +406,11 @@ __device__ void m2m_shift_impl(const double *__restrict__ O,
           int jn = j - n, km = k - m;
           if (km < -jn || km > jn) continue;         // O_{jn}^{km} needs |km| <= jn
           int e = k - iabs(m) - iabs(km);            // |k|=k (k>=0); e is even
-          double ipow = ((e / 2) & 1) ? -1.0 : 1.0;
-          double coef = ipow * A_nm(n, m) * A_nm(jn, km);
-          acc = acc + (coef * (get_M(O, jn, km) * get_R(R, n, -m)));
+          // (-1)^(e/2) is +-1, so it is a sign flip, not a multiplication. Folding it into coef's
+          // sign bit removes one FP64 multiply per term and is bit-identical: (-A)*B == -(A*B).
+          double coef = A_nm(n, m) * A_nm(jn, km);
+          if ((e / 2) & 1) coef = -coef;
+          cfma_acc(acc, coef, get_M(O, jn, km), get_R(R, n, -m));
         }
       // 1/A_j^k does not depend on (n,m), so it scales the finished sum once instead of
       // dividing every term -- see the c_Ainv note at the top of this file.
@@ -404,10 +453,12 @@ __device__ __forceinline__ cmplx m2l_coeff(int p,
     for (int m = -n; m <= n; ++m) {
       int jn = j + n, mk = m - k;
       int e  = iabs(mk) - k - iabs(m);           // |k|=k (k>=0); e is even
-      double ipow  = ((e / 2) & 1) ? -1.0 : 1.0;
-      double sgn_n = (n & 1) ? -1.0 : 1.0;       // 1/(-1)^n = (-1)^n
-      double coef  = ipow * sgn_n * A_nm(n, m) * A_inv(jn, mk);
-      acc = acc + (coef * (get_M(O, n, m) * get_R(S, jn, mk)));
+      // (-1)^(e/2) from the phase and 1/(-1)^n = (-1)^n are both +-1, so their product is a single
+      // sign flip. Folding it into coef's sign bit removes TWO FP64 multiplies from the hottest loop
+      // in the M2L (7986 terms/pair) and is bit-identical: (+-1*A)*B == +-(A*B).
+      double coef = A_nm(n, m) * A_inv(jn, mk);
+      if (((e / 2) ^ n) & 1) coef = -coef;
+      cfma_acc(acc, coef, get_M(O, n, m), get_R(S, jn, mk));
     }
   // A_j^k does not depend on (n,m) -> applied once here rather than per term.
   return A_nm(j, k) * acc;
@@ -435,10 +486,10 @@ __device__ void l2l_shift(const double *__restrict__ O,
           int nj = n - j, mk = m - k;
           if (mk < -nj || mk > nj) continue;         // R_{nj}^{mk} needs |mk| <= nj
           int e  = iabs(m) - iabs(mk) - k;           // |k|=k (k>=0); e is even
-          double ipow = ((e / 2) & 1) ? -1.0 : 1.0;
-          double sgn  = ((n + j) & 1) ? -1.0 : 1.0;  // 1/(-1)^{n+j}
-          double coef = ipow * sgn * A_nm(nj, mk) * A_inv(n, m);
-          acc = acc + (coef * (get_M(O, n, m) * get_R(R, nj, mk)));
+          // (-1)^(e/2) and 1/(-1)^{n+j} are both +-1 -> one sign flip, two FP64 multiplies saved.
+          double coef = A_nm(nj, mk) * A_inv(n, m);
+          if (((e / 2) ^ (n + j)) & 1) coef = -coef;
+          cfma_acc(acc, coef, get_M(O, n, m), get_R(R, nj, mk));
         }
       // A_j^k does not depend on (n,m) -> applied once here rather than per term.
       acc = A_nm(j, k) * acc;
@@ -1256,8 +1307,11 @@ __global__ void p2p_count_kernel(const int2 *__restrict__ pairs, int n_pairs,
 }
 
 // Scatter each near pair's source-leaf B into its target node's CSR segment. Intra-segment
-// order is non-deterministic (atomic fill) -- fine: P2P sum order already differs from the
-// host basis (parity ~1e-10, not bit-exact).
+// order is non-deterministic (atomic fill), so the P2P sum order varies run-to-run and differs
+// from the host basis. Measured cost of that reordering on a realistic near sum (leaf-blocked,
+// mixed-sign charges, kappa ~2e2): ~1e-14 relative, per target point AND aggregated -- the
+// per-point errors are independent, so they partly cancel in the outer reduction rather than
+// accumulating. 
 __global__ void p2p_scatter_kernel(const int2 *__restrict__ pairs, int n_pairs,
                                    const int *__restrict__ off, int *__restrict__ fill,
                                    int *__restrict__ val) {
@@ -1672,7 +1726,8 @@ void fmm_free_tree(fmm_tree *t) {
 }
 
 double fmm_polarization_energy(fmm_tree *src, int num_pts,
-                                  const double *h_V, const double *h_flux) {
+                                  const double *h_V, const double *h_flux,
+                                  int target_leaf_size) {
   if (!src || src->N == 0 || num_pts == 0) return 0.0;
 
   double *d_V, *d_flux, *d_partial;
@@ -1683,12 +1738,24 @@ double fmm_polarization_energy(fmm_tree *src, int num_pts,
   CUDA_CHECK(cudaMemcpy(d_flux, h_flux, num_pts  *sizeof(double), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemset(d_partial, 0, num_pts * sizeof(double)));  // any uncovered target -> 0
 
-  // Target leaf cells are capped at 256 pts so a single block can serve a leaf.
-  int tleaf = src->leaf_size; if (tleaf > 256) tleaf = 256; if (tleaf < 1) tleaf = 1;
+  // Target leaf size is this call's own knob, independent of the source leaf size that bounds the
+  // P2P descent -- and resolved here, where the target tree is actually built, rather than carried
+  // on the atom tree. 0 follows the source leaf size (the historical single-knob behaviour).
+  // Clamped to FMM_BDIM so a leaf never outgrows the block that serves it: the launch width below
+  // is derived from tleaf, so "a block always covers a leaf" is only real if the clamp and the cap
+  // are the same constant.
+  int tleaf = (target_leaf_size < 1) ? src->leaf_size : target_leaf_size;
+  if (tleaf > FMM_BDIM) tleaf = FMM_BDIM;
+  if (tleaf < 1) tleaf = 1;
   fmm_target_tree tt;
   build_target_tree(num_pts, d_V, tleaf, src->p, &tt);
 
-  int block = FMM_BDIM;   // one target point per thread; >= target leaf_size
+  // Block width tracks the TARGET LEAF SIZE instead of being pinned at FMM_BDIM. One block serves one
+  // leaf and one thread serves one point, so any block wider than tleaf is permanently idle threads:
+  // at fmm_target_leaf_size=64 a 256-thread block leaves ~84% of its threads inactive (mean leaf
+  // fill is ~0.64*tleaf). Rounded up to a whole warp; never exceeds FMM_BDIM because tleaf was
+  // clamped to it in fmm_build_atom_tree, so the ">= target leaf_size" contract still holds.
+  int block = ((tleaf + 31) / 32) * 32;   // one target point per thread; >= target leaf_size
   int grid  = tt.n_leaves;
   if (grid > 0) {
     fmm_build_local(*src, tt, src->theta);   // M2L+L2L -> d_local (far); P2P CSR (near)
@@ -1707,7 +1774,7 @@ double fmm_polarization_energy(fmm_tree *src, int num_pts,
 double fmm_ionic_energy(fmm_tree *src, int num_tri_verts,
                            const double *h_vert, const double *h_norms,
                            const double *h_phi_sup, const double *h_area,
-                           double inv_4pi) {
+                           double inv_4pi, int target_leaf_size) {
   if (!src || src->N == 0 || num_tri_verts == 0) return 0.0;
   int num_tris = num_tri_verts / 3;
 
@@ -1723,11 +1790,23 @@ double fmm_ionic_energy(fmm_tree *src, int num_tri_verts,
   CUDA_CHECK(cudaMemcpy(d_area,  h_area,    num_tris       *sizeof(double), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemset(d_partial, 0, num_tri_verts * sizeof(double)));  // any uncovered target -> 0
 
-  int tleaf = src->leaf_size; if (tleaf > 256) tleaf = 256; if (tleaf < 1) tleaf = 1;
+  // As in fmm_polarization_energy, but note this path differentiates the local expansion (E =
+  // -grad Phi via forward-mode AD in L2P). A derivative of a truncated expansion converges one
+  // order slower than the expansion itself, and enlarging tleaf grows the box radius over which
+  // that expansion has to hold -- so the ionic term degrades faster with tleaf than the
+  // polarization term does. That is why this is a separate argument and not a shared setting.
+  int tleaf = (target_leaf_size < 1) ? src->leaf_size : target_leaf_size;
+  if (tleaf > FMM_BDIM) tleaf = FMM_BDIM;
+  if (tleaf < 1) tleaf = 1;
   fmm_target_tree tt;
   build_target_tree(num_tri_verts, d_vert, tleaf, src->p, &tt);
 
-  int block = FMM_BDIM;   // one target point per thread; >= target leaf_size
+  // Block width tracks the TARGET LEAF SIZE instead of being pinned at FMM_BDIM. One block serves one
+  // leaf and one thread serves one point, so any block wider than tleaf is permanently idle threads:
+  // at fmm_target_leaf_size=64 a 256-thread block leaves ~84% of its threads inactive (mean leaf
+  // fill is ~0.64*tleaf). Rounded up to a whole warp; never exceeds FMM_BDIM because tleaf was
+  // clamped to it in fmm_build_atom_tree, so the ">= target leaf_size" contract still holds.
+  int block = ((tleaf + 31) / 32) * 32;   // one target point per thread; >= target leaf_size
   int grid  = tt.n_leaves;
   if (grid > 0) {
     fmm_build_local(*src, tt, src->theta);   // M2L+L2L -> d_local (far); P2P CSR (near)

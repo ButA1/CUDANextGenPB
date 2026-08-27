@@ -39,9 +39,12 @@ typedef struct fmm_tree fmm_tree;
  *               (accept a cell pair if size/dist < mac)  [fmm_mac]
  *   p         : multipole truncation order (1..FMM_MAX_P).  [fmm_multipole_order]
  *               Out-of-range values are clamped with a stderr warning.
- *   leaf_size : max atoms per terminal cluster; traversal stops descending at
- *               subtrees of <= leaf_size atoms and resolves them as direct P2P.
- *               [fmm_leaf_size]
+ *   leaf_size : max atoms per terminal cluster of the SOURCE tree; traversal stops
+ *               descending at subtrees of <= leaf_size atoms and resolves them as
+ *               direct P2P.  [fmm_leaf_size]
+ *               This bounds the SOURCE box radius, which is what the MAC compares
+ *               against -- hence the near-field radius and the P2P work. The target
+ *               tree's leaf size is a separate knob, passed per energy call below.
  *   out       : receives the built tree handle (owns its own sorted copies)
  */
 void fmm_build_atom_tree(int num_atoms,
@@ -63,12 +66,23 @@ void fmm_free_tree(fmm_tree *tree);
  *   num_pts : number of flux surface points
  *   h_V     : host ptr, 3*num_pts doubles (point positions)
  *   h_flux  : host ptr, num_pts doubles (per-point flux weight)
+ *   target_leaf_size : max points per leaf of the target tree built here. 0 follows the
+ *             source tree's leaf_size (the historical single-knob behaviour). Clamped to
+ *             FMM_BDIM, since one block serves one target leaf at one point per thread.
+ *             It is a per-call parameter, not a property of the atom tree: polarization
+ *             and ionic build DIFFERENT target trees over different point sets (on 6VYB
+ *             the ionic vertex set is ~1.6x the polarization set), so they need not share
+ *             a value. Raising it cuts the target box count and so the M2L pair count,
+ *             but enlarges the target box, which is the radius over which each leaf's
+ *             local expansion must stay accurate -- so it trades speed against accuracy,
+ *             and fmm_ionic_energy pays that trade harder (see its note).
  * (host pointers are uploaded internally, matching the existing _dev wrappers)
  */
 double fmm_polarization_energy(fmm_tree *tree,
                                int num_pts,
                                const double *h_V,
-                               const double *h_flux);
+                               const double *h_flux,
+                               int target_leaf_size);
 
 /*
  * Ionic "second_int": sum_v factor_v * (n_v . g(V_v)), atoms as sources, where
@@ -78,6 +92,13 @@ double fmm_polarization_energy(fmm_tree *tree,
  *   h_norms       : host ptr, 3*num_tri_verts doubles (vertex normals)
  *   h_phi_sup     : host ptr, num_tri_verts doubles (interpolated surface potential)
  *   h_area        : host ptr, num_tri_verts/3 doubles (per-triangle area)
+ *   target_leaf_size : as in fmm_polarization_energy, and deliberately a separate
+ *                 argument. This path evaluates E = -grad Phi, so L2P differentiates the
+ *                 local expansion; a derivative of a truncated expansion converges one
+ *                 order slower than the expansion itself. Enlarging the target leaf grows
+ *                 the box radius the expansion must cover, so the ionic term loses
+ *                 accuracy faster than the polarization term at the same target leaf
+ *                 size. Expect to need a smaller value here than for polarization.
  */
 double fmm_ionic_energy(fmm_tree *tree,
                         int num_tri_verts,
@@ -85,7 +106,8 @@ double fmm_ionic_energy(fmm_tree *tree,
                         const double *h_norms,
                         const double *h_phi_sup,
                         const double *h_area,
-                        double inv_4pi);
+                        double inv_4pi,
+                        int target_leaf_size);
 
 #ifdef __cplusplus
 }
@@ -221,7 +243,7 @@ struct fmm_tree {
   int     n_nodes;    // 2N - 1
   int     p;          // multipole order in [1, FMM_MAX_P]
   int     comp;       // moments per node = COMP(p)
-  int     leaf_size;  // max atoms per terminal cluster (P2P cutoff)
+  int     leaf_size;  // max atoms per terminal cluster of THIS (source) tree (P2P cutoff)
   double  theta;
 
   // sorted source atoms (Morton order)
@@ -335,6 +357,24 @@ __device__ __forceinline__ cmplx get_R(const cmplx* R, int n, int m) {
   cmplx r = R[sph_slot(n, -m)];          return cmplx(r.re, -r.im);
 }
 
+// acc += c * (a * b), for complex a,b and a REAL scale c -- the inner term shared by all three
+// translation operators (M2M Eq.13, M2L Eq.17, L2L Eq.21).
+//
+// Written as four FMAs on the accumulator rather than {complex multiply, scale by c, add}: the scale
+// folds into the product and the add folds into the multiply. The term costs 2 DMUL + 4 DFMA instead
+// of 4 DMUL + 2 DFMA + 2 DADD, which matters because these loops run 1716 (L2L/M2M) to 7986 (M2L)
+// times per shift and the kernels are FP64-issue-bound on the 3080's 1:64 rate.
+//
+// NOT an accuracy tradeoff: an FMA rounds once where a separate multiply-then-add rounds twice, so
+// this is strictly more accurate than the expression it replaces.
+__device__ __forceinline__ void cfma_acc(cmplx &acc, double c, cmplx a, cmplx b) {
+  const double cr = c * a.re, ci = c * a.im;
+  acc.re = fma( cr, b.re, acc.re);
+  acc.re = fma(-ci, b.im, acc.re);
+  acc.im = fma( cr, b.im, acc.im);
+  acc.im = fma( ci, b.re, acc.im);
+}
+
 // ====================================================================
 //  double atomic min/max (CUDA has no native FP64 min/max atomic)
 //
@@ -365,8 +405,12 @@ __device__ __forceinline__ double atomicMaxDouble(double *addr, double val) {
        : __longlong_as_double(atomicMax((long long *)addr, i));
 }
 
-// Leaf-kernel block width = launch blockDim. Target leaves hold <= 256 points, so 256
-// threads always cover a leaf (one target point per thread in the fused L2P+P2P kernel).
+// Upper bound on the target leaf size, and hence on the leaf-kernel block width. The tleaf locals in
+// fmm_polarization_energy / fmm_ionic_energy clamp to this, so a leaf never holds more than FMM_BDIM
+// points and one block always covers a leaf -- one target point per thread in the fused L2P+P2P
+// kernel. Only the TARGET trees are capped; the source leaf size is unconstrained by this.
+// This is a CAP, not the launch width: the actual width is ceil(tleaf/32)*32. Pinning the block at 256
+// while fmm_leaf_size was 64 left ~84% of every block's threads permanently inactive.
 constexpr int FMM_BDIM      = 256;
 
 #endif  // __CUDACC__

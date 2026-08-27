@@ -975,6 +975,8 @@ poisson_boltzmann::parse_options (int argc, char **argv)
   fmm_mac = g2 ( (alg_options + "fmm_mac").c_str (), 0.4);
   fmm_multipole_order = g2 ( (alg_options + "fmm_multipole_order").c_str (), 6);
   fmm_leaf_size = g2 ( (alg_options + "fmm_leaf_size").c_str (), 32);
+  fmm_target_leaf_size = g2 ( (alg_options + "fmm_target_leaf_size").c_str (), 0);
+  fmm_ionic_target_leaf_size = g2 ( (alg_options + "fmm_ionic_target_leaf_size").c_str (), 0);
   energy_dump = g2 ( (alg_options + "energy_dump").c_str (), "");
 
   const std::string out_options = "output/";
@@ -3772,7 +3774,8 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   int num_pts = in.num_pts ();
   double first_int;
   if (energy_method == 2)
-    first_int = fmm_polarization_energy(fmm, num_pts, in.V_pol.data(), in.flux_pol.data());
+    first_int = fmm_polarization_energy(fmm, num_pts, in.V_pol.data(), in.flux_pol.data(),
+                                        fmm_target_leaf_size);
   else
     first_int = polarization_energy_cuda_dev(num_pts, in.V_pol.data(), in.flux_pol.data(),
                                              num_atoms, d_atoms, d_charges);
@@ -3786,13 +3789,17 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
     int num_tri_verts = in.num_tri_verts ();
     double second_int;
     if (energy_method == 2)
+      // Ionic gets its own target leaf size: it differentiates the local expansion, so it loses
+      // accuracy faster than polarization as the target box grows. 0 -> fall back to the shared
+      // fmm_target_leaf_size.
       second_int = fmm_ionic_energy(fmm, num_tri_verts, in.vert_ion.data(), in.norms_ion.data(),
-                                    in.phi_ion.data(), in.area_ion.data(), in.inv_4pi);
+                                    in.phi_ion.data(), in.area_ion.data(), in.inv_4pi,
+                                    fmm_ionic_target_leaf_size ? fmm_ionic_target_leaf_size
+                                                               : fmm_target_leaf_size);
     else
       second_int = ionic_energy_cuda_dev(num_tri_verts, in.vert_ion.data(), in.norms_ion.data(),
                                          in.phi_ion.data(), in.area_ion.data(),
                                          num_atoms, d_atoms, d_charges, in.inv_4pi);
-
     this->energy_react = 0.5 * (second_int - first_int * in.constant_react);
   }
 
@@ -4036,7 +4043,8 @@ poisson_boltzmann::energy_cuda (ray_cache_t & ray_cache)
   int num_pts = (int)h_flux_pol.size();
   double first_int;
   if (energy_method == 2)
-    first_int = fmm_polarization_energy(fmm, num_pts, h_V_pol.data(), h_flux_pol.data());
+    first_int = fmm_polarization_energy(fmm, num_pts, h_V_pol.data(), h_flux_pol.data(),
+                                        fmm_target_leaf_size);
   else
     first_int = polarization_energy_cuda_dev(num_pts, h_V_pol.data(), h_flux_pol.data(),
                                              (int)num_atoms, d_atoms, d_charges);
@@ -4050,8 +4058,13 @@ poisson_boltzmann::energy_cuda (ray_cache_t & ray_cache)
     int num_tri_verts = (int)h_phi_ion.size();
     double second_int;
     if (energy_method == 2)
+      // Ionic gets its own target leaf size: it differentiates the local expansion, so it loses
+      // accuracy faster than polarization as the target box grows. 0 -> fall back to the shared
+      // fmm_target_leaf_size.
       second_int = fmm_ionic_energy(fmm, num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
-                                    h_phi_ion.data(), h_area_ion.data(), inv_4pi);
+                                    h_phi_ion.data(), h_area_ion.data(), inv_4pi,
+                                    fmm_ionic_target_leaf_size ? fmm_ionic_target_leaf_size
+                                                               : fmm_target_leaf_size);
     else
       second_int = ionic_energy_cuda_dev(num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
                                          h_phi_ion.data(), h_area_ion.data(),
