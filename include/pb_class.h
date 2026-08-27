@@ -150,6 +150,7 @@ struct
   double fmm_mac = 0.4;           // FMM opening angle (multipole acceptance criterion)
   int fmm_multipole_order = 6;    // FMM multipole truncation order (1..FMM_MAX_P)
   int fmm_leaf_size = 32;         // FMM max atoms per terminal cluster (P2P cutoff)
+  int fmm_target_leaf_size = 0;   // FMM max points per target leaf; 0 = follow fmm_leaf_size
 
   MPI_Comm mpicomm;
   gpu_topology gpu_topo;   // set once in main() via setup_gpu_topology (multi-GPU binding/dispatch)

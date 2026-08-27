@@ -1669,6 +1669,7 @@ void fmm_build_atom_tree(int num_atoms,
                         double mac,
                         int p,
                         int leaf_size,
+                        int target_leaf_size,
                         fmm_tree **out) {
   // Clamp p to the supported range with a stderr warning.
   if (p < 1) {
@@ -1687,6 +1688,15 @@ void fmm_build_atom_tree(int num_atoms,
   t->p       = p;
   t->comp    = comp_of(p);
   t->leaf_size = (leaf_size < 1) ? 1 : leaf_size;
+  // Target leaf size is a separate knob: it sets the target box count (M2L pair count), while
+  // leaf_size sets the source box radius (near-field radius, P2P work). 0 means "follow the source
+  // leaf size", which reproduces the historical single-knob behaviour exactly. Clamped to FMM_BDIM
+  // here, once, so every consumer of target_leaf_size can rely on the block-covers-a-leaf invariant.
+  {
+    int tls = (target_leaf_size < 1) ? t->leaf_size : target_leaf_size;
+    if (tls > FMM_BDIM) tls = FMM_BDIM;
+    t->target_leaf_size = tls;
+  }
   t->theta   = mac;
   *out = t;
   if (num_atoms <= 0) {
@@ -1738,20 +1748,18 @@ double fmm_polarization_energy(fmm_tree *src, int num_pts,
   CUDA_CHECK(cudaMemset(d_partial, 0, num_pts * sizeof(double)));  // any uncovered target -> 0
 
   // Target leaf cells are capped at FMM_BDIM pts so a single block can serve a leaf.
-  // Clamp through FMM_BDIM, not a bare 256: the launch width below is derived from tleaf, so the
-  // "a block always covers a leaf" invariant is only real if the clamp and the cap are the same
-  // constant. They used to agree by coincidence.
-  int tleaf = src->leaf_size;
-  if (tleaf > FMM_BDIM) tleaf = FMM_BDIM;
-  if (tleaf < 1) tleaf = 1;
+  // Target leaf size is its own knob, independent of the source leaf size that bounds the P2P
+  // descent. fmm_build_atom_tree already resolved 0 -> leaf_size and clamped to [1, FMM_BDIM],
+  // so the launch width derived from it below still satisfies "a block always covers a leaf".
+  int tleaf = src->target_leaf_size;
   fmm_target_tree tt;
   build_target_tree(num_pts, d_V, tleaf, src->p, &tt);
 
   // Block width tracks the TARGET LEAF SIZE instead of being pinned at FMM_BDIM. One block serves one
   // leaf and one thread serves one point, so any block wider than tleaf is permanently idle threads:
-  // at fmm_leaf_size=64 a 256-thread block leaves ~84% of its threads inactive (mean leaf fill is
-  // ~0.64*tleaf). Rounded up to a whole warp; never exceeds FMM_BDIM because tleaf is clamped to it
-  // above, so the ">= target leaf_size" contract still holds.
+  // at fmm_target_leaf_size=64 a 256-thread block leaves ~84% of its threads inactive (mean leaf
+  // fill is ~0.64*tleaf). Rounded up to a whole warp; never exceeds FMM_BDIM because tleaf was
+  // clamped to it in fmm_build_atom_tree, so the ">= target leaf_size" contract still holds.
   int block = ((tleaf + 31) / 32) * 32;   // one target point per thread; >= target leaf_size
   int grid  = tt.n_leaves;
   if (grid > 0) {
@@ -1787,20 +1795,18 @@ double fmm_ionic_energy(fmm_tree *src, int num_tri_verts,
   CUDA_CHECK(cudaMemcpy(d_area,  h_area,    num_tris       *sizeof(double), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemset(d_partial, 0, num_tri_verts * sizeof(double)));  // any uncovered target -> 0
 
-  // Clamp through FMM_BDIM, not a bare 256: the launch width below is derived from tleaf, so the
-  // "a block always covers a leaf" invariant is only real if the clamp and the cap are the same
-  // constant. They used to agree by coincidence.
-  int tleaf = src->leaf_size;
-  if (tleaf > FMM_BDIM) tleaf = FMM_BDIM;
-  if (tleaf < 1) tleaf = 1;
+  // Target leaf size is its own knob, independent of the source leaf size that bounds the P2P
+  // descent. fmm_build_atom_tree already resolved 0 -> leaf_size and clamped to [1, FMM_BDIM],
+  // so the launch width derived from it below still satisfies "a block always covers a leaf".
+  int tleaf = src->target_leaf_size;
   fmm_target_tree tt;
   build_target_tree(num_tri_verts, d_vert, tleaf, src->p, &tt);
 
   // Block width tracks the TARGET LEAF SIZE instead of being pinned at FMM_BDIM. One block serves one
   // leaf and one thread serves one point, so any block wider than tleaf is permanently idle threads:
-  // at fmm_leaf_size=64 a 256-thread block leaves ~84% of its threads inactive (mean leaf fill is
-  // ~0.64*tleaf). Rounded up to a whole warp; never exceeds FMM_BDIM because tleaf is clamped to it
-  // above, so the ">= target leaf_size" contract still holds.
+  // at fmm_target_leaf_size=64 a 256-thread block leaves ~84% of its threads inactive (mean leaf
+  // fill is ~0.64*tleaf). Rounded up to a whole warp; never exceeds FMM_BDIM because tleaf was
+  // clamped to it in fmm_build_atom_tree, so the ">= target leaf_size" contract still holds.
   int block = ((tleaf + 31) / 32) * 32;   // one target point per thread; >= target leaf_size
   int grid  = tt.n_leaves;
   if (grid > 0) {

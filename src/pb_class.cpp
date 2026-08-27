@@ -975,6 +975,7 @@ poisson_boltzmann::parse_options (int argc, char **argv)
   fmm_mac = g2 ( (alg_options + "fmm_mac").c_str (), 0.4);
   fmm_multipole_order = g2 ( (alg_options + "fmm_multipole_order").c_str (), 6);
   fmm_leaf_size = g2 ( (alg_options + "fmm_leaf_size").c_str (), 32);
+  fmm_target_leaf_size = g2 ( (alg_options + "fmm_target_leaf_size").c_str (), 0);
 
   const std::string out_options = "output/";
   p4estfilename = g2 ( (out_options + "p4estfilename").c_str (), "poisson_boltzmann_p4est");
@@ -3587,7 +3588,7 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   fmm_tree *fmm = nullptr;
   if (energy_method == 2)
     fmm_build_atom_tree((int)num_atoms, d_atoms, d_charges, fmm_mac, fmm_multipole_order,
-                        fmm_leaf_size, &fmm);
+                        fmm_leaf_size, fmm_target_leaf_size, &fmm);
 
   // --- Coulombic energy (naive O(N^2) atom pairs; atom count is small) ---
   // Atoms are replicated on every rank, so this sum is identical on all ranks and
@@ -3849,7 +3850,7 @@ poisson_boltzmann::energy_cuda (ray_cache_t & ray_cache)
   fmm_tree *fmm = nullptr;
   if (energy_method == 2)
     fmm_build_atom_tree((int)num_atoms, d_atoms, d_charges, fmm_mac, fmm_multipole_order,
-                        fmm_leaf_size, &fmm);
+                        fmm_leaf_size, fmm_target_leaf_size, &fmm);
 
   // --- Coulombic energy (naive O(N^2) atom pairs; atom count is small) ---
   // Atoms are replicated on every rank, so this sum is identical on all ranks and

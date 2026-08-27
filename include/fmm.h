@@ -39,9 +39,20 @@ typedef struct fmm_tree fmm_tree;
  *               (accept a cell pair if size/dist < mac)  [fmm_mac]
  *   p         : multipole truncation order (1..FMM_MAX_P).  [fmm_multipole_order]
  *               Out-of-range values are clamped with a stderr warning.
- *   leaf_size : max atoms per terminal cluster; traversal stops descending at
- *               subtrees of <= leaf_size atoms and resolves them as direct P2P.
- *               [fmm_leaf_size]
+ *   leaf_size : max atoms per terminal cluster of the SOURCE tree; traversal stops
+ *               descending at subtrees of <= leaf_size atoms and resolves them as
+ *               direct P2P.  [fmm_leaf_size]
+ *   target_leaf_size : max points per leaf of the TARGET tree that the energy entry
+ *               points build internally. 0 follows leaf_size (the historical
+ *               single-knob behaviour).  [fmm_target_leaf_size]
+ *               The two trees are sized very differently -- 6VYB at leaf_size=64 gives
+ *               a 536-leaf source tree against a ~355k-leaf target tree -- and they
+ *               drive opposite costs. The SOURCE leaf size sets the box radius that the
+ *               MAC compares against, hence the near-field radius and the P2P work; the
+ *               TARGET leaf size sets the target box count, hence the M2L pair count.
+ *               Tied together they trade against each other and the total is U-shaped;
+ *               apart, each can be placed on its own optimum. Capped at FMM_BDIM, since
+ *               one block serves one target leaf at one point per thread.
  *   out       : receives the built tree handle (owns its own sorted copies)
  */
 void fmm_build_atom_tree(int num_atoms,
@@ -50,6 +61,7 @@ void fmm_build_atom_tree(int num_atoms,
                          double mac,
                          int p,
                          int leaf_size,
+                         int target_leaf_size,
                          fmm_tree **out);
 
 void fmm_free_tree(fmm_tree *tree);
@@ -221,7 +233,9 @@ struct fmm_tree {
   int     n_nodes;    // 2N - 1
   int     p;          // multipole order in [1, FMM_MAX_P]
   int     comp;       // moments per node = COMP(p)
-  int     leaf_size;  // max atoms per terminal cluster (P2P cutoff)
+  int     leaf_size;  // max atoms per terminal cluster of THIS (source) tree (P2P cutoff)
+  int     target_leaf_size;  // max points per leaf of the target tree built per energy call;
+                             // resolved and clamped to [1, FMM_BDIM] in fmm_build_atom_tree
   double  theta;
 
   // sorted source atoms (Morton order)
@@ -383,10 +397,10 @@ __device__ __forceinline__ double atomicMaxDouble(double *addr, double val) {
        : __longlong_as_double(atomicMax((long long *)addr, i));
 }
 
-// Upper bound on the target leaf size, and hence on the leaf-kernel block width. fmm_leaf_size is
-// clamped to this (the `tleaf` locals in fmm_polarization_energy / fmm_ionic_energy), so a leaf never
-// holds more than FMM_BDIM points and one block always covers a leaf -- one target point per thread in
-// the fused L2P+P2P kernel.
+// Upper bound on the target leaf size, and hence on the leaf-kernel block width. fmm_target_leaf_size
+// is clamped to this in fmm_build_atom_tree, so a leaf never holds more than FMM_BDIM points and one
+// block always covers a leaf -- one target point per thread in the fused L2P+P2P kernel. Only the
+// TARGET tree is capped; the source leaf size is unconstrained by this.
 // This is a CAP, not the launch width: the actual width is ceil(tleaf/32)*32. Pinning the block at 256
 // while fmm_leaf_size was 64 left ~84% of every block's threads permanently inactive.
 constexpr int FMM_BDIM      = 256;
