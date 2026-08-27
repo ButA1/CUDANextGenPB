@@ -335,6 +335,24 @@ __device__ __forceinline__ cmplx get_R(const cmplx* R, int n, int m) {
   cmplx r = R[sph_slot(n, -m)];          return cmplx(r.re, -r.im);
 }
 
+// acc += c * (a * b), for complex a,b and a REAL scale c -- the inner term shared by all three
+// translation operators (M2M Eq.13, M2L Eq.17, L2L Eq.21).
+//
+// Written as four FMAs on the accumulator rather than {complex multiply, scale by c, add}: the scale
+// folds into the product and the add folds into the multiply. The term costs 2 DMUL + 4 DFMA instead
+// of 4 DMUL + 2 DFMA + 2 DADD, which matters because these loops run 1716 (L2L/M2M) to 7986 (M2L)
+// times per shift and the kernels are FP64-issue-bound on the 3080's 1:64 rate.
+//
+// NOT an accuracy tradeoff: an FMA rounds once where a separate multiply-then-add rounds twice, so
+// this is strictly more accurate than the expression it replaces.
+__device__ __forceinline__ void cfma_acc(cmplx &acc, double c, cmplx a, cmplx b) {
+  const double cr = c * a.re, ci = c * a.im;
+  acc.re = fma( cr, b.re, acc.re);
+  acc.re = fma(-ci, b.im, acc.re);
+  acc.im = fma( cr, b.im, acc.im);
+  acc.im = fma( ci, b.re, acc.im);
+}
+
 // ====================================================================
 //  double atomic min/max (CUDA has no native FP64 min/max atomic)
 //
@@ -365,8 +383,12 @@ __device__ __forceinline__ double atomicMaxDouble(double *addr, double val) {
        : __longlong_as_double(atomicMax((long long *)addr, i));
 }
 
-// Leaf-kernel block width = launch blockDim. Target leaves hold <= 256 points, so 256
-// threads always cover a leaf (one target point per thread in the fused L2P+P2P kernel).
+// Upper bound on the target leaf size, and hence on the leaf-kernel block width. fmm_leaf_size is
+// clamped to this (the `tleaf` locals in fmm_polarization_energy / fmm_ionic_energy), so a leaf never
+// holds more than FMM_BDIM points and one block always covers a leaf -- one target point per thread in
+// the fused L2P+P2P kernel.
+// This is a CAP, not the launch width: the actual width is ceil(tleaf/32)*32. Pinning the block at 256
+// while fmm_leaf_size was 64 left ~84% of every block's threads permanently inactive.
 constexpr int FMM_BDIM      = 256;
 
 #endif  // __CUDACC__
