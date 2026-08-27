@@ -1669,7 +1669,6 @@ void fmm_build_atom_tree(int num_atoms,
                         double mac,
                         int p,
                         int leaf_size,
-                        int target_leaf_size,
                         fmm_tree **out) {
   // Clamp p to the supported range with a stderr warning.
   if (p < 1) {
@@ -1688,15 +1687,6 @@ void fmm_build_atom_tree(int num_atoms,
   t->p       = p;
   t->comp    = comp_of(p);
   t->leaf_size = (leaf_size < 1) ? 1 : leaf_size;
-  // Target leaf size is a separate knob: it sets the target box count (M2L pair count), while
-  // leaf_size sets the source box radius (near-field radius, P2P work). 0 means "follow the source
-  // leaf size", which reproduces the historical single-knob behaviour exactly. Clamped to FMM_BDIM
-  // here, once, so every consumer of target_leaf_size can rely on the block-covers-a-leaf invariant.
-  {
-    int tls = (target_leaf_size < 1) ? t->leaf_size : target_leaf_size;
-    if (tls > FMM_BDIM) tls = FMM_BDIM;
-    t->target_leaf_size = tls;
-  }
   t->theta   = mac;
   *out = t;
   if (num_atoms <= 0) {
@@ -1736,7 +1726,8 @@ void fmm_free_tree(fmm_tree *t) {
 }
 
 double fmm_polarization_energy(fmm_tree *src, int num_pts,
-                                  const double *h_V, const double *h_flux) {
+                                  const double *h_V, const double *h_flux,
+                                  int target_leaf_size) {
   if (!src || src->N == 0 || num_pts == 0) return 0.0;
 
   double *d_V, *d_flux, *d_partial;
@@ -1747,11 +1738,15 @@ double fmm_polarization_energy(fmm_tree *src, int num_pts,
   CUDA_CHECK(cudaMemcpy(d_flux, h_flux, num_pts  *sizeof(double), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemset(d_partial, 0, num_pts * sizeof(double)));  // any uncovered target -> 0
 
-  // Target leaf cells are capped at FMM_BDIM pts so a single block can serve a leaf.
-  // Target leaf size is its own knob, independent of the source leaf size that bounds the P2P
-  // descent. fmm_build_atom_tree already resolved 0 -> leaf_size and clamped to [1, FMM_BDIM],
-  // so the launch width derived from it below still satisfies "a block always covers a leaf".
-  int tleaf = src->target_leaf_size;
+  // Target leaf size is this call's own knob, independent of the source leaf size that bounds the
+  // P2P descent -- and resolved here, where the target tree is actually built, rather than carried
+  // on the atom tree. 0 follows the source leaf size (the historical single-knob behaviour).
+  // Clamped to FMM_BDIM so a leaf never outgrows the block that serves it: the launch width below
+  // is derived from tleaf, so "a block always covers a leaf" is only real if the clamp and the cap
+  // are the same constant.
+  int tleaf = (target_leaf_size < 1) ? src->leaf_size : target_leaf_size;
+  if (tleaf > FMM_BDIM) tleaf = FMM_BDIM;
+  if (tleaf < 1) tleaf = 1;
   fmm_target_tree tt;
   build_target_tree(num_pts, d_V, tleaf, src->p, &tt);
 
@@ -1779,7 +1774,7 @@ double fmm_polarization_energy(fmm_tree *src, int num_pts,
 double fmm_ionic_energy(fmm_tree *src, int num_tri_verts,
                            const double *h_vert, const double *h_norms,
                            const double *h_phi_sup, const double *h_area,
-                           double inv_4pi) {
+                           double inv_4pi, int target_leaf_size) {
   if (!src || src->N == 0 || num_tri_verts == 0) return 0.0;
   int num_tris = num_tri_verts / 3;
 
@@ -1795,10 +1790,14 @@ double fmm_ionic_energy(fmm_tree *src, int num_tri_verts,
   CUDA_CHECK(cudaMemcpy(d_area,  h_area,    num_tris       *sizeof(double), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemset(d_partial, 0, num_tri_verts * sizeof(double)));  // any uncovered target -> 0
 
-  // Target leaf size is its own knob, independent of the source leaf size that bounds the P2P
-  // descent. fmm_build_atom_tree already resolved 0 -> leaf_size and clamped to [1, FMM_BDIM],
-  // so the launch width derived from it below still satisfies "a block always covers a leaf".
-  int tleaf = src->target_leaf_size;
+  // As in fmm_polarization_energy, but note this path differentiates the local expansion (E =
+  // -grad Phi via forward-mode AD in L2P). A derivative of a truncated expansion converges one
+  // order slower than the expansion itself, and enlarging tleaf grows the box radius over which
+  // that expansion has to hold -- so the ionic term degrades faster with tleaf than the
+  // polarization term does. That is why this is a separate argument and not a shared setting.
+  int tleaf = (target_leaf_size < 1) ? src->leaf_size : target_leaf_size;
+  if (tleaf > FMM_BDIM) tleaf = FMM_BDIM;
+  if (tleaf < 1) tleaf = 1;
   fmm_target_tree tt;
   build_target_tree(num_tri_verts, d_vert, tleaf, src->p, &tt);
 

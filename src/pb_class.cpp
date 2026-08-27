@@ -976,6 +976,7 @@ poisson_boltzmann::parse_options (int argc, char **argv)
   fmm_multipole_order = g2 ( (alg_options + "fmm_multipole_order").c_str (), 6);
   fmm_leaf_size = g2 ( (alg_options + "fmm_leaf_size").c_str (), 32);
   fmm_target_leaf_size = g2 ( (alg_options + "fmm_target_leaf_size").c_str (), 0);
+  fmm_ionic_target_leaf_size = g2 ( (alg_options + "fmm_ionic_target_leaf_size").c_str (), 0);
 
   const std::string out_options = "output/";
   p4estfilename = g2 ( (out_options + "p4estfilename").c_str (), "poisson_boltzmann_p4est");
@@ -3588,7 +3589,7 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   fmm_tree *fmm = nullptr;
   if (energy_method == 2)
     fmm_build_atom_tree((int)num_atoms, d_atoms, d_charges, fmm_mac, fmm_multipole_order,
-                        fmm_leaf_size, fmm_target_leaf_size, &fmm);
+                        fmm_leaf_size, &fmm);
 
   // --- Coulombic energy (naive O(N^2) atom pairs; atom count is small) ---
   // Atoms are replicated on every rank, so this sum is identical on all ranks and
@@ -3723,7 +3724,8 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
   int num_pts = (int)h_flux_pol.size();
   double first_int;
   if (energy_method == 2)
-    first_int = fmm_polarization_energy(fmm, num_pts, h_V_pol.data(), h_flux_pol.data());
+    first_int = fmm_polarization_energy(fmm, num_pts, h_V_pol.data(), h_flux_pol.data(),
+                                        fmm_target_leaf_size);
   else
     first_int = polarization_energy_cuda_dev(num_pts, h_V_pol.data(), h_flux_pol.data(),
                                              (int)num_atoms, d_atoms, d_charges);
@@ -3737,13 +3739,17 @@ poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
     int num_tri_verts = (int)h_phi_ion.size();
     double second_int;
     if (energy_method == 2)
+      // Ionic gets its own target leaf size: it differentiates the local expansion, so it loses
+      // accuracy faster than polarization as the target box grows. 0 -> fall back to the shared
+      // fmm_target_leaf_size.
       second_int = fmm_ionic_energy(fmm, num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
-                                    h_phi_ion.data(), h_area_ion.data(), inv_4pi);
+                                    h_phi_ion.data(), h_area_ion.data(), inv_4pi,
+                                    fmm_ionic_target_leaf_size ? fmm_ionic_target_leaf_size
+                                                               : fmm_target_leaf_size);
     else
       second_int = ionic_energy_cuda_dev(num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
                                          h_phi_ion.data(), h_area_ion.data(),
                                          (int)num_atoms, d_atoms, d_charges, inv_4pi);
-
     this->energy_react = 0.5 * (second_int - first_int * constant_react);
   }
 
@@ -3850,7 +3856,7 @@ poisson_boltzmann::energy_cuda (ray_cache_t & ray_cache)
   fmm_tree *fmm = nullptr;
   if (energy_method == 2)
     fmm_build_atom_tree((int)num_atoms, d_atoms, d_charges, fmm_mac, fmm_multipole_order,
-                        fmm_leaf_size, fmm_target_leaf_size, &fmm);
+                        fmm_leaf_size, &fmm);
 
   // --- Coulombic energy (naive O(N^2) atom pairs; atom count is small) ---
   // Atoms are replicated on every rank, so this sum is identical on all ranks and
@@ -3985,7 +3991,8 @@ poisson_boltzmann::energy_cuda (ray_cache_t & ray_cache)
   int num_pts = (int)h_flux_pol.size();
   double first_int;
   if (energy_method == 2)
-    first_int = fmm_polarization_energy(fmm, num_pts, h_V_pol.data(), h_flux_pol.data());
+    first_int = fmm_polarization_energy(fmm, num_pts, h_V_pol.data(), h_flux_pol.data(),
+                                        fmm_target_leaf_size);
   else
     first_int = polarization_energy_cuda_dev(num_pts, h_V_pol.data(), h_flux_pol.data(),
                                              (int)num_atoms, d_atoms, d_charges);
@@ -3999,8 +4006,13 @@ poisson_boltzmann::energy_cuda (ray_cache_t & ray_cache)
     int num_tri_verts = (int)h_phi_ion.size();
     double second_int;
     if (energy_method == 2)
+      // Ionic gets its own target leaf size: it differentiates the local expansion, so it loses
+      // accuracy faster than polarization as the target box grows. 0 -> fall back to the shared
+      // fmm_target_leaf_size.
       second_int = fmm_ionic_energy(fmm, num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
-                                    h_phi_ion.data(), h_area_ion.data(), inv_4pi);
+                                    h_phi_ion.data(), h_area_ion.data(), inv_4pi,
+                                    fmm_ionic_target_leaf_size ? fmm_ionic_target_leaf_size
+                                                               : fmm_target_leaf_size);
     else
       second_int = ionic_energy_cuda_dev(num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
                                          h_phi_ion.data(), h_area_ion.data(),
