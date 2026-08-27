@@ -52,14 +52,17 @@ ngpb : $(patsubst %.cpp, %.o, $(wildcard *.cpp)) $(CUDA_OBJECTS)
 #  dump (see include/energy_dump.h). Lives in tools/ so it stays out of the
 #  $(wildcard *.cpp) that feeds ngpb -- it has its own main().
 #
-#  fmm.cu and energy_cuda.cu include nothing but CUDA and libstdc++, so this
-#  links against -lcudart alone: no bimpp, p8est, LIS, AMGX, Octave or
-#  NanoShaper. That keeps it buildable on its own in the cluster image.
+#  fmm.cu, energy_cuda.cu and gpu_topology.cu include nothing but CUDA, MPI and
+#  libstdc++, so this links against -lcudart alone: no bimpp, p8est, LIS, AMGX,
+#  Octave or NanoShaper. That keeps it buildable on its own in the cluster image.
+#
+#  gpu_topology.o is in the list so the replay binds rank->device the same way
+#  ngpb's main() does; on a multi-GPU node the two would otherwise disagree.
 #
 #  Not part of `all` on purpose -- a break here should never block ngpb.
 #  Build it with:  make fmm_replay
 # ----------------------------------------------------------------------
-REPLAY_OBJECTS = tools/fmm_replay.o fmm.o energy_cuda.o
+REPLAY_OBJECTS = tools/fmm_replay.o fmm.o energy_cuda.o gpu_topology.o
 
 fmm_replay : $(REPLAY_OBJECTS)
 	$(NVCC) -dlink $(REPLAY_OBJECTS) -o tools/device_link_replay.o

@@ -57,6 +57,7 @@
 
 #include "energy_dump.h"
 #include "fmm.h"
+#include "gpu_topology.h"
 
 // ====================================================================
 //  Naive GPU energy kernels. Declared here rather than including test.h,
@@ -245,6 +246,16 @@ main (int argc, char **argv)
     MPI_Finalize ();
     return 2;
   }
+
+  // ----------------------------------------------------------------
+  //  Bind this rank's CUDA device exactly as ngpb's main() does. On a
+  //  single-GPU node this changes nothing -- every rank is on device 0 either
+  //  way -- but on a multi-GPU node the pipeline block-maps its ranks across
+  //  the GPUs, and without this the whole replay would pile onto device 0 and
+  //  its timings would not be comparable to that run's "Compute energy" line.
+  //  Must precede every CUDA call, i.e. atoms_to_device below.
+  // ----------------------------------------------------------------
+  setup_gpu_topology (MPI_COMM_WORLD);
 
   // ----------------------------------------------------------------
   //  Load this rank's slice of the dump.

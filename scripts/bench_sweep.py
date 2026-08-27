@@ -36,6 +36,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -400,8 +401,12 @@ class PrmGuard:
         os.chmod(self.prm, self.mode)
 
 
-def run_once(folder, np_ranks, timeout_s, env):
-    cmd = ["mpirun", "-n", str(np_ranks), "ngpb", "--prmfile", PRM]
+def run_once(folder, np_ranks, timeout_s, env, launcher=()):
+    # The launcher wraps the WHOLE command, mpirun included -- that is the
+    # container idiom the cluster jobs already use ("singularity exec --nv SIF
+    # mpirun -n N ngpb"), where the MPI doing the launching must be the one
+    # inside the image, not the host's.
+    cmd = list(launcher) + ["mpirun", "-n", str(np_ranks), "ngpb", "--prmfile", PRM]
     start = time.perf_counter()
     proc = subprocess.Popen(
         cmd, cwd=folder, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -457,6 +462,14 @@ def main():
                          "(relative errors are left blank)")
     ap.add_argument("--restore", action="store_true",
                     help="restore options.prm from a leftover backup and exit")
+    ap.add_argument("--launcher", default="",
+                    help="command prefix for every run, e.g. "
+                         "\"singularity exec --nv --bind $SRC:/usr/local/nextgenPB ngpb.sif\". "
+                         "Wraps mpirun too, so the container's own MPI does the launching; "
+                         "the host-side mpirun/ngpb checks are skipped when this is set.")
+    ap.add_argument("--replay-bin", default=None,
+                    help="path to fmm_replay (default: PATH, then ../src/fmm_replay; "
+                         "with --launcher, the bare name resolved inside the container)")
 
     fmm = ap.add_argument_group(
         "FMM parameter sweep",
@@ -476,6 +489,7 @@ def main():
                      help="timed repeats per configuration (default: 3)")
 
     args = ap.parse_args()
+    args.launcher = shlex.split(args.launcher)
 
     if args.restore:
         for folder in args.folders:
@@ -487,10 +501,13 @@ def main():
                 print("no backup in {}".format(folder))
         return 0
 
-    if shutil.which("mpirun") is None:
-        return _die("mpirun not found on PATH")
-    if shutil.which("ngpb") is None:
-        return _die("ngpb not found on PATH")
+    # Both live inside the image when a launcher is set; nothing on the host
+    # PATH is expected to match, so there is nothing worth pre-checking.
+    if not args.launcher:
+        if shutil.which("mpirun") is None:
+            return _die("mpirun not found on PATH")
+        if shutil.which("ngpb") is None:
+            return _die("ngpb not found on PATH")
 
     for folder in args.folders:
         rc = run_fmm_sweep(folder, args) if args.fmm_sweep else run_folder(folder, args)
@@ -528,9 +545,17 @@ def run_fmm_sweep(folder, args):
     if not os.path.exists(prm_path):
         return _die("no {} in {}".format(PRM, folder))
 
-    replay = find_fmm_replay()
-    if replay is None:
-        return _die("fmm_replay not found -- build it with 'make -C src fmm_replay'")
+    if args.replay_bin:
+        replay = args.replay_bin
+    elif args.launcher:
+        # Resolved on the container's PATH: the image puts src/ there, and a
+        # host-side absolute path would only be valid inside if the bind mount
+        # happened to land at the same location.
+        replay = "fmm_replay"
+    else:
+        replay = find_fmm_replay()
+        if replay is None:
+            return _die("fmm_replay not found -- build it with 'make -C src fmm_replay'")
 
     with open(prm_path) as fh:
         original_text = fh.read()
@@ -552,7 +577,8 @@ def run_fmm_sweep(folder, args):
         "energy_dump": prefix,
     }
 
-    replay_cmd = ["mpirun", "-n", str(args.np), replay, prefix,
+    replay_cmd = list(args.launcher) + \
+                 ["mpirun", "-n", str(args.np), replay, prefix,
                   "--mac", args.fmm_mac, "--order", args.fmm_order,
                   "--leaf", args.fmm_leaf, "--repeats", str(args.fmm_repeats),
                   "--csv", out_csv]
@@ -562,8 +588,12 @@ def run_fmm_sweep(folder, args):
         print("molecule   : {}".format(molecule))
         print("replay     : {}".format(replay))
         print("csv        : {}".format(out_csv))
-        print("step 1     : one ngpb run at -n {} with energy_dump = {}"
-              .format(args.np, prefix))
+        if args.launcher:
+            print("launcher   : {}".format(" ".join(args.launcher)))
+        print("step 1     : {}".format(" ".join(
+            list(args.launcher) + ["mpirun", "-n", str(args.np), "ngpb",
+                                   "--prmfile", PRM])))
+        print("             (with energy_dump = {})".format(prefix))
         print("step 2     : {}".format(" ".join(replay_cmd)))
         return 0
 
@@ -583,7 +613,8 @@ def run_fmm_sweep(folder, args):
     try:
         print("[1/2] dumping energy inputs ...", end=" ", flush=True)
         guard.write(render_prm(original_text, settings))
-        status, code, wall, out = run_once(folder, args.np, args.timeout, env)
+        status, code, wall, out = run_once(folder, args.np, args.timeout, env,
+                                           args.launcher)
         print("{} ({:.1f}s)".format(status, wall))
 
         if status != "ok":
@@ -749,7 +780,8 @@ def run_folder(folder, args):
 def execute(guard, folder, original_text, settings, sweep, rep, args, env,
             log_dir, molecule, reference):
     guard.write(render_prm(original_text, settings))
-    status, code, wall, out = run_once(folder, args.np, args.timeout, env)
+    status, code, wall, out = run_once(folder, args.np, args.timeout, env,
+                                       args.launcher)
     parsed = parse_log(out)
 
     cid = config_id(sweep, settings)

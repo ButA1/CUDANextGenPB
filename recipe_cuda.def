@@ -123,7 +123,10 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     # The `nvcc -dlink` step has no arch flag -> device-links only one arch and breaks
     # the fatbin. Make it carry the same gencodes.
     sed -i 's|-dlink |-dlink $(NVCCFLAGS) |' Makefile
-    make distclean all
+    # fmm_replay is a separate target (own main(), outside `all`): the offline
+    # fmm_* sweep driver. Built here so the image can run the sweep without a
+    # source tree bind-mounted over /usr/local/nextgenPB. See src/Makefile.
+    make distclean all fmm_replay
 
     # Trim image
     rm -rf /opt/nanoshaper/{example,src_client,test} 2>/dev/null || true
