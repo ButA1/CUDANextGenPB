@@ -149,8 +149,10 @@ struct
   int energy_method = 0;          // 0 = CPU, 1 = naive GPU kernel, 2 = FMM
   double fmm_mac = 0.4;           // FMM opening angle (multipole acceptance criterion)
   int fmm_multipole_order = 6;    // FMM multipole truncation order (1..FMM_MAX_P)
-  int fmm_leaf_size = 32;         // FMM max atoms per terminal cluster (P2P cutoff)
-  int fmm_target_leaf_size = 0;   // FMM max points per target leaf; 0 = follow fmm_leaf_size
+  int fmm_leaf_size = 16;         // FMM max atoms per terminal cluster (P2P cutoff). Measured
+                                  // optimum on 6VYB: 8 and 32 are both slower (test1/sweep2.csv).
+  int fmm_target_leaf_size = 1024;// FMM max points per target leaf; 0 = follow fmm_leaf_size.
+                                  // Measured best of {128,256,512,1024}: fastest and most accurate.
   int fmm_ionic_target_leaf_size = 0;  // override for the ionic target tree; 0 = fmm_target_leaf_size
 
   MPI_Comm mpicomm;

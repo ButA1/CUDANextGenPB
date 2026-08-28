@@ -25,6 +25,7 @@ linear_solver       = amgx
 amgx_config         = amgx_pcgf_amg_poly_cluster.json
 energy_method       = 2
 fmm_mac             = 0.4
-fmm_multipole_order = 10
-fmm_leaf_size       = 256
+fmm_multipole_order = 11
+fmm_leaf_size       = 16
+fmm_target_leaf_size = 1024
 [../]
