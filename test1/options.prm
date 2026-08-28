@@ -24,7 +24,8 @@ calc_coulombic = 1
 linear_solver       = amgx
 amgx_config         = amgx_pcgf_amg_block_jacobi.json
 energy_method       = 2
-fmm_mac             = 0.4
-fmm_multipole_order = 10
-fmm_leaf_size       = 256
+fmm_mac             = 0.3
+fmm_multipole_order = 9
+fmm_leaf_size       = 16
+fmm_target_leaf_size = 256
 [../]
