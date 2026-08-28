@@ -23,6 +23,11 @@
  *  fmm_mac x fmm_multipole_order x fmm_leaf_size grid at 3 repeats costs ~18 h
  *  through ngpb and ~30 min here.
  *
+ *  Since the source and target leaf sizes were decoupled, --leaf and --tleaf are
+ *  independent axes and the grid is |mac|x|order|x|leaf|x|tleaf|. Cross them fully
+ *  and the point count multiplies -- prefer a staged sweep (near-field knobs first,
+ *  then the target/order knobs at the winner) over one large cross product.
+ *
  *  Produce the dump by setting, in the [algorithm] section of options.prm:
  *
  *      energy_dump = fmm_inputs
@@ -30,7 +35,7 @@
  *  then replay it at the SAME rank count that produced it:
  *
  *      mpirun -n 4 fmm_replay fmm_inputs \
- *          --mac 0.2:0.8:0.1 --order 6:10 --leaf 32,64,128,256 \
+ *          --mac 0.4:0.6:0.1 --order 9,10 --leaf 8,16,32,64 --tleaf 128,256 \
  *          --repeats 3 --csv sweep.csv
  *
  *  Each rank loads its own <prefix>.rank<K>.bin, so the sweep runs under the
@@ -174,14 +179,22 @@ usage (const char *argv0)
     "\n"
     "  --mac SPEC          fmm_mac values            (default 0.4)\n"
     "  --order SPEC        fmm_multipole_order       (default 10)\n"
-    "  --leaf SPEC         fmm_leaf_size             (default 256)\n"
+    "  --leaf SPEC         fmm_leaf_size (SOURCE)    (default 256)\n"
+    "  --tleaf SPEC        fmm_target_leaf_size      (default 0 = follow --leaf)\n"
     "  --repeats N         timed repeats per config  (default 3)\n"
     "  --warmup N          discarded runs per config (default 1)\n"
     "  --csv PATH          write results here        (default stdout only)\n"
     "  --no-naive          skip the naive baseline (relative errors become NaN)\n"
     "\n"
+    "  --leaf sizes the SOURCE (atom) tree: it bounds the box radius the MAC tests\n"
+    "  against, hence the near-field radius and the P2P work. --tleaf sizes the\n"
+    "  TARGET tree: it sets the target box count, hence the M2L pair count. They\n"
+    "  pull opposite ways, so sweeping them together on one --leaf value (what this\n"
+    "  tool did before --tleaf existed) only samples the diagonal of the real grid.\n"
+    "  --tleaf is capped at FMM_BDIM (256) inside the energy entry points.\n"
+    "\n"
     "  SPEC is \"a,b,c\", \"lo:hi\" (step 1) or \"lo:hi:step\", e.g.\n"
-    "    --mac 0.2:0.8:0.1 --order 6:10 --leaf 32,64,128,256\n",
+    "    --mac 0.4:0.6:0.1 --order 9,10 --leaf 8,16,32,64 --tleaf 128,256\n",
     argv0);
 }
 
@@ -197,6 +210,7 @@ main (int argc, char **argv)
   std::string prefix, csv_path;
   std::vector<double> macs {0.4};
   std::vector<int> orders {10}, leaves {256};
+  std::vector<int> tleaves {0};      // 0 = follow the source leaf size (pre-decoupling behaviour)
   int repeats = 3, warmup = 1;
   bool do_naive = true;
   bool bad_args = false;
@@ -222,6 +236,9 @@ main (int argc, char **argv)
     } else if (a == "--leaf") {
       std::string s;
       if (next (s) && !parse_spec_int (s, leaves)) bad_args = true;
+    } else if (a == "--tleaf") {
+      std::string s;
+      if (next (s) && !parse_spec_int (s, tleaves)) bad_args = true;
     } else if (a == "--repeats") {
       std::string s;
       if (next (s)) repeats = std::atoi (s.c_str ());
@@ -326,7 +343,10 @@ main (int argc, char **argv)
     // energy_coul is constant across the sweep, but scripts/plot_fmm_sweep.py
     // needs it to form energy_sum = pol + ionic + coul on the same scale as a
     // bench_sweep.py CSV -- it is part of the relative-error denominator.
-    std::fprintf (csv, "method,mac,order,leaf,repeat,ranks,"
+    // src_leaf/tgt_leaf replace the old single `leaf` column. Older CSVs with a `leaf`
+    // column were produced when one value sized BOTH trees, i.e. they sample only the
+    // src_leaf == tgt_leaf diagonal -- do not concatenate them with new rows.
+    std::fprintf (csv, "method,mac,order,src_leaf,tgt_leaf,repeat,ranks,"
                        "t_build_s,t_pol_s,t_ionic_s,t_total_s,"
                        "energy_pol,energy_ionic,energy_coul,"
                        "relerr_pol,relerr_ionic\n");
@@ -387,7 +407,7 @@ main (int argc, char **argv)
 
         if (rep >= warmup) {
           if (csv)
-            std::fprintf (csv, "naive,,,,%d,%d,0,%.9f,%.9f,%.9f,%.17g,%.17g,%.17g,0,0\n",
+            std::fprintf (csv, "naive,,,,,%d,%d,0,%.9f,%.9f,%.9f,%.17g,%.17g,%.17g,0,0\n",
                           rep - warmup, size, t_pol, t_ionic, t_pol + t_ionic,
                           e_pol, e_ionic, in.coul_energy);
         }
@@ -409,13 +429,20 @@ main (int argc, char **argv)
   long done = 0;
 
   if (rank == 0)
-    std::printf ("%-6s %-5s %-5s %10s %10s %10s %12s %12s\n",
-                 "mac", "order", "leaf", "build[s]", "pol[s]", "ionic[s]",
+    std::printf ("%-6s %-5s %-6s %-6s %10s %10s %10s %12s %12s\n",
+                 "mac", "order", "sleaf", "tleaf", "build[s]", "pol[s]", "ionic[s]",
                  "relerr_pol", "relerr_ion");
 
   for (double mac : macs) {
     for (int order : orders) {
       for (int leaf : leaves) {
+       for (int tleaf : tleaves) {
+        // Record what actually RAN, not what was asked for: 0 follows the source leaf, and the
+        // energy entry points clamp to FMM_BDIM. Resolving both here means the CSV can never
+        // disagree with the configuration the timing came from.
+        int tleaf_eff = (tleaf < 1) ? leaf : tleaf;
+        if (tleaf_eff > FMM_BDIM) tleaf_eff = FMM_BDIM;
+
         double last_relerr_pol = NAN, last_relerr_ion = NAN;
         double last_build = 0.0, last_pol_t = 0.0, last_ion_t = 0.0;
 
@@ -429,7 +456,7 @@ main (int argc, char **argv)
           double t1 = MPI_Wtime ();
 
           double first_int = fmm_polarization_energy (tree, num_pts, in.V_pol.data (),
-                                                      in.flux_pol.data ());
+                                                      in.flux_pol.data (), tleaf_eff);
           cudaDeviceSynchronize ();
           double t2 = MPI_Wtime ();
 
@@ -437,7 +464,7 @@ main (int argc, char **argv)
           if (in.do_ionic)
             second_int = fmm_ionic_energy (tree, num_tri_verts, in.vert_ion.data (),
                                            in.norms_ion.data (), in.phi_ion.data (),
-                                           in.area_ion.data (), in.inv_4pi);
+                                           in.area_ion.data (), in.inv_4pi, tleaf_eff);
           cudaDeviceSynchronize ();
           double t3 = MPI_Wtime ();
 
@@ -456,9 +483,9 @@ main (int argc, char **argv)
             double ri = (do_naive && in.do_ionic) ? relerr (e_ionic, ref_ionic) : NAN;
 
             if (csv)
-              std::fprintf (csv, "fmm,%g,%d,%d,%d,%d,"
+              std::fprintf (csv, "fmm,%g,%d,%d,%d,%d,%d,"
                                  "%.9f,%.9f,%.9f,%.9f,%.17g,%.17g,%.17g,%.6e,%.6e\n",
-                            mac, order, leaf, rep - warmup, size,
+                            mac, order, leaf, tleaf_eff, rep - warmup, size,
                             t_build, t_pol, t_ionic, t_total,
                             e_pol, e_ionic, in.coul_energy, rp, ri);
 
@@ -471,8 +498,8 @@ main (int argc, char **argv)
         }
 
         if (rank == 0) {
-          std::printf ("%-6g %-5d %-5d %10.4f %10.4f %10.4f %12.3e %12.3e\n",
-                       mac, order, leaf, last_build, last_pol_t, last_ion_t,
+          std::printf ("%-6g %-5d %-6d %-6d %10.4f %10.4f %10.4f %12.3e %12.3e\n",
+                       mac, order, leaf, tleaf_eff, last_build, last_pol_t, last_ion_t,
                        last_relerr_pol, last_relerr_ion);
           std::fflush (stdout);
 
@@ -481,6 +508,7 @@ main (int argc, char **argv)
         }
 
         ++done;
+       }
       }
     }
   }
