@@ -16,9 +16,15 @@ Two sweeps, never crossed:
   sweep B (energy method)   linear_solver pinned to amgx + amgx_config
       energy_method = 0
       energy_method = 1
-      energy_method = 2 x fmm_mac {0.2..0.8 step 0.1}
-                        x fmm_multipole_order {6..10}
-                        x fmm_leaf_size {32,64,128,256}
+      energy_method = 2 (at whatever fmm_* values options.prm already carries;
+                         the fmm_* grid lives in --fmm-sweep, see below)
+
+The --fmm-sweep grid is fmm_mac x fmm_multipole_order x fmm_leaf_size (SOURCE
+tree) x fmm_target_leaf_size (TARGET tree). The two leaf sizes are independent
+knobs pulling opposite ways -- the source leaf bounds the box radius the MAC
+tests against, hence the near-field/P2P work; the target leaf sets the target
+box count, hence the M2L pair count. Sweeping them on one value (what this
+script did before fmm_target_leaf_size existed) only samples the diagonal.
 
 A single reference run (linear_solver = lis, energy_method = 0) is done first;
 relative errors of every other run's energies are computed against it.
@@ -59,6 +65,7 @@ MANAGED_KEYS = [
     "fmm_mac",
     "fmm_multipole_order",
     "fmm_leaf_size",
+    "fmm_target_leaf_size",
     "energy_dump",
 ]
 
@@ -89,7 +96,7 @@ FIELDNAMES = (
         "folder", "molecule", "sweep", "config_id", "repeat", "status",
         "exit_code", "timestamp", "np",
         "linear_solver", "amgx_config", "energy_method",
-        "fmm_mac", "fmm_multipole_order", "fmm_leaf_size",
+        "fmm_mac", "fmm_multipole_order", "fmm_leaf_size", "fmm_target_leaf_size",
         "wall_s", "t_report_total_s",
     ]
     + [col for _, col in STAGE_COLUMNS]
@@ -325,6 +332,7 @@ def build_plan(amgx_config, sweeps):
                 "fmm_mac": None,
                 "fmm_multipole_order": None,
                 "fmm_leaf_size": None,
+                "fmm_target_leaf_size": None,
             }))
 
     if "b" in sweeps:
@@ -339,7 +347,7 @@ def build_plan(amgx_config, sweeps):
         for method in (0, 1, 2):
             plan.append(("B", dict(base, energy_method=method,
                                    fmm_mac=None, fmm_multipole_order=None,
-                                   fmm_leaf_size=None)))
+                                   fmm_leaf_size=None, fmm_target_leaf_size=None)))
     return plan
 
 
@@ -483,8 +491,12 @@ def main():
                      help="fmm_mac spec passed to fmm_replay (default: 0.2:0.8:0.1)")
     fmm.add_argument("--fmm-order", default="6:10",
                      help="fmm_multipole_order spec (default: 6:10)")
-    fmm.add_argument("--fmm-leaf", default="32,64,128,256",
-                     help="fmm_leaf_size spec (default: 32,64,128,256)")
+    fmm.add_argument("--fmm-leaf", default="8,16,32,64",
+                     help="fmm_leaf_size (SOURCE tree) spec (default: 8,16,32,64)")
+    fmm.add_argument("--fmm-tleaf", default="128,256",
+                     help="fmm_target_leaf_size spec; 0 follows --fmm-leaf "
+                          "(default: 128,256). Capped at FMM_BDIM=256 by the "
+                          "energy entry points")
     fmm.add_argument("--fmm-repeats", type=int, default=3,
                      help="timed repeats per configuration (default: 3)")
 
@@ -574,13 +586,15 @@ def run_fmm_sweep(folder, args):
         "fmm_mac": None,
         "fmm_multipole_order": None,
         "fmm_leaf_size": None,
+        "fmm_target_leaf_size": None,
         "energy_dump": prefix,
     }
 
     replay_cmd = list(args.launcher) + \
                  ["mpirun", "-n", str(args.np), replay, prefix,
                   "--mac", args.fmm_mac, "--order", args.fmm_order,
-                  "--leaf", args.fmm_leaf, "--repeats", str(args.fmm_repeats),
+                  "--leaf", args.fmm_leaf, "--tleaf", args.fmm_tleaf,
+                  "--repeats", str(args.fmm_repeats),
                   "--csv", out_csv]
 
     if args.dry_run:
@@ -715,6 +729,22 @@ def run_folder(folder, args):
         os.makedirs(log_dir, exist_ok=True)
 
     new_file = not os.path.exists(out_csv)
+    if not new_file:
+        # The header is only written for a new file, so appending to a CSV produced by an
+        # older schema (before fmm_target_leaf_size split off fmm_leaf_size) would write
+        # every subsequent value one column to the left -- silently, and only detectable
+        # later as nonsense timings. Compare and refuse instead.
+        with open(out_csv, newline="") as fh:
+            existing = next(csv.reader(fh), None)
+        if existing is not None and existing != FIELDNAMES:
+            missing = [c for c in FIELDNAMES if c not in existing]
+            print("error: {} was written with a different column set; appending would "
+                  "misalign\n       every row. Missing here: {}\n"
+                  "       Move it aside, or pass -o with a new path."
+                  .format(out_csv, ", ".join(missing) or "(column order differs)"),
+                  file=sys.stderr)
+            sys.exit(1)
+
     csv_fh = open(out_csv, "a", newline="")
     writer = csv.DictWriter(csv_fh, fieldnames=FIELDNAMES, extrasaction="ignore")
     if new_file:
