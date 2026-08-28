@@ -68,14 +68,19 @@ void fmm_free_tree(fmm_tree *tree);
  *   h_flux  : host ptr, num_pts doubles (per-point flux weight)
  *   target_leaf_size : max points per leaf of the target tree built here. 0 follows the
  *             source tree's leaf_size (the historical single-knob behaviour). Clamped to
- *             FMM_BDIM, since one block serves one target leaf at one point per thread.
+ *             FMM_MAX_TLEAF (with a warning) -- a memory bound, no longer a block-width one:
+ *             l2p_p2p_kernel strides, so a leaf may exceed the block it is served by.
  *             It is a per-call parameter, not a property of the atom tree: polarization
  *             and ionic build DIFFERENT target trees over different point sets (on 6VYB
  *             the ionic vertex set is ~1.6x the polarization set), so they need not share
- *             a value. Raising it cuts the target box count and so the M2L pair count,
- *             but enlarges the target box, which is the radius over which each leaf's
- *             local expansion must stay accurate -- so it trades speed against accuracy,
- *             and fmm_ionic_energy pays that trade harder (see its note).
+ *             a value. Raising it cuts the target box count and so the M2L pair count.
+ *             It also grows r_A in the MAC, (r_A + r_B) < theta*R, so it does move the
+ *             near/far boundary -- but MEASURED (test1/sweep2.csv) that is not an accuracy
+ *             trade: tgt 256 beat tgt 128 on time in all 32 matched mac/p/src pairs, and
+ *             on ionic accuracy in 22 of them. Accuracy is owned by theta. Over the same
+ *             grid, theta 0.3->0.6 moves the absolute energy error 558-2313x while
+ *             src_leaf 8->64 spreads it only 2.0-2.9x -- the leaf sizes place the work,
+ *             theta sets the error.
  * (host pointers are uploaded internally, matching the existing _dev wrappers)
  */
 double fmm_polarization_energy(fmm_tree *tree,
@@ -92,13 +97,12 @@ double fmm_polarization_energy(fmm_tree *tree,
  *   h_norms       : host ptr, 3*num_tri_verts doubles (vertex normals)
  *   h_phi_sup     : host ptr, num_tri_verts doubles (interpolated surface potential)
  *   h_area        : host ptr, num_tri_verts/3 doubles (per-triangle area)
- *   target_leaf_size : as in fmm_polarization_energy, and deliberately a separate
- *                 argument. This path evaluates E = -grad Phi, so L2P differentiates the
- *                 local expansion; a derivative of a truncated expansion converges one
- *                 order slower than the expansion itself. Enlarging the target leaf grows
- *                 the box radius the expansion must cover, so the ionic term loses
- *                 accuracy faster than the polarization term at the same target leaf
- *                 size. Expect to need a smaller value here than for polarization.
+ *   target_leaf_size : as in fmm_polarization_energy, and a separate argument because the
+ *                 two target trees are different point sets -- not because ionic wants a
+ *                 smaller value. Measured on 6VYB, the ionic vertex set packs denser than
+ *                 the polarization one (mean leaf radius 1.55 vs 1.98 at leaf 256), so if
+ *                 anything it tolerates a LARGER leaf. Raising it 128 -> 256 measured 2x
+ *                 BETTER ionic accuracy in geometric mean over 32 matched configurations.
  */
 double fmm_ionic_energy(fmm_tree *tree,
                         int num_tri_verts,
@@ -148,18 +152,27 @@ static inline void check_cuda(cudaError_t err, const char *msg, int line) {
 //  differentiation of the potential expansion (see solid_harmonics / dual),
 //  so it needs no expansion above order p.
 // ====================================================================
-#define FMM_MAX_P        10
-#define FMM_MAX_2P       (2 * FMM_MAX_P)        // 20; M2L builds irregular harmonics to order 2p
+// Raised 10 -> 12 (2026-08-28). At theta=0.4 the FMM error was 2.01e-10 on 6VYB, level with the
+// solver's own discretization floor (~1.5e-10); since error goes as theta^(p+1), each extra order
+// buys a factor of theta. p=11 lands ~0.8e-10 for ~1.2-1.5x on the FAR-field terms only -- P2P is
+// p-independent, and at large target leaves the work has largely collapsed into P2P.
+//
+// WATCH THE SPILL. l2p_p2p_kernel<ionic,P> is STACK:0 through p=9 and STACK:144 at p=10: the
+// register cliff is already behind us at 10, but it deepens with p. The cause is the dual type
+// (4 doubles per value) in l2p_contract, not the harmonic count -- the same recurrence in plain
+// double (<pol,10>) spills only 24. Check cuobjdump -res-usage after changing this.
+#define FMM_MAX_P        12
+#define FMM_MAX_2P       (2 * FMM_MAX_P)        // 24; M2L builds irregular harmonics to order 2p
 // Highest factorial index needed. M2L (Eq.17) and the order-2p solid harmonics both touch
 // (l+|q|) with l <= 2p, |q| <= l, hence up to 4p:  A_{j+n}^{m-k} and sqrt((n-m)!/(n+m)!) at n=2p.
-#define FMM_FACT_MAX     (4 * FMM_MAX_P)        // 40
+#define FMM_FACT_MAX     (4 * FMM_MAX_P)        // 48
 
 // # complex moments per node for orders 0..p, m in [0,n] (the stored m>=0 half).
 __host__ __device__ constexpr int nmom_sph(int p) { return (p + 1) * (p + 2) / 2; }
 // # doubles per node = 2 * complex count (interleaved re,im at slot s -> [2s],[2s+1]).
 __host__ __device__ constexpr int comp_sph(int p) { return (p + 1) * (p + 2); }
-#define FMM_NMOM_MAX   nmom_sph(FMM_MAX_P)    // 66  (order-p harmonic buffer)
-#define FMM_NMOM_2MAX  nmom_sph(FMM_MAX_2P)   // 231 (order-2p harmonic buffer, M2L only)
+#define FMM_NMOM_MAX   nmom_sph(FMM_MAX_P)    // 91  (order-p harmonic buffer)
+#define FMM_NMOM_2MAX  nmom_sph(FMM_MAX_2P)   // 325 (order-2p harmonic buffer, M2L only)
 
 // runtime doubles-per-node for a given order (host alloc / fmm_tree.comp)
 __host__ __device__ __forceinline__ int comp_of(int p) { return comp_sph(p); }
@@ -405,13 +418,26 @@ __device__ __forceinline__ double atomicMaxDouble(double *addr, double val) {
        : __longlong_as_double(atomicMax((long long *)addr, i));
 }
 
-// Upper bound on the target leaf size, and hence on the leaf-kernel block width. The tleaf locals in
-// fmm_polarization_energy / fmm_ionic_energy clamp to this, so a leaf never holds more than FMM_BDIM
-// points and one block always covers a leaf -- one target point per thread in the fused L2P+P2P
-// kernel. Only the TARGET trees are capped; the source leaf size is unconstrained by this.
-// This is a CAP, not the launch width: the actual width is ceil(tleaf/32)*32. Pinning the block at 256
-// while fmm_leaf_size was 64 left ~84% of every block's threads permanently inactive.
-constexpr int FMM_BDIM      = 256;
+// These two used to be one constant (FMM_BDIM), which is why the last config sweep found its
+// "optimum" sitting exactly on it. They answer unrelated questions and are now separate.
+//
+// FMM_L2P_BLOCK -- the launch width of the fused L2P+P2P kernel. A REGISTER bound: a block must
+// fit in one SM's register file, so on sm_86 (65,536 regs/SM) the ionic instantiation at 96
+// regs/thread admits at most 65536/96 = 682 threads. 1024 would fail to launch with
+// cudaErrorLaunchOutOfResources -- and only for ionic, since the 42-reg polarization
+// instantiation would fit, which would have made it a confusing failure. The actual width is
+// min(ceil(tleaf/32)*32, FMM_L2P_BLOCK): narrower blocks for small leaves, since pinning it at
+// 256 while the leaf held 64 points left ~84% of every block's threads idle.
+//
+// FMM_MAX_TLEAF -- the cap on TARGET leaf capacity (the tleaf locals in fmm_polarization_energy /
+// fmm_ionic_energy clamp to it; source leaves are unconstrained). Now a MEMORY/occupancy choice
+// rather than a hardware one: since l2p_p2p_kernel strides, threads own >= 1 point each and a
+// leaf may exceed the block width freely.
+constexpr int FMM_L2P_BLOCK = 256;
+constexpr int FMM_MAX_TLEAF = 4096;   // headroom, NOT a recommendation -- 1024 is the measured
+                                      // optimum so far. Set above the useful range on purpose so
+                                      // the sweep can show tgt=2048 is worse, making 1024 an
+                                      // interior optimum rather than a value pinned to a constant.
 
 #endif  // __CUDACC__
 

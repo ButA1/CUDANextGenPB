@@ -974,8 +974,8 @@ poisson_boltzmann::parse_options (int argc, char **argv)
   energy_method = g2 ( (alg_options + "energy_method").c_str (), 0);
   fmm_mac = g2 ( (alg_options + "fmm_mac").c_str (), 0.4);
   fmm_multipole_order = g2 ( (alg_options + "fmm_multipole_order").c_str (), 6);
-  fmm_leaf_size = g2 ( (alg_options + "fmm_leaf_size").c_str (), 32);
-  fmm_target_leaf_size = g2 ( (alg_options + "fmm_target_leaf_size").c_str (), 0);
+  fmm_leaf_size = g2 ( (alg_options + "fmm_leaf_size").c_str (), 16);
+  fmm_target_leaf_size = g2 ( (alg_options + "fmm_target_leaf_size").c_str (), 1024);
   fmm_ionic_target_leaf_size = g2 ( (alg_options + "fmm_ionic_target_leaf_size").c_str (), 0);
   energy_dump = g2 ( (alg_options + "energy_dump").c_str (), "");
 

@@ -567,20 +567,55 @@ __global__ void summarize_aabb_kernel(int N,
   }
 }
 
-// Mark the leaf-size frontier: topmost nodes whose covered point count is
-// <= leaf_size (the root counts as having an infinite-size parent). These
-// nodes partition all target points and become the per-block leaf cells.
-__global__ void mark_frontier_kernel(int n_nodes, int N, int leaf_size,
+// ====================================================================
+//  Leaf predicate -- ONE definition, three consumers.
+//
+//  "Is node v terminal?" is asked in three places that MUST agree, or the frontier (which
+//  points a leaf covers), the box set (which nodes carry moments) and the pair traversal
+//  (where descent stops) end up describing different cuts of the same tree, and a moment
+//  that is read goes missing: mark_frontier_kernel, mark_box_kernel, fmm_pair_kernel.
+//
+//  The cut is by POINT COUNT. It must be MONOTONE DOWNWARD so that "topmost node satisfying
+//  it" is a well-defined partition of the points, and cnt is: strictly decreasing down the
+//  tree. A single-point node has cnt == 1 and so always terminates -- descent cannot run off
+//  the bottom of the tree. The count is also what bounds points-per-leaf, which both leaf
+//  kernels need in order to size their work.
+//
+//  A radius cut (leaf when the box half-diagonal falls under some r*) was built and REJECTED
+//  on measurement, not taste. The idea was that the MAC reads radii, so radii are what a cut
+//  should control -- and the radius distribution does have a long tail (max is 2.9-3.9x the
+//  mean). But report_p2p_tail below showed the tail carries only 13.9-22.8% of near-field pair
+//  work against a proportional 10%, across two molecules and both target trees. The reason is
+//  that a count cut only opens a big box where the region is SPARSE, and a sparse region has
+//  few source boxes near it: big box, empty neighbourhood. The two effects cancel, so radius
+//  is a poor proxy for near-field work and capping it wins at most ~3% of wall clock before
+//  paying for the extra leaves it creates. Do not rebuild this without new evidence.
+// ====================================================================
+__device__ __forceinline__ double fmm_node_radius(const double *__restrict__ mn,
+                                                  const double *__restrict__ mx, int v) {
+  double ex = mx[3*v]   - mn[3*v];
+  double ey = mx[3*v+1] - mn[3*v+1];
+  double ez = mx[3*v+2] - mn[3*v+2];
+  return 0.5 * sqrt(ex*ex + ey*ey + ez*ez);   // half-diagonal -- the radius the MAC compares
+}
+
+__device__ __forceinline__ bool fmm_is_leaf(int cnt, int cap) {
+  return cnt <= cap;
+}
+
+// Mark the leaf frontier: topmost nodes satisfying fmm_is_leaf (the root counts as having a
+// non-leaf parent). These nodes partition all target points and become the per-block leaf cells.
+__global__ void mark_frontier_kernel(int n_nodes, int leaf_size,
                                      const int *__restrict__ first,
                                      const int *__restrict__ last,
                                      const int *__restrict__ parent,
                                      int *__restrict__ flag) {
   int v = blockIdx.x * blockDim.x + threadIdx.x;
   if (v >= n_nodes) return;
-  int cnt = last[v] - first[v] + 1;
   int par = parent[v];
-  int pcnt = (par >= 0) ? (last[par] - first[par] + 1) : (N + 1);
-  flag[v] = (cnt <= leaf_size && (par < 0 || pcnt > leaf_size)) ? 1 : 0;
+  bool me       = fmm_is_leaf(last[v] - first[v] + 1, leaf_size);
+  bool par_leaf = (par >= 0) && fmm_is_leaf(last[par] - first[par] + 1, leaf_size);
+  flag[v] = (me && !par_leaf) ? 1 : 0;
 }
 
 // Fill out[i] = i (node-id source for the frontier compaction).
@@ -643,13 +678,13 @@ __device__ __forceinline__ T l2p_contract(const double* __restrict__ L, T x, T y
 //  scatter use the original (caller) point order via tgt.d_orig.
 // ====================================================================
 
-// P2P drain: each active thread direct-sums the terminal-leaf list into its point.
+// P2P drain: direct-sum the terminal-leaf list into one target point. The caller's stride loop
+// decides which points exist, so there is no inactive-thread case to guard here.
 template<bool FIELD>
 __device__ void fmm_drain_p2p(const fmm_tree &src,
-                                             const int *__restrict__ list, int n, bool active,
+                                             const int *__restrict__ list, int n,
                                              double px, double py, double pz,
                                              double &phi, double &gx, double &gy, double &gz) {
-  if (!active) return;
   for (int j = 0; j < n; ++j) {
     int B = list[j];
     int b0 = src.d_first[B], b1 = src.d_last[B];
@@ -682,7 +717,7 @@ __global__ void l2p_p2p_kernel(fmm_tree src, fmm_target_tree tgt,
                                const double *__restrict__ area,
                                double inv_4pi,
                                double *__restrict__ partial) {
-  // ---- this block's target leaf cell ----
+  // ---- this block's target leaf cell (loop-invariant: hoisted above the stride loop) ----
   int A   = tgt.d_leaf_nodes[blockIdx.x];
   int a0  = tgt.d_first[A];
   int cnt = tgt.d_last[A] - a0 + 1;
@@ -692,22 +727,31 @@ __global__ void l2p_p2p_kernel(fmm_tree src, fmm_target_tree tgt,
   double Tcy = 0.5*(tgt.d_min[3*A+1] + tgt.d_max[3*A+1]);
   double Tcz = 0.5*(tgt.d_min[3*A+2] + tgt.d_max[3*A+2]);
 
-  // ---- this thread's target point (one per thread; cnt <= leaf_size <= blockDim) ----
-  bool active = (threadIdx.x < cnt);
-  int  my = active ? (a0 + threadIdx.x) : -1;
-  double px = 0.0, py = 0.0, pz = 0.0;
-  if (active) { px = tgt.d_pos[3*my]; py = tgt.d_pos[3*my+1]; pz = tgt.d_pos[3*my+2]; }
-  double phi = 0.0, gx = 0.0, gy = 0.0, gz = 0.0;
-
-  // ---- near field: direct P2P over this leaf's CSR list of near source leaves ----
+  // this leaf's near source leaves (CSR segment) and its complete local expansion
   int p0 = tgt.d_p2p_off[A], p1 = tgt.d_p2p_off[A + 1];
-  fmm_drain_p2p<FIELD>(src, tgt.d_p2p_val + p0, p1 - p0, active, px, py, pz, phi, gx, gy, gz);
+  const int *plist  = tgt.d_p2p_val + p0;
+  int        pn     = p1 - p0;
+  const double *L   = tgt.d_local + (size_t)tgt.d_box_slot[A] * tgt.comp;   // A = frontier box
 
-  // ---- L2P: evaluate this leaf's complete far-field local expansion d_local[A] at each
-  // target point (relative to the leaf center) and add it to the per-point P2P near field.
-  // Regular solid harmonics R_j^k of (point - Tc); field via dual-AD R (order p). ----
-  if (active) {
-    const double *L = tgt.d_local + (size_t)tgt.d_box_slot[A] * tgt.comp;   // A = frontier box
+  // ---- stride over this leaf's target points, blockDim at a time ----
+  // Threads own >= 1 point each, so the block width no longer has to cover the leaf: it is
+  // FMM_L2P_BLOCK (a register/occupancy choice) while leaf capacity is FMM_MAX_TLEAF (a memory
+  // choice). Same pattern as src_p2m_kernel. Targets stay in the OUTER loop deliberately --
+  // hoisting them inside to reuse each source point across a thread's targets would need ~4
+  // live copies of (px,py,pz,phi,gx,gy,gz) on a kernel already at 96 registers, and would buy
+  // nothing: this kernel measures 87.5% FP64 pipe at 2.37% memory throughput, so the source
+  // loads are not the constraint.
+  for (int t = threadIdx.x; t < cnt; t += blockDim.x) {
+    int my = a0 + t;
+    double px = tgt.d_pos[3*my], py = tgt.d_pos[3*my+1], pz = tgt.d_pos[3*my+2];
+    double phi = 0.0, gx = 0.0, gy = 0.0, gz = 0.0;
+
+    // ---- near field: direct P2P over this leaf's list of near source leaves ----
+    fmm_drain_p2p<FIELD>(src, plist, pn, px, py, pz, phi, gx, gy, gz);
+
+    // ---- L2P: evaluate this leaf's complete far-field local expansion d_local[A] at this
+    // target point (relative to the leaf center) and add it to the P2P near field.
+    // Regular solid harmonics R_j^k of (point - Tc); field via dual-AD R (order p). ----
     double Rxp = px - Tcx, Ryp = py - Tcy, Rzp = pz - Tcz;
     if constexpr (FIELD) {
       dual phi_l = l2p_contract<P, dual>(L, dual(Rxp, 1.0, 0.0, 0.0),
@@ -717,10 +761,8 @@ __global__ void l2p_p2p_kernel(fmm_tree src, fmm_target_tree tgt,
     } else {
       phi += l2p_contract<P, double>(L, Rxp, Ryp, Rzp);
     }
-  }
 
-  // ---- apply the term weight and scatter back to original point order ----
-  if (active) {
+    // ---- apply the term weight and scatter back to original point order ----
     int orig = tgt.d_orig[my];
     if constexpr (FIELD) {
       double dot    = gx*norms[3*orig] + gy*norms[3*orig+1] + gz*norms[3*orig+2];
@@ -734,8 +776,8 @@ __global__ void l2p_p2p_kernel(fmm_tree src, fmm_target_tree tgt,
 
 // Dispatch the fused L2P+P2P leaf kernel for the runtime multipole order p. l2p_p2p_kernel<FIELD,P>
 // is a distinct instantiation per order P (its harmonic buffers are sized at compile time), so we
-// switch p -> P here. One block per target leaf; block must be >= the target leaf_size so every
-// leaf point maps to a distinct thread.
+// switch p -> P here. One block per target leaf; the block strides over the leaf's points, so it
+// may be narrower than the leaf (>1 point per thread) -- see resolve_tleaf.
 template<bool FIELD>
 static void launch_l2p_p2p(int p, int grid, int block,
                            const fmm_tree &src, const fmm_target_tree &tgt,
@@ -752,7 +794,9 @@ static void launch_l2p_p2p(int p, int grid, int block,
     case 7: l2p_p2p_kernel<FIELD,7 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
     case 8: l2p_p2p_kernel<FIELD,8 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
     case 9: l2p_p2p_kernel<FIELD,9 ><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
-    default: l2p_p2p_kernel<FIELD,10><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    case 10: l2p_p2p_kernel<FIELD,10><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    case 11: l2p_p2p_kernel<FIELD,11><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
+    default: l2p_p2p_kernel<FIELD,12><<<grid, block>>>(src, tgt, flux, norms, phi_sup, area, inv_4pi, partial); break;
   }
 }
 
@@ -781,9 +825,10 @@ __global__ void node_depth_kernel(int n_nodes, const int *__restrict__ parent,
   depth[v] = d;
 }
 
-// Flag the "box" nodes that carry a local expansion: the root and every node whose PARENT
-// holds more than leaf_size points (i.e., the leaf-size frontier + all strict ancestors --
-// exactly the target nodes the pair traversal can reach before stopping). flag[v] in {0,1}.
+// Flag the "box" nodes that carry a local expansion: the root and every node whose PARENT is
+// not itself a leaf (i.e., the frontier + all strict ancestors -- exactly the target nodes the
+// pair traversal can reach before stopping). Defining it as the complement of the PARENT's leaf
+// test is what keeps that characterisation true for ANY leaf predicate. flag[v] in {0,1}.
 __global__ void mark_box_kernel(int n_nodes, int leaf_size,
                                 const int *__restrict__ parent,
                                 const int *__restrict__ first, const int *__restrict__ last,
@@ -791,7 +836,8 @@ __global__ void mark_box_kernel(int n_nodes, int leaf_size,
   int v = blockIdx.x * blockDim.x + threadIdx.x;
   if (v >= n_nodes) return;
   int u = parent[v];
-  flag[v] = (u < 0) || ((last[u] - first[u] + 1) > leaf_size) ? 1 : 0;
+  bool par_leaf = (u >= 0) && fmm_is_leaf(last[u] - first[u] + 1, leaf_size);
+  flag[v] = par_leaf ? 0 : 1;
 }
 
 // Turn the exclusive-prefix-sum of the box flags into a compact slot map and a masked depth
@@ -937,13 +983,12 @@ static void tt_internal_aabb(fmm_target_tree *tt, int tpb,
 
 // Stage 5: mark + compact the leaf-size frontier -> tt->d_leaf_nodes (+ tt->n_leaves).
 static void tt_frontier(fmm_target_tree *tt, int tpb) {
-  const int N  = tt->N;
   const int nn = tt->n_nodes;
   int fr_blocks = (nn + tpb - 1) / tpb;
 
   int *d_frontier;
   CUDA_CHECK(cudaMalloc(&d_frontier, nn * sizeof(int)));
-  mark_frontier_kernel<<<fr_blocks, tpb>>>(nn, N, tt->leaf_size,
+  mark_frontier_kernel<<<fr_blocks, tpb>>>(nn, tt->leaf_size,
                                            tt->d_first, tt->d_last, tt->d_parent,
                                            d_frontier);
   CUDA_CHECK(cudaGetLastError());
@@ -1138,8 +1183,8 @@ __global__ void fmm_pair_kernel(fmm_tree src, fmm_target_tree tgt, double theta,
   }
   int acnt = tgt.d_last[A] - tgt.d_first[A] + 1;
   int bcnt = src.d_last[B] - src.d_first[B] + 1;
-  bool A_leaf = (A >= tgt.N - 1) || (acnt <= tgt.leaf_size);
-  bool B_leaf = (B >= src.N - 1) || (bcnt <= src.leaf_size);
+  bool A_leaf = (A >= tgt.N - 1) || fmm_is_leaf(acnt, tgt.leaf_size);
+  bool B_leaf = (B >= src.N - 1) || fmm_is_leaf(bcnt, src.leaf_size);
   if (A_leaf && B_leaf) {                               // near pair -> P2P list (keyed by target leaf A)
     int o = atomicAdd(n_p2p, 1);
     if (o < cap_p2p) p2p[o] = make_int2(A, B);
@@ -1372,7 +1417,9 @@ static void fmm_build_local(const fmm_tree &src, fmm_target_tree &tt, double the
     case 7: fmm_translations<7>(src, tt, d_m2l, n_m2l); break;
     case 8: fmm_translations<8>(src, tt, d_m2l, n_m2l); break;
     case 9: fmm_translations<9>(src, tt, d_m2l, n_m2l); break;
-    default: fmm_translations<10>(src, tt, d_m2l, n_m2l); break;
+    case 10: fmm_translations<10>(src, tt, d_m2l, n_m2l); break;
+    case 11: fmm_translations<11>(src, tt, d_m2l, n_m2l); break;
+    default: fmm_translations<12>(src, tt, d_m2l, n_m2l); break;
   }
   cudaFree(d_m2l);
 }
@@ -1523,7 +1570,6 @@ static void src_reorder(fmm_tree *t, int tpb, const int *d_idx_sorted,
 // here would make the box set disagree with fmm_pair_kernel's descent stop and index
 // slot -1.
 static void src_box_storage(fmm_tree *t, int tpb) {
-  const int N  = t->N;
   const int nn = t->n_nodes;
   int fr_blocks = (nn + tpb - 1) / tpb;
 
@@ -1560,7 +1606,7 @@ static void src_box_storage(fmm_tree *t, int tpb) {
   CUDA_CHECK(cudaMalloc(&d_frontier, nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_ids,      nn * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_num,           sizeof(int)));
-  mark_frontier_kernel<<<fr_blocks, tpb>>>(nn, N, t->leaf_size,
+  mark_frontier_kernel<<<fr_blocks, tpb>>>(nn, t->leaf_size,
                                            t->d_first, t->d_last, t->d_parent, d_frontier);
   CUDA_CHECK(cudaGetLastError());
   iota_kernel<<<fr_blocks, tpb>>>(nn, d_ids);
@@ -1633,7 +1679,9 @@ static void src_box_moments(fmm_tree *t, int tpb, int p) {
     case 7: src_p2m_kernel<7 ><<<t->n_leaves, p2m_blk>>>(*t); break;
     case 8: src_p2m_kernel<8 ><<<t->n_leaves, p2m_blk>>>(*t); break;
     case 9: src_p2m_kernel<9 ><<<t->n_leaves, p2m_blk>>>(*t); break;
-    default: src_p2m_kernel<10><<<t->n_leaves, p2m_blk>>>(*t); break;
+    case 10: src_p2m_kernel<10><<<t->n_leaves, p2m_blk>>>(*t); break;
+    case 11: src_p2m_kernel<11><<<t->n_leaves, p2m_blk>>>(*t); break;
+    default: src_p2m_kernel<12><<<t->n_leaves, p2m_blk>>>(*t); break;
   }
   CUDA_CHECK(cudaGetLastError());
 
@@ -1654,10 +1702,178 @@ static void src_box_moments(fmm_tree *t, int tpb, int p) {
     case 7: src_m2m_kernel<7 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
     case 8: src_m2m_kernel<8 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
     case 9: src_m2m_kernel<9 ><<<lf_blocks, tpb>>>(*t, d_bflags); break;
-    default: src_m2m_kernel<10><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    case 10: src_m2m_kernel<10><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    case 11: src_m2m_kernel<11><<<lf_blocks, tpb>>>(*t, d_bflags); break;
+    default: src_m2m_kernel<12><<<lf_blocks, tpb>>>(*t, d_bflags); break;
   }
   CUDA_CHECK(cudaGetLastError());
   cudaFree(d_bflags);
+}
+
+// ====================================================================
+//  Leaf-box size diagnostics.  Opt-in via NGPB_FMM_LEAF_STATS=1, because the replay
+//  sweep rebuilds both trees per configuration per repeat and would otherwise flood.
+//
+//  r_A and r_B in the MAC -- (r_A + r_B) < theta * R -- are the half-diagonals of the
+//  two leaf boxes, so the LEAF SIZES, not theta alone, decide where the near/far
+//  boundary lands. What matters operationally is their ratio: while one tree's leaves
+//  are much the larger, growing the OTHER tree's leaves barely moves (r_A + r_B), so it
+//  cuts that tree's box count -- and hence its M2L pair count -- at almost no near-field
+//  cost. That free direction closes only as the two radii approach each other.
+//
+//  The ratio has to be measured, not predicted from the leaf sizes, because the two
+//  trees scale differently: source cells fill a VOLUME (r ~ leaf^(1/3)) while target
+//  cells tile a SURFACE (r ~ leaf^(1/2)).
+// ====================================================================
+__global__ void leaf_radius_kernel(const double *__restrict__ d_min,
+                                   const double *__restrict__ d_max,
+                                   const int *__restrict__ leaves, int n,
+                                   double *__restrict__ out) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  out[i] = fmm_node_radius(d_min, d_max, leaves[i]);
+}
+
+// Mean leaf half-diagonal of the source tree, kept so the target-side report can print the
+// r_A / r_B split that actually drives the MAC. -1 = not measured yet.
+static double g_src_leaf_r_mean = -1.0;
+
+static bool fmm_leaf_stats_on() {
+  const char *e = std::getenv("NGPB_FMM_LEAF_STATS");
+  return e && std::atoi(e) != 0;
+}
+
+// Returns the mean leaf half-diagonal, or -1 for an empty tree.
+static double report_leaf_radii(const char *label,
+                                const double *d_min, const double *d_max,
+                                const int *d_leaves, int n_leaves, int leaf_size) {
+  if (n_leaves <= 0) return -1.0;
+
+  double *d_r = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_r, (size_t)n_leaves * sizeof(double)));
+  int tpb = 256, g = (n_leaves + tpb - 1) / tpb;
+  leaf_radius_kernel<<<g, tpb>>>(d_min, d_max, d_leaves, n_leaves, d_r);
+  CUDA_CHECK(cudaGetLastError());
+
+  std::vector<double> r((size_t)n_leaves);
+  CUDA_CHECK(cudaMemcpy(r.data(), d_r, (size_t)n_leaves * sizeof(double),
+                        cudaMemcpyDeviceToHost));
+  cudaFree(d_r);
+
+  double sum = 0.0;
+  for (double v : r) sum += v;
+  const double mean = sum / (double)n_leaves;
+
+  // Report the spread too: a tight AABB tree over a molecular surface has a long tail of
+  // sparse cells, and a mean that sits far from the median means the single r_A the MAC
+  // sees varies a lot across the tree.
+  std::sort(r.begin(), r.end());
+  const double med = r[(size_t)n_leaves / 2];
+  const double p90 = r[(size_t)((double)n_leaves * 0.9)];
+
+  fprintf(stderr, "[fmm] leaf radii %-12s n=%-8d leaf_size=%-4d  mean=%.4g median=%.4g "
+                  "p90=%.4g min=%.4g max=%.4g\n",
+          label, n_leaves, leaf_size, mean, med, p90, r.front(), r.back());
+  return mean;
+}
+
+static void report_mac_split(double rA_mean) {
+  if (rA_mean < 0.0 || g_src_leaf_r_mean < 0.0) return;
+  const double rB = g_src_leaf_r_mean, sum = rA_mean + rB;
+  if (!(sum > 0.0)) return;
+  fprintf(stderr, "[fmm] leaf radii %-12s rA=%.4g rB=%.4g  rA/(rA+rB)=%.1f%%  "
+                  "(pair admitted when R > (rA+rB)/theta)\n",
+          "MAC split", rA_mean, rB, 100.0 * rA_mean / sum);
+}
+
+// Per-leaf near-field work: (points in this leaf) * (source points reachable through its P2P
+// list). That product is the actual P2P pair count the leaf kernel will execute for cell A.
+__global__ void leaf_p2p_work_kernel(fmm_tree src, fmm_target_tree tgt,
+                                     double *__restrict__ out_r,
+                                     double *__restrict__ out_w) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= tgt.n_leaves) return;
+  int A = tgt.d_leaf_nodes[i];
+  out_r[i] = fmm_node_radius(tgt.d_min, tgt.d_max, A);
+  long long s = 0;
+  for (int j = tgt.d_p2p_off[A]; j < tgt.d_p2p_off[A + 1]; ++j) {
+    int B = tgt.d_p2p_val[j];
+    s += src.d_last[B] - src.d_first[B] + 1;
+  }
+  out_w[i] = (double)(tgt.d_last[A] - tgt.d_first[A] + 1) * (double)s;
+}
+
+// Does the leaf-radius fat tail actually cost anything?
+//
+// The radius distribution is tight for most leaves but has a thin upper tail (measured p90 ~1.4x
+// the mean against a max of 2.7-4.8x). Those outliers come from SPARSE regions: a count-based cut
+// has to open a big box to gather leaf_size points where the surface is thin. A big box fails the
+// MAC against more source boxes, so it carries a longer P2P list -- and pays it for every point it
+// owns. Near-field cost grows with (r_A + r_B)^3, so the tail could carry far more than its share.
+//
+// "Could" is the whole question, and it decides whether a radius-based leaf cut (r*) is worth
+// building at all. Decision rule, fixed BEFORE looking: top decile by radius carrying >35% of the
+// pair work means r* has something to win; near 10% is proportional and there is nothing there.
+static void report_p2p_tail(const char *label, const fmm_tree &src, const fmm_target_tree &tgt) {
+  const int n = tgt.n_leaves;
+  if (n <= 0 || tgt.d_p2p_off == nullptr) return;
+
+  double *d_r = nullptr, *d_w = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_r, (size_t)n * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_w, (size_t)n * sizeof(double)));
+  int tpb = 256, g = (n + tpb - 1) / tpb;
+  leaf_p2p_work_kernel<<<g, tpb>>>(src, tgt, d_r, d_w);
+  CUDA_CHECK(cudaGetLastError());
+
+  std::vector<double> r((size_t)n), w((size_t)n);
+  CUDA_CHECK(cudaMemcpy(r.data(), d_r, (size_t)n * sizeof(double), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(w.data(), d_w, (size_t)n * sizeof(double), cudaMemcpyDeviceToHost));
+  cudaFree(d_r); cudaFree(d_w);
+
+  double total = 0.0;
+  for (double v : w) total += v;
+  if (!(total > 0.0)) return;
+
+  std::vector<int> idx((size_t)n);                     // leaf ids ordered by ASCENDING radius
+  for (int i = 0; i < n; ++i) idx[i] = i;
+  std::sort(idx.begin(), idx.end(), [&](int a, int b) { return r[a] < r[b]; });
+
+  const int c10 = n - ((n / 10  > 0) ? n / 10  : 1);   // at least one leaf in each bucket
+  const int c1  = n - ((n / 100 > 0) ? n / 100 : 1);
+  double top10 = 0.0, top1 = 0.0;
+  for (int k = c10; k < n; ++k) top10 += w[idx[k]];
+  for (int k = c1;  k < n; ++k) top1  += w[idx[k]];
+
+  fprintf(stderr, "[fmm] p2p tail  %-12s pairs=%.4g  top10%%byR=%.1f%%  top1%%byR=%.1f%%  "
+                  "(proportional = 10%% / 1%%; >35%% at top10%% favours a radius cut)\n",
+          label, total, 100.0 * top10 / total, 100.0 * top1 / total);
+}
+
+// Resolve the target leaf capacity and the leaf-kernel launch width. Shared by both energy
+// entry points because they must agree; they differ only in which point set they build over.
+//
+// The clamp used to be SILENT, which is how the last config sweep came to report tgt=256 as an
+// optimum when it was really just the cap: every measured step toward it helped, and the step
+// past it could not be run. Warn once per rank so that cannot happen again.
+static void resolve_tleaf(int target_leaf_size, int src_leaf_size, int *tleaf, int *block) {
+  int t = (target_leaf_size < 1) ? src_leaf_size : target_leaf_size;   // 0 follows the source
+  if (t > FMM_MAX_TLEAF) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      fprintf(stderr, "[fmm] WARNING: target leaf size %d clamped to FMM_MAX_TLEAF=%d "
+                      "(raise it in include/fmm.h to sweep past this)\n", t, FMM_MAX_TLEAF);
+    }
+    t = FMM_MAX_TLEAF;
+  }
+  if (t < 1) t = 1;
+  *tleaf = t;
+
+  // Launch width: warp granularity, capped at FMM_L2P_BLOCK. A block NARROWER than the leaf is
+  // fine now that l2p_p2p_kernel strides -- it just means >1 point per thread. A block wider
+  // than the leaf is pure idle threads, so track the leaf size on the way up.
+  int b = ((t + 31) / 32) * 32;
+  *block = (b > FMM_L2P_BLOCK) ? FMM_L2P_BLOCK : b;
 }
 
 // ========================== public C API ==========================
@@ -1712,6 +1928,10 @@ void fmm_build_atom_tree(int num_atoms,
   src_box_moments(t, tpb, p);                                            // stages 6-8
 
   CUDA_CHECK(cudaDeviceSynchronize());
+
+  if (fmm_leaf_stats_on())
+    g_src_leaf_r_mean = report_leaf_radii("source", t->d_min, t->d_max,
+                                          t->d_leaf_nodes, t->n_leaves, t->leaf_size);
 }
 
 void fmm_free_tree(fmm_tree *t) {
@@ -1741,24 +1961,21 @@ double fmm_polarization_energy(fmm_tree *src, int num_pts,
   // Target leaf size is this call's own knob, independent of the source leaf size that bounds the
   // P2P descent -- and resolved here, where the target tree is actually built, rather than carried
   // on the atom tree. 0 follows the source leaf size (the historical single-knob behaviour).
-  // Clamped to FMM_BDIM so a leaf never outgrows the block that serves it: the launch width below
-  // is derived from tleaf, so "a block always covers a leaf" is only real if the clamp and the cap
-  // are the same constant.
-  int tleaf = (target_leaf_size < 1) ? src->leaf_size : target_leaf_size;
-  if (tleaf > FMM_BDIM) tleaf = FMM_BDIM;
-  if (tleaf < 1) tleaf = 1;
+  // Capacity is capped at FMM_MAX_TLEAF (a memory choice) and the launch width at FMM_L2P_BLOCK
+  // (a register choice) -- see resolve_tleaf and the two constants in fmm.h.
+  int tleaf, block;
+  resolve_tleaf(target_leaf_size, src->leaf_size, &tleaf, &block);
   fmm_target_tree tt;
   build_target_tree(num_pts, d_V, tleaf, src->p, &tt);
 
-  // Block width tracks the TARGET LEAF SIZE instead of being pinned at FMM_BDIM. One block serves one
-  // leaf and one thread serves one point, so any block wider than tleaf is permanently idle threads:
-  // at fmm_target_leaf_size=64 a 256-thread block leaves ~84% of its threads inactive (mean leaf
-  // fill is ~0.64*tleaf). Rounded up to a whole warp; never exceeds FMM_BDIM because tleaf was
-  // clamped to it in fmm_build_atom_tree, so the ">= target leaf_size" contract still holds.
-  int block = ((tleaf + 31) / 32) * 32;   // one target point per thread; >= target leaf_size
+  if (fmm_leaf_stats_on())
+    report_mac_split(report_leaf_radii("target/pol", tt.d_min, tt.d_max,
+                                       tt.d_leaf_nodes, tt.n_leaves, tt.leaf_size));
+
   int grid  = tt.n_leaves;
   if (grid > 0) {
     fmm_build_local(*src, tt, src->theta);   // M2L+L2L -> d_local (far); P2P CSR (near)
+    if (fmm_leaf_stats_on()) report_p2p_tail("target/pol", *src, tt);   // needs the P2P CSR
     launch_l2p_p2p<false>(src->p, grid, block, *src, tt,
                           d_flux, nullptr, nullptr, nullptr, 0.0, d_partial);
     CUDA_CHECK(cudaGetLastError());
@@ -1790,26 +2007,26 @@ double fmm_ionic_energy(fmm_tree *src, int num_tri_verts,
   CUDA_CHECK(cudaMemcpy(d_area,  h_area,    num_tris       *sizeof(double), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemset(d_partial, 0, num_tri_verts * sizeof(double)));  // any uncovered target -> 0
 
-  // As in fmm_polarization_energy, but note this path differentiates the local expansion (E =
-  // -grad Phi via forward-mode AD in L2P). A derivative of a truncated expansion converges one
-  // order slower than the expansion itself, and enlarging tleaf grows the box radius over which
-  // that expansion has to hold -- so the ionic term degrades faster with tleaf than the
-  // polarization term does. That is why this is a separate argument and not a shared setting.
-  int tleaf = (target_leaf_size < 1) ? src->leaf_size : target_leaf_size;
-  if (tleaf > FMM_BDIM) tleaf = FMM_BDIM;
-  if (tleaf < 1) tleaf = 1;
+  // As in fmm_polarization_energy. It is a separate argument because the two target trees are
+  // different point sets (the ionic vertex set is ~1.6x the polarization one on 6VYB and packs
+  // denser -- measured mean leaf radius 1.55 vs 1.98), not because ionic needs a smaller value.
+  // MEASURED (test1/sweep2.csv, 32 matched mac/p/src pairs): raising tleaf 128 -> 256 makes the
+  // ionic relative error 2x BETTER in geometric mean, better in 22 of 32 pairs. Accuracy is
+  // owned by theta, not by the leaf sizes -- theta 0.3->0.6 moves the absolute energy error
+  // 558-2313x, while src_leaf 8->64 spreads it only 2.0-2.9x.
+  int tleaf, block;
+  resolve_tleaf(target_leaf_size, src->leaf_size, &tleaf, &block);
   fmm_target_tree tt;
   build_target_tree(num_tri_verts, d_vert, tleaf, src->p, &tt);
 
-  // Block width tracks the TARGET LEAF SIZE instead of being pinned at FMM_BDIM. One block serves one
-  // leaf and one thread serves one point, so any block wider than tleaf is permanently idle threads:
-  // at fmm_target_leaf_size=64 a 256-thread block leaves ~84% of its threads inactive (mean leaf
-  // fill is ~0.64*tleaf). Rounded up to a whole warp; never exceeds FMM_BDIM because tleaf was
-  // clamped to it in fmm_build_atom_tree, so the ">= target leaf_size" contract still holds.
-  int block = ((tleaf + 31) / 32) * 32;   // one target point per thread; >= target leaf_size
+  if (fmm_leaf_stats_on())
+    report_mac_split(report_leaf_radii("target/ionic", tt.d_min, tt.d_max,
+                                       tt.d_leaf_nodes, tt.n_leaves, tt.leaf_size));
+
   int grid  = tt.n_leaves;
   if (grid > 0) {
     fmm_build_local(*src, tt, src->theta);   // M2L+L2L -> d_local (far); P2P CSR (near)
+    if (fmm_leaf_stats_on()) report_p2p_tail("target/ionic", *src, tt);  // needs the P2P CSR
     launch_l2p_p2p<true>(src->p, grid, block, *src, tt,
                          nullptr, d_norms, d_phi, d_area, inv_4pi, d_partial);
     CUDA_CHECK(cudaGetLastError());
