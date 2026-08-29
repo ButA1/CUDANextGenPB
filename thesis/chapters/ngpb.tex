@@ -5,8 +5,8 @@ At the time of writing, Next Generation Poisson-Boltzmann (NextGenPB or NGPB for
 It is purposefully modular and built upon free and open libraries, making improvements to individual steps easier, though, as I will explain later, this has to be taken with a grain of salt.
 It is a family member of the grid- or FEM-based solvers, featuring local (de)refinement using the p4est library.
 It uses MPI and MPI-aware mathematical libraries like BIMPP and LIS to scale across parallel architectures, lending itself well to high-performance computing.
-Its main attractions are the use of NanoShaper for surface reconstruction and an enhanced analytical approach, allowing for much more accurate energy calculation, beating out many older LPBE solvers in both accuracy and speed.
-This is an impressive feat that has gained the attention of biomolecular chemists at our technical university, who seek to replace their TAPBS with NGPB.
+Its main attractions are the use of the NanoShaper library for surface reconstruction and an enhanced analytical approach, allowing for much more accurate energy calculation, beating out many older LPBE solvers in both accuracy and speed.
+This is an impressive feat that has gained the attention of biomolecular chemists at our technical university, who seek to replace their existing PBE solver APBS \cite{jurrus2018apbs} with NGPB.
 % yes I actually put that em dash there
 
 To avoid the self-energy singularity, NGPB computes the electrostatic energies individually, where each of them is never evaluated at the atom's center.
@@ -96,16 +96,17 @@ It uses LU factorization to simplify the matrix.
 \section{Submodules}
 \label{sec:nextgenpb-submodules}
 
-The flow of NGPB can be roughly summarized by the following stages:
-\begin{itemize}
+In this section I want to showcase the structure of flow of NGPB.
+It can be roughly summarized into the following stages:
+\begin{enumerate}
     \item Reading inputs
     \item Grid \& surface construction
     \item Matrix assembly
     \item Solving the linear equation
     \item Energy calculation
-\end{itemize}
+\end{enumerate}
 
-\subsection{Input}
+\subsection{Reading Inputs}
 \label{sec:nextgenpb-submodules-input}
 
 NGPB reads in settings and parameters via PRM files, which are given as an argument to the \snakecase{ngpb} command.
@@ -198,6 +199,11 @@ This also means that the coarse region is always cubic.
 P4est maintains a 2:1 level ratio between the fine region and the coarse region, resulting in a transition region, which is always situated outside the fine region.
 This is standard practice with octrees and avoids quadrants that share no vertices with their immediate neighbors.
 
+After the grid construction, NGPB computes the surface of the molecule \snakecase{init_analytical_surf_ns}.
+It does this with NanoShaper, which casts rays in the fine region using the same $1/scale$ grid.
+This also initializes the ray cache.
+Next it constructs the ``epsilon map'' $\varepsilon(\mathbf{r})$ according to Eq.~\ref{eq:dielectric-step-function} for the entire space inside \snakecase{create_markers}.
+
 \subsubsection{Ray Cache}
 
 This is a central component that gets used throughout multiple stages.
@@ -210,18 +216,18 @@ Normals are triplets ordered by the intersection.
 Lastly, \snakecase{crossing_t} also has an \snakecase{init} flag, symbolizing whether the ray has to be recast.
 This is a very efficient representation that is unfortunately not portable to the GPU, due to the binary tree map, whose values are complex structs, not simple types.
 
-It is initialized in the method \snakecase{init_analytical_surf_ns}, where NanoShaper is used to cast rays in the fine region using the same $1/scale$ grid, and the results are finally stored in the cache.
-This happens only on rank 0, leaving the ray cache of the other ranks initially empty.
+It is initialized in the method \snakecase{init_analytical_surf_ns} from the rays cast by NanoShaper during the surface construction. 
+If NGPB is run on multiple MPI ranks, the ray cache is only initialized on rank 0's, leaving it empty on the other ranks.
+Those are later filled in \snakecase{create_markers} through method \snakecase{fill_cache}, which scatters rays from the rank 0 cache to the others. 
 
 Additional rays can be recast individually using \snakecase{compute_ns_inters} or in a batch using \snakecase{compute_pending_rays}.
 The latter goes through the cached rays and uses the \snakecase{init} flag of \snakecase{crossing_t} to determine whether they should be recomputed.
-
-The method \snakecase{fill_cache} then scatters rays from the rank 0 cache. The necessary rays are computed inside \snakecase{create_markers}. It too can call \snakecase{compute_ns_inters} implicitly if requested rays are missing from the cache or are uninitialized.
+\snakecase{create_markers} can also call it implicitly if requested rays are missing from the cache or are uninitialized.
 
 \subsubsection{create\_markers}
 
-This function primarily classifies quadrants as either being inside, outside or on the border of the molecule.
-Its secondary functions are redistribution of ray information to all ranks, and casting additional rays if needed.
+This function classifies quadrants as either being inside, outside or on the border of the molecule, and also sets their respective permittivity in the map.
+Its also redistributes of ray information to all ranks, and casts additional rays if needed.
 For rank 0, it checks whether rays are present in the ray cache using \snakecase{is_in_ns_surf}, which casts a new ray on a miss.
 Additional rays may also be cast for refined meshes, which have quadrants that are smaller than $1/scale$.
 For the remaining ranks, it collects a list of rays that it needs.
@@ -230,23 +236,25 @@ Rank 0 then distributes those rays to the corresponding ranks using \snakecase{f
 \subsection{Matrix Assembly}
 \label{sec:nextgenpb-submodules-matrix-assembly}
 
-This step produces the matrix operator and the right-hand-side (RHS) vector needed for the linear equation.
+In this step NGPB constructs the matrix operator and right-hand-side (RHS) of the LPBE. 
+This is done using \subsubsection{assemble\_system\_matrix} and \snakecase{create\_density\_map} respectively.
 
 \subsubsection{create\_density\_map}
 
-This method computes the RHS of the linear equation from the fixed charge densities.
+This method computes the RHS of the LPBE from the fixed charge densities.
 It calls \snakecase{bim3a_solution_with_ghosts} twice.
+
+\subsubsection{assemble\_system\_matrix}
+
+This method computes the differential operator of the LPBE.
+It allocates the CSR matrix and computes the operator using \snakecase{bim3a_laplacian_frac} in combination with \snakecase{cube_fraction_intersection}.
+It is by far the most memory-intensive step, due to BIMPP's architectural choices explained in \ref{sec:nextgenpb-libraries-bimpp}.
+This step also applies the boundary condition.
 
 \subsubsection{cube\_fraction\_intersection}
 
 This method computes the fraction of each edge that is inside the molecule by looking up the intersections of edge-aligned rays from the ray cache.
 It then takes the last intersection point it finds and computes its length relative to the starting edge vertex, which it then divides by the total edge length.
-
-\subsubsection{assemble\_system\_matrix}
-
-This method allocates the CSR matrix and computes the operator using \snakecase{bim3a_laplacian_frac} in combination with \snakecase{cube_fraction_intersection}.
-It is by far the most memory-intensive step, due to BIMPP's architectural choices explained in \ref{sec:nextgenpb-libraries-bimpp}.
-This step also applies the boundary condition.
 
 \subsection{Solving the Linear Equation}
 \label{sec:nextgenpb-submodules-solve-linear-equation}
