@@ -1,8 +1,11 @@
-\chapter{Alternative Techniques}
-\label{sec:alternative-techniques}
+\chapter{Optimization Techniques}
+\label{sec:optimization-techniques}
+
+Now I want to go over various optimization techniques for N-body systems, and how those have already been applied to solving the PBE faster.
+I also want to go over more general optimization techniques, as well as CUDA specific ones, that I have attempted.
 
 \section{N-Body}
-\label{sec:alternative-techniques-nbody}
+\label{sec:optimization-techniques-nbody}
 Many scientific calculations, from electric forces between electrons to gravitational forces between astral bodies, consist of sums of pairwise interactions between a large number of bodies or particles.
 This class of problems is called ``N-Body''.
 The function describing the individual interaction is called the ``kernel''.
@@ -21,7 +24,7 @@ On the other hand, the nature of the kernels means that N-Body problems are perf
 This works so well, in fact, that naively running kernels in parallel often beats intricate optimizations.
 
 \subsection{Cut-Off}
-\label{sec:alternative-techniques-nbody-cut-off}
+\label{sec:optimization-techniques-nbody-cut-off}
 
 This is the least sophisticated optimization technique that takes the previously mentioned idea to its extreme.
 If two bodies are far enough away, it simply aborts the calculation between these two entirely.
@@ -30,7 +33,7 @@ This technique only makes sense when the result is so small that it lives at the
 This fact relies on the system being very large, which is hardly ever the case.
 
 \subsection{Treecode Barnes-Hut}
-\label{sec:alternative-techniques-nbody-bh}
+\label{sec:optimization-techniques-nbody-bh}
 
 If a cluster of bodies is far enough away from a target body, the cluster could be summarized as a single body that interacts with the target.
 This is the core idea behind Barnes-Hut (BH).
@@ -48,7 +51,7 @@ With that, the acceptance criterion now became the multipole acceptance criterio
 More sophisticated criteria have been developed in order to help increase $\theta$ even further, but had much less of an impact than multipole expansions.
 
 \subsection{Alternative MACs}
-\label{sec:alternative-techniques-alternative-macs}
+\label{sec:optimization-techniques-optimization-macs}
 
 In the paper \cite{salmon1994skeletons}, John Salmon and Michael Warren compared the effectiveness of three different MACs: the classic BH criterion, ``minimum distance'', and ``Bmax''.
 They found that none of these reduced the error to a significant degree and concluded that an increase in multipole expansion order is much more effective.
@@ -56,7 +59,7 @@ They found that none of these reduced the error to a significant degree and conc
 % again I am afraid I didn't do something optimally enough, how does it compare to the doubles sided Bmax?
 
 \subsection{Multipole Expansions}
-\label{sec:alternative-techniques-nbody-multipole-expansions}
+\label{sec:optimization-techniques-nbody-multipole-expansions}
 Multipole expansions are a type of higher-order function expansion.
 One can imagine them as lobe patterns originating from a central point.
 % TODO a picture would be nice
@@ -101,7 +104,7 @@ However, these trade-offs are worth it in FMM due to the lower storage complexit
 A spherical harmonic expansion for the Coulomb potential, as well as the screened potential, is given in the paper ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' \cite{cheng1999fastadaptive}.
 
 \subsection{Fast Multipole Method}
-\label{sec:alternative-techniques-nbody-fmm}
+\label{sec:optimization-techniques-nbody-fmm}
 
 Introduced in 1987 by Leslie Greengard and Vladimir Rokhlin \cite{greengard1987fmm}, the Fast Multipole Method (FMM) takes the idea of Barnes-Hut and expands on it.
 Instead of evaluating the cluster multipole expansion against a single target body (as M2P does), it now also summarizes the targets into clusters as well, called the local expansion.
@@ -124,7 +127,7 @@ Whether two clusters are considered well separated is purely based on whether th
 This approach had already been applied multiple times to the BEM to solve for the electrostatic potential of biomolecular systems \cite{bharadwaj1995fmbem, cheng1999fastadaptive}.
 
 \subsubsection{Dual Tree Traverse}
-\label{sec:alternative-techniques-nbody-fmm-dtt}
+\label{sec:optimization-techniques-nbody-fmm-dtt}
 
 However, there are also alternative approaches like R. Yokota et al.'s dual tree traverse (DTT) FMM \cite{yokota2012hierarchical, yokota2013dualtree}, which classifies interactions using MACs into P2P and M2L interactions.
 For this it constructs two trees: a source- and target tree, and initializes the interaction stack with the two root nodes.
@@ -135,24 +138,11 @@ If none of them are leaves, the pair is tested with the MAC.
 If it passes, the multipole interaction is computed; otherwise, the pair gets pushed to the stack.
 This approach does not require a quad- or octree to work, and is compatible with bounding volume hierarchies.
 
-\section{Other}
-% TODO dunno where to put this
-
-\subsection{Automatic Differentiation}
-
-Automatic differentiation is a programming technique to compute the differential function.
-It exploits the fact that computer programs at their core use simple arithmetic operations like summation, multiplication, division and so on.
-Thus the derivative can be evaluated using the corresponding derivative rule.
-As is the theme with this thesis, there are two types of automatic differentiation: forward mode, where the derivative is calculated alongside the value, and reverse mode, where 
-after computing the value, the derivative is traced back.
-Forward mode can be implemented through operator overloads, where the overloaded arithmetic operation handles both the value and the derivative calculation.
-That means that the program functions themselves do not need to be altered, as the additional calculations are handled through the overloads of the basic arithmetic that they already use.
-
 \section{CUDA optimizations}
-\label{sec:alternative-techniques-cuda-optimizations}
+\label{sec:optimization-techniques-cuda-optimizations}
 
 \subsection{Mixed-Precision}
-\label{sec:alternative-techniques-cuda-optimizations-mixed-precision}
+\label{sec:optimization-techniques-cuda-optimizations-mixed-precision}
 
 Mixed precision is the practice of using a mix of FP32 and FP64 operations.
 In the context of the N-body problem, mixed precision is employed to off-load the distance calculation to the FP32 units.
@@ -160,7 +150,7 @@ The error is hard to quantify, but is guaranteed to be at least at the FP32 nois
 This is particularly effective on gaming GPUs, where FP64 performance is severely limited, and FP32 performance is better when compared to workstation GPUs.
 
 \subsection{Atomics}
-\label{sec:alternative-techniques-cuda-optimizations-atomics}
+\label{sec:optimization-techniques-cuda-optimizations-atomics}
 
 Atomic operations such as \texttt{atomicAdd} are operations used to prevent data-races on write operations.
 For instance, when multiple parallel threads add a value to the same memory address, some of them may add their value to the content of the address that has already been updated by that time, meaning they would overwrite the address based on its old value.
@@ -213,7 +203,7 @@ This is particularly useful to avoid register spills, as the buffer size is alre
 
 
 \subsection{Optimized Tree Construction}
-\label{sec:alternative-techniques-cuda-optimizations-lbhv}
+\label{sec:optimization-techniques-cuda-optimizations-lbhv}
 
 Since both Barnes-Hut and FMM are treecode based, constructing a tree is of course an important first step.
 Nvidia researcher Tero Karras presented a highly optimized linear bounding volume hierarchy implementation in both blog~\cite{karras2012thinkingparallel} and paper~\cite{karras2012lbvh} form.
@@ -263,7 +253,7 @@ The final result can then be seen in Figure~\ref{fig:karras-node-layout}.
 \end{figure}
 
 \subsection{Tiling}
-\label{sec:alternative-techniques-cuda-tiling}
+\label{sec:optimization-techniques-cuda-tiling}
 
 Tiling is a standard optimization technique in CUDA programming that improves memory throughput by loading ``tiles'' of the total problem from global memory into the smaller and faster memories.
 This helps because global memory reads are more efficient when fetching chunks of data, instead of individual values.
@@ -272,17 +262,20 @@ It is most effective when the computational intensity of the calculation is lowe
 If the computational intensity far outweighs the memory throughput then it is unfortunately not very helpful.
 
 \subsection{Constant Memory}
-\label{sec:alternative-techniques-cuda-constant-memory}
+\label{sec:optimization-techniques-cuda-constant-memory}
 
-% TODO
+Besides the L1 cache shown in \ref{fig:ga10x-sm}, each SM also has a small constant cache.
+It cannot be written to by the kernel, and is initialized host-side through \snakecase{cudaMemcpyToSymbol}.
+This initially puts it on the GPU's VRAM, and is then loaded into the SM on-demand.
+This cuts down on expensive global memory fetches, and is the perfect fix for things like loop independent values.
 
 \section{CUDA Linear Equation Solvers}
-\label{sec:alternative-techniques-cu-lin-eq-solvers}
+\label{sec:optimization-techniques-cu-lin-eq-solvers}
 
 Among their library eco-system, Nvidia offers two ready-to-use linear equation solvers, namely cuDSS and AMGX.
 
 \subsection{cuDSS}
-\label{sec:alternative-techniques-cu-lin-eq-solvers-cuDSS}
+\label{sec:optimization-techniques-cu-lin-eq-solvers-cuDSS}
 
 % not sure if I'll keep this here
 cuDSS is a direct solver that can use either LU- or Cholesky factorization.
@@ -292,7 +285,7 @@ With the scaling of dense methods for 3D meshes of \(\mathcal{O}(n^{4/3})\), the
 As this is too big even for an Nvidia A100 GPU, which has 40 GB of VRAM, I dropped cuDSS very quickly.
 
 \subsection{AMGX}
-\label{sec:alternative-techniques-cu-lin-eq-solvers-amgx}
+\label{sec:optimization-techniques-cu-lin-eq-solvers-amgx}
 
 AMGX is Nvidia's flagship iterative solver CUDA library, featuring numerous solvers and preconditioners, including the eponymous ``algebraic multigrid'' (AMG) algorithm.
 AMG is a preconditioning algorithm used primarily for Krylov methods.

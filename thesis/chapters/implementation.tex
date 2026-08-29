@@ -289,6 +289,16 @@ To get the coefficient $M_n^{-m}$, I simply looked up $M_n^m$, and inverted its 
 This way the number of coefficients grows only by $n+1$.
 For the buffer size, that means the number of coefficients truncated at degree $p$ goes from $\sum_{n=0}^{p}(2n+1) = (p+1)^2$ to $\sum_{n=0}^{p}(n+1) = \frac{(p+1)(p+2)}{2}$
 
+\subsection{Automatic Differentiation}
+
+Automatic differentiation is a programming technique to compute the differential function.
+It exploits the fact that computer programs at their core use simple arithmetic operations like summation, multiplication, division and so on.
+Thus the derivative can be evaluated using the corresponding derivative rule.
+As is the theme with this thesis, there are two types of automatic differentiation: forward mode, where the derivative is calculated alongside the value, and reverse mode, where 
+after computing the value, the derivative is traced back.
+Forward mode can be implemented through operator overloads, where the overloaded arithmetic operation handles both the value and the derivative calculation.
+That means that the program functions themselves do not need to be altered, as the additional calculations are handled through the overloads of the basic arithmetic that they already use.
+
 \subsubsection{Source Tree Construction}
 
 The source tree is constructed using Karras's LBVH algorithm \cite{karras2012lbvh}.
