@@ -30,11 +30,12 @@ solver), so what is plotted is FMM truncation error and not solver error.
 """
 
 import argparse
-import csv
 import os
 import statistics
 import sys
-from collections import defaultdict
+
+import fmm_csv
+from fmm_csv import ERR_FLOOR, METRICS
 
 # p = 6..10 as a cool-to-warm ramp: ordered by lightness so it survives
 # greyscale printing, and each step is distinguishable under CVD.
@@ -46,126 +47,6 @@ P_COLORS = {
     10: ("fmmpE", "C1272D"),
 }
 P_MARKS = {6: "*", 7: "square*", 8: "triangle*", 9: "diamond*", 10: "pentagon*"}
-
-METRICS = {
-    "pol": ("energy_pol", "polarisation energy"),
-    "ionic": ("energy_ionic", "direct ionic energy"),
-    "sum": ("energy_sum", "total electrostatic energy"),
-}
-
-ERR_FLOOR = 1e-16  # log axes cannot show an exact zero
-
-
-# ---------------------------------------------------------------------------
-#  Two CSV schemas feed this script.
-#
-#  bench_sweep.py writes one row per full ngpb run: status / sweep /
-#  energy_method, the fmm_* parameter names, and t_energy for the whole energy
-#  stage.
-#
-#  src/tools/fmm_replay.cu writes one row per replayed phase-2 evaluation:
-#  method / mac / order / leaf, and a t_build_s + t_pol_s + t_ionic_s split.
-#  Same measurement minus the phase-1 mesh sweep, which on 1CCM is ~1% of the
-#  stage.  normalise_replay renames it into the bench_sweep schema so everything
-#  downstream is unchanged.
-#
-#  One consequence worth knowing: the replay's only baseline is the naive GPU
-#  kernel, so it stands in for BOTH energy_method=0 (the error denominator) and
-#  energy_method=1 (the reference marks).  The naive-vs-CPU floor band therefore
-#  collapses on a replay-sourced figure -- there is no independent reference for
-#  the naive path to deviate from.  The meaningful floor there is the FMM's own
-#  run-to-run spread across repeats, which is not what this band draws.
-# ---------------------------------------------------------------------------
-
-def normalise_replay(rows):
-    """Rewrite fmm_replay rows into the bench_sweep.py column names."""
-    out = []
-
-    for r in rows:
-        pol = float(r["energy_pol"])
-        ionic = float(r["energy_ionic"])
-        coul = float(r.get("energy_coul") or 0.0)
-
-        common = {
-            "status": "ok",
-            "sweep": "B",
-            # Phase 2 only: tree build + polarisation + ionic. The phase-1 mesh
-            # sweep is not re-run, so this is slightly below a pipeline t_energy.
-            "t_energy": r["t_total_s"],
-            "energy_pol": r["energy_pol"],
-            "energy_ionic": r["energy_ionic"],
-            "energy_sum": repr(pol + ionic + coul),
-        }
-
-        if r.get("method") == "fmm":
-            out.append(dict(common,
-                            energy_method="2",
-                            fmm_mac=r["mac"],
-                            fmm_multipole_order=r["order"],
-                            fmm_leaf_size=r["leaf"]))
-        elif r.get("method") == "naive":
-            out.append(dict(common, energy_method="0"))
-            out.append(dict(common, energy_method="1"))
-
-    return out
-
-
-def load(csv_path):
-    with open(csv_path, newline="") as fh:
-        rows = list(csv.DictReader(fh))
-
-    if rows and "method" in rows[0]:
-        return normalise_replay(rows)
-
-    return [r for r in rows if r.get("status") == "ok"]
-
-
-def aggregate(rows, metric_col):
-    """Collapse repeats -> one (time, error) point per configuration.
-
-    Time is the median over repeats (robust to a stray slow run); the energy is
-    the mean (it barely moves, and averaging keeps the error estimate from riding
-    on one sample).
-    """
-    sweep_b = [r for r in rows if r.get("sweep") == "B"]
-    if not sweep_b:
-        sys.exit("no sweep B rows in the CSV -- nothing to plot")
-
-    base = [r for r in sweep_b if r.get("energy_method") == "0"]
-    if not base:
-        sys.exit("no energy_method=0 rows -- cannot form the FMM error baseline")
-    ref = statistics.fmean(float(r[metric_col]) for r in base)
-
-    naive = [r for r in sweep_b if r.get("energy_method") == "1"]
-    naive_t = statistics.median(float(r["t_energy"]) for r in naive) if naive else None
-    naive_e = None
-    if naive:
-        naive_e = abs(statistics.fmean(float(r[metric_col]) for r in naive) - ref)
-        naive_e = max(naive_e / abs(ref), ERR_FLOOR)
-
-    groups = defaultdict(list)
-    for r in sweep_b:
-        if r.get("energy_method") != "2":
-            continue
-        key = (float(r["fmm_mac"]), int(r["fmm_multipole_order"]),
-               int(r["fmm_leaf_size"]))
-        groups[key].append(r)
-
-    points = []
-    for (mac, p, leaf), grp in sorted(groups.items()):
-        t = statistics.median(float(r["t_energy"]) for r in grp)
-        errs = {}
-        for name, (col, _) in METRICS.items():
-            val = statistics.fmean(float(r[col]) for r in grp)
-            base_val = statistics.fmean(float(b[col]) for b in base)
-            errs[name] = (max(abs(val - base_val) / abs(base_val), ERR_FLOOR)
-                          if base_val else ERR_FLOOR)
-        points.append({"mac": mac, "p": p, "leaf": leaf, "time": t,
-                       "err": errs, "n": len(grp)})
-
-    base_t = statistics.median(float(r["t_energy"]) for r in base)
-    return points, ref, naive_t, naive_e, base_t
-
 
 def pareto(points, metric):
     """Non-dominated set under (minimise time, minimise error)."""
@@ -183,21 +64,25 @@ def pareto(points, metric):
 
 
 def write_dat(path, points, front_ids):
+    # pairid is what the pgfplots filter tests. Filtering on sleaf AND tleaf AND p
+    # would need a three-column filter; collapsing the leaf pair to one integer
+    # keeps the existing two-column style working.
     with open(path, "w") as fh:
-        fh.write("mac p leaf time err_pol err_ionic err_sum pareto\n")
+        fh.write("mac p pairid sleaf tleaf time err_pol err_ionic err_sum pareto\n")
         for d in points:
-            fh.write("{:.1f} {} {} {:.6g} {:.6g} {:.6g} {:.6g} {}\n".format(
-                d["mac"], d["p"], d["leaf"], d["time"],
+            fh.write("{:.1f} {} {} {} {} {:.6g} {:.6g} {:.6g} {:.6g} {}\n".format(
+                d["mac"], d["p"], d["pairid"], d["sleaf"], d["tleaf"], d["time"],
                 d["err"]["pol"], d["err"]["ionic"], d["err"]["sum"],
                 1 if id(d) in front_ids else 0))
 
 
 def write_pareto_dat(path, front, metric):
     with open(path, "w") as fh:
-        fh.write("time err mac p leaf\n")
+        fh.write("time err mac p sleaf tleaf\n")
         for d in front:
-            fh.write("{:.6g} {:.6g} {:.1f} {} {}\n".format(
-                d["time"], d["err"][metric], d["mac"], d["p"], d["leaf"]))
+            fh.write("{:.6g} {:.6g} {:.1f} {} {} {}\n".format(
+                d["time"], d["err"][metric], d["mac"], d["p"],
+                d["sleaf"], d["tleaf"]))
 
 
 def write_ref_tex(path, molecule, natoms, naive_t, naive_e, base_t, metric, nrep,
@@ -321,7 +206,7 @@ PANELS
 """
 
 PANEL_TEMPLATE = r"""
-\nextgroupplot[title={$n_{\mathrm{leaf}} = LEAF$}LEGENDOPT]
+\nextgroupplot[title={$n_{\mathrm{src}}/n_{\mathrm{tgt}} = PAIRLABEL$}LEGENDOPT]
   % resolution floor of the comparison
   \addplot[draw=none, fill=black!7, forget plot]
     coordinates {(XMIN,YMIN) (XMAX,YMIN) (XMAX,\fmmNaiveErr) (XMIN,\fmmNaiveErr)}
@@ -337,7 +222,7 @@ SERIESLEGEND"""
 # Only the first panel feeds the shared legend; the other three repeat the same
 # five series and must not add duplicate entries.
 SERIES_TEMPLATE = r"""  \addplot[color=COLOR, mark=MARK, mark size=1.15pt, line width=0.9pt FORGET]
-    table[x=time, y=ERRCOL, discard if not two={leaf}{LEAF}{p}{P}]
+    table[x=time, y=ERRCOL, discard if not two={pairid}{PAIRID}{p}{P}]
       {figures/data/TAG.dat};
 ENTRY"""
 
@@ -348,47 +233,7 @@ LEGEND_EXTRA = r"""  \addlegendimage{fmmfront, line width=1.6pt}
 """
 
 
-def _x_ticks(lo, hi):
-    """A 1-2-5 ladder over [lo, hi]. The times span well under a decade, so the
-    default log ticks come out as 10^{-1.5}, which is unreadable in print."""
-    import math
-    vals = []
-    e = math.floor(math.log10(lo))
-    while 10 ** e <= hi * 10:
-        for m in (1, 2, 5):
-            v = m * 10 ** e
-            if lo <= v <= hi:
-                vals.append(v)
-        e += 1
-    if len(vals) < 3:  # very narrow range: fall back to a finer ladder
-        vals = []
-        e = math.floor(math.log10(lo))
-        while 10 ** e <= hi * 10:
-            for m in (1, 1.5, 2, 3, 5, 7):
-                v = m * 10 ** e
-                if lo <= v <= hi:
-                    vals.append(v)
-            e += 1
-    return sorted(vals)
-
-
-def _fmt_tick(v):
-    if v >= 1:
-        return "{:g}".format(v)
-    s = "{:.6f}".format(v).rstrip("0").rstrip(".")
-    return s
-
-
-def _y_ticks(lo, hi):
-    """Decade ticks, thinned to keep about five labels on a 5.4 cm panel."""
-    import math
-    e0, e1 = math.ceil(math.log10(lo)), math.floor(math.log10(hi))
-    span = max(e1 - e0, 1)
-    step = max(1, round(span / 5))
-    return [10.0 ** e for e in range(e1, e0 - 1, -step)][::-1]
-
-
-def build_figure(tag, points, metric, leaves, naive_t, naive_e, out_path):
+def build_figure(tag, points, metric, pairs, naive_t, naive_e, out_path):
     errcol = "err_" + metric
     times = [d["time"] for d in points]
     errs = [d["err"][metric] for d in points]
@@ -411,14 +256,14 @@ def build_figure(tag, points, metric, leaves, naive_t, naive_e, out_path):
     )
     legend_name = "fmmlegend" + tag.replace("_", "")
 
-    xt = _x_ticks(xmin, xmax)
-    yt = _y_ticks(ymin, ymax)
+    xt = fmm_csv.x_ticks(xmin, xmax)
+    yt = fmm_csv.y_ticks(ymin, ymax)
     xticks = ",".join("{:.6g}".format(v) for v in xt)
-    xticklabels = ",".join(_fmt_tick(v) for v in xt)
+    xticklabels = ",".join(fmm_csv.fmt_tick(v) for v in xt)
     yticks = ",".join("{:.6g}".format(v) for v in yt)
 
     panels = []
-    for idx, leaf in enumerate(leaves):
+    for idx, (pairid, sleaf, tleaf) in enumerate(pairs):
         first = idx == 0
         series = "".join(
             SERIES_TEMPLATE
@@ -427,7 +272,7 @@ def build_figure(tag, points, metric, leaves, naive_t, naive_e, out_path):
             .replace("ERRCOL", errcol)
             .replace("FORGET", "" if first else ", forget plot")
             .replace("ENTRY", "  \\addlegendentry{$p=%d$}\n" % p if first else "")
-            .replace("LEAF", str(leaf))
+            .replace("PAIRID", str(pairid))
             .replace("P", str(p))
             .replace("TAG", tag)
             for p in p_shown
@@ -437,7 +282,7 @@ def build_figure(tag, points, metric, leaves, naive_t, naive_e, out_path):
                  .replace("LEGENDOPT",
                           ", legend to name=" + legend_name if first else "")
                  .replace("LEGEND", LEGEND_EXTRA if first else "")
-                 .replace("LEAF", str(leaf))
+                 .replace("PAIRLABEL", "%d/%d" % (sleaf, tleaf))
                  .replace("TAG", tag)
                  .replace("XMIN", "{:.6g}".format(xmin))
                  .replace("XMAX", "{:.6g}".format(xmax))
@@ -482,13 +327,13 @@ def write_table(path, front, metric, naive_t, naive_e, targets):
                  "figure~\\ref{fig:fmm-sweep}; the speed-up is against the "
                  "naive $O(N^2)$ GPU path (\\fmmNaiveTime\\,s).}\n")
         fh.write("\\label{tab:fmm-sweep-pareto}\n")
-        fh.write("\\begin{tabular}{lrrrrr}\n\\toprule\n")
-        fh.write("error target & $\\theta$ & $p$ & $n_{\\mathrm{leaf}}$ & "
-                 "time [s] & speed-up \\\\\n\\midrule\n")
+        fh.write("\\begin{tabular}{lrrrrrr}\n\\toprule\n")
+        fh.write("error target & $\\theta$ & $p$ & $n_{\\mathrm{src}}$ & "
+                 "$n_{\\mathrm{tgt}}$ & time [s] & speed-up \\\\\n\\midrule\n")
         for target, best, speedup in rows:
-            fh.write("$10^{%d}$ & %.1f & %d & %d & %.4f & $%.2f\\times$ \\\\\n" % (
+            fh.write("$10^{%d}$ & %.1f & %d & %d & %d & %.4f & $%.2f\\times$ \\\\\n" % (
                 round(__import__("math").log10(target)), best["mac"], best["p"],
-                best["leaf"], best["time"], speedup))
+                best["sleaf"], best["tleaf"], best["time"], speedup))
         fh.write("\\bottomrule\n\\end{tabular}\n\\end{table}\n")
     return rows
 
@@ -527,14 +372,24 @@ def main():
     tag = args.tag or "fmm_sweep_" + os.path.basename(os.path.normpath(args.folder))
     metric_col = METRICS[args.metric][0]
 
-    rows = load(csv_path)
-    points, ref, naive_t, naive_e, base_t = aggregate(rows, metric_col)
+    rows = fmm_csv.load(csv_path)
+    points, info = fmm_csv.aggregate(rows, metric_col)
     if not points:
         sys.exit("no energy_method=2 rows -- nothing to plot")
 
+    naive_t, naive_e = info["naive_t"], info["naive_e"]
+    base_t = info["base_t"]
+
+    # One integer per distinct (source, target) leaf pair; the pgfplots filter
+    # tests it instead of the two columns separately.
+    pair_ids = {pr: i for i, pr in
+                enumerate(sorted({(d["sleaf"], d["tleaf"]) for d in points}))}
+    for d in points:
+        d["pairid"] = pair_ids[(d["sleaf"], d["tleaf"])]
+
     molecule = (args.molecule
-                or os.path.splitext(rows[0].get("molecule", "") or "")[0] or "?")
-    natoms = args.natoms or rows[0].get("num_atoms", "?")
+                or os.path.splitext(info["molecule"])[0] or "?")
+    natoms = args.natoms or info["natoms"] or "?"
     nrep = statistics.median(d["n"] for d in points)
 
     # The front is deliberately taken over EVERY configuration, before any
@@ -555,10 +410,10 @@ def main():
         sys.exit("--p-values/--mac-values selected nothing")
     thinned = len(shown) < len(points)
 
-    leaves = sorted({d["leaf"] for d in shown})
-    if len(leaves) != 4:
-        print("note: {} leaf sizes in the data, the figure lays out 2x2"
-              .format(len(leaves)), file=sys.stderr)
+    pairs = sorted({(d["pairid"], d["sleaf"], d["tleaf"]) for d in shown})
+    if len(pairs) != 4:
+        print("note: {} leaf pairs in the data, the figure lays out 2x2"
+              .format(len(pairs)), file=sys.stderr)
 
     data_dir = os.path.join(args.thesis, "figures", "data")
     os.makedirs(data_dir, exist_ok=True)
@@ -573,7 +428,7 @@ def main():
     write_pareto_dat(par, front, args.metric)
     write_ref_tex(reftex, molecule, natoms, naive_t, naive_e, base_t,
                   args.metric, int(nrep), shown if thinned else None, len(points))
-    build_figure(tag, shown, args.metric, leaves[:4], naive_t, naive_e, fig)
+    build_figure(tag, shown, args.metric, pairs[:4], naive_t, naive_e, fig)
     targets = [float(t) for t in args.targets.split(",")]
     table_rows = write_table(tab, front, args.metric, naive_t, naive_e, targets)
 
@@ -589,10 +444,10 @@ def main():
     print("      {}".format(tab))
     print()
     print("cheapest configuration per error target:")
-    print("  target      theta   p  leaf     time    speed-up vs naive")
+    print("  target      theta   p    src/tgt      time    speed-up vs naive")
     for target, best, speedup in table_rows:
-        print("  {:<10.0e}  {:>4.1f}  {:>2d}  {:>4d}  {:>8.4f}   {:>6.2f}x".format(
-            target, best["mac"], best["p"], best["leaf"], best["time"], speedup))
+        print("  {:<10.0e}  {:>4.1f}  {:>2d}  {:>9s}  {:>8.4f}   {:>6.2f}x".format(
+            target, best["mac"], best["p"], best["pair"], best["time"], speedup))
     print()
     print("add \\usepackage{pgfplots} to thesis/main.tex, then "
           "\\input{figures/%s}" % tag)

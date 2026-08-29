@@ -315,8 +315,15 @@ def relerr(value, reference):
 # run plan
 # --------------------------------------------------------------------------
 
-def build_plan(amgx_config, sweeps):
-    """Return a list of (sweep_name, settings dict) in execution order."""
+def build_plan(amgx_config, sweeps, original_text=""):
+    """Return a list of (sweep_name, settings dict) in execution order.
+
+    original_text is the untouched options.prm; sweep B's energy_method=2 entry
+    is run at the fmm_* values it already carries.  render_prm strips every
+    managed key from the section before writing the new ones, so passing None
+    here does not preserve a key -- it deletes it and lets ngpb fall back to its
+    compiled default, which is not the same configuration the file describes.
+    """
     plan = []
 
     if "a" in sweeps:
@@ -344,10 +351,18 @@ def build_plan(amgx_config, sweeps):
         # energy_method=2 is still run once, at whatever fmm_* values options.prm
         # already carries, so the three methods stay comparable in one table.
         base = {"linear_solver": "amgx", "amgx_config": amgx_config}
+
+        # Carried through verbatim so the energy_method=2 row is measured at the
+        # configuration options.prm actually specifies. Absent keys stay absent.
+        fmm_now = {k: (read_prm_value(original_text, "algorithm", k) or None)
+                   for k in ("fmm_mac", "fmm_multipole_order",
+                             "fmm_leaf_size", "fmm_target_leaf_size")}
+
         for method in (0, 1, 2):
-            plan.append(("B", dict(base, energy_method=method,
-                                   fmm_mac=None, fmm_multipole_order=None,
-                                   fmm_leaf_size=None, fmm_target_leaf_size=None)))
+            # The fmm_* keys are meaningless for methods 0 and 1 and would only
+            # clutter the config_id, so they ride along on method 2 alone.
+            extra = fmm_now if method == 2 else dict.fromkeys(fmm_now, None)
+            plan.append(("B", dict(base, energy_method=method, **extra)))
     return plan
 
 
@@ -489,14 +504,22 @@ def main():
                      help="run the dump-and-replay FMM sweep instead of sweeps a/b")
     fmm.add_argument("--fmm-mac", default="0.2:0.8:0.1",
                      help="fmm_mac spec passed to fmm_replay (default: 0.2:0.8:0.1)")
-    fmm.add_argument("--fmm-order", default="6:10",
-                     help="fmm_multipole_order spec (default: 6:10)")
-    fmm.add_argument("--fmm-leaf", default="8,16,32,64",
-                     help="fmm_leaf_size (SOURCE tree) spec (default: 8,16,32,64)")
-    fmm.add_argument("--fmm-tleaf", default="128,256",
+    fmm.add_argument("--fmm-order", default="9:11",
+                     help="fmm_multipole_order spec (default: 9:11). 12 is the compiled "
+                          "maximum but REGRESSES: p=12 measured slower AND less accurate "
+                          "than p=11 (unscaled M2L conditioning), so 11 is the ceiling")
+    fmm.add_argument("--fmm-leaf", default="8,16,32",
+                     help="fmm_leaf_size (SOURCE tree) spec (default: 8,16,32; "
+                          "16 is the measured optimum, interior)")
+    fmm.add_argument("--fmm-tleaf", default="512,1024,2048",
                      help="fmm_target_leaf_size spec; 0 follows --fmm-leaf "
-                          "(default: 128,256). Capped at FMM_BDIM=256 by the "
-                          "energy entry points")
+                          "(default: 512,1024,2048; 1024 is the measured optimum, "
+                          "interior). Capped at FMM_MAX_TLEAF by the energy entry points")
+    fmm.add_argument("--fmm-pairs", default=None,
+                     help="explicit source/target leaf pairs, e.g. 16/1024,16/512. "
+                          "REPLACES --fmm-leaf x --fmm-tleaf. Use this to sweep mac "
+                          "and order at the leaf combinations that already won, "
+                          "instead of re-crossing every leaf pair against them")
     fmm.add_argument("--fmm-repeats", type=int, default=3,
                      help="timed repeats per configuration (default: 3)")
 
@@ -590,11 +613,18 @@ def run_fmm_sweep(folder, args):
         "energy_dump": prefix,
     }
 
+    # --pairs replaces both leaf axes rather than adding a third, so the two are
+    # mutually exclusive on the command line as well.
+    if args.fmm_pairs:
+        leaf_args = ["--pairs", args.fmm_pairs]
+    else:
+        leaf_args = ["--leaf", args.fmm_leaf, "--tleaf", args.fmm_tleaf]
+
     replay_cmd = list(args.launcher) + \
                  ["mpirun", "-n", str(args.np), replay, prefix,
-                  "--mac", args.fmm_mac, "--order", args.fmm_order,
-                  "--leaf", args.fmm_leaf, "--tleaf", args.fmm_tleaf,
-                  "--repeats", str(args.fmm_repeats),
+                  "--mac", args.fmm_mac, "--order", args.fmm_order] + \
+                 leaf_args + \
+                 ["--repeats", str(args.fmm_repeats),
                   "--csv", out_csv]
 
     if args.dry_run:
@@ -684,7 +714,7 @@ def run_folder(folder, args):
         return _die("no amgx_pcgf_amg_block_jacobi.json found for {} "
                     "(pass --amgx-config)".format(folder))
 
-    plan = build_plan(amgx_config, args.sweeps)
+    plan = build_plan(amgx_config, args.sweeps, original_text)
     if args.limit is not None:
         plan = plan[:args.limit]
     out_csv = args.out or os.path.join(folder, "bench_runs.csv")

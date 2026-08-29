@@ -58,6 +58,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "energy_dump.h"
@@ -159,6 +160,58 @@ parse_spec_int (const std::string &spec, std::vector<int> &out)
   return true;
 }
 
+// --------------------------------------------------------------------
+//  "src/tgt,src/tgt,..." -- an EXPLICIT list of (source, target) leaf pairs,
+//  replacing the --leaf x --tleaf cross product.
+//
+//  Wanted because the two sweeps ask different questions. Finding the leaf
+//  optimum needs the full cross product; sweeping p and theta AT that optimum
+//  needs only the handful of pairs that won, and crossing those back out would
+//  multiply the point count by |leaf|x|tleaf| for configurations already known
+//  to be beaten.
+//
+//  '/' separates the pair, not ':' -- ':' already means "range" in a SPEC.
+// --------------------------------------------------------------------
+static bool
+parse_pairs (const std::string &spec, std::vector<std::pair<int, int>> &out)
+{
+  out.clear ();
+
+  size_t pos = 0;
+
+  while (pos <= spec.size ()) {
+    size_t comma = spec.find (',', pos);
+    std::string tok = spec.substr (pos, comma == std::string::npos
+                                        ? std::string::npos : comma - pos);
+
+    if (!tok.empty ()) {
+      size_t slash = tok.find ('/');
+
+      if (slash == std::string::npos)
+        return false;
+
+      char *end = nullptr;
+      long src = std::strtol (tok.substr (0, slash).c_str (), &end, 10);
+      if (end == nullptr || *end != '\0' || src < 1)
+        return false;
+
+      std::string tgt_tok = tok.substr (slash + 1);
+      long tgt = std::strtol (tgt_tok.c_str (), &end, 10);
+      if (end == tgt_tok.c_str () || *end != '\0' || tgt < 0)
+        return false;
+
+      out.emplace_back ((int) src, (int) tgt);
+    }
+
+    if (comma == std::string::npos)
+      break;
+
+    pos = comma + 1;
+  }
+
+  return !out.empty ();
+}
+
 static double
 relerr (double value, double ref)
 {
@@ -178,9 +231,11 @@ usage (const char *argv0)
     "                      each rank reads <prefix>.rank<K>.bin\n"
     "\n"
     "  --mac SPEC          fmm_mac values            (default 0.4)\n"
-    "  --order SPEC        fmm_multipole_order       (default 10)\n"
-    "  --leaf SPEC         fmm_leaf_size (SOURCE)    (default 256)\n"
-    "  --tleaf SPEC        fmm_target_leaf_size      (default 0 = follow --leaf)\n"
+    "  --order SPEC        fmm_multipole_order       (default 11, max 12)\n"
+    "  --leaf SPEC         fmm_leaf_size (SOURCE)    (default 16)\n"
+    "  --tleaf SPEC        fmm_target_leaf_size      (default 1024; 0 = follow --leaf)\n"
+    "  --pairs SRC/TGT,... explicit (source,target) leaf pairs; REPLACES the\n"
+    "                      --leaf x --tleaf cross product\n"
     "  --repeats N         timed repeats per config  (default 3)\n"
     "  --warmup N          discarded runs per config (default 1)\n"
     "  --csv PATH          write results here        (default stdout only)\n"
@@ -191,10 +246,15 @@ usage (const char *argv0)
     "  TARGET tree: it sets the target box count, hence the M2L pair count. They\n"
     "  pull opposite ways, so sweeping them together on one --leaf value (what this\n"
     "  tool did before --tleaf existed) only samples the diagonal of the real grid.\n"
-    "  --tleaf is capped at FMM_BDIM (256) inside the energy entry points.\n"
+    "  --tleaf is capped at FMM_MAX_TLEAF inside the energy entry points; the value\n"
+    "  actually used is what lands in the tgt_leaf CSV column.\n"
+    "\n"
+    "  Measured optima (6VYB + 1VSZ, RTX 3080): src 16, tgt 1024 -- interior on BOTH\n"
+    "  axes (8/32 and 512/4096 are worse). --order past 11 REGRESSES: p=12 is slower\n"
+    "  and less accurate than p=11 (unscaled M2L conditioning), so 11 is the ceiling.\n"
     "\n"
     "  SPEC is \"a,b,c\", \"lo:hi\" (step 1) or \"lo:hi:step\", e.g.\n"
-    "    --mac 0.4:0.6:0.1 --order 9,10 --leaf 8,16,32,64 --tleaf 128,256\n",
+    "    --mac 0.4:0.6:0.1 --order 10,11 --leaf 8,16,32 --tleaf 512,1024,2048\n",
     argv0);
 }
 
@@ -209,8 +269,9 @@ main (int argc, char **argv)
 
   std::string prefix, csv_path;
   std::vector<double> macs {0.4};
-  std::vector<int> orders {10}, leaves {256};
-  std::vector<int> tleaves {0};      // 0 = follow the source leaf size (pre-decoupling behaviour)
+  std::vector<int> orders {11}, leaves {16};   // measured optimum; see usage()
+  std::vector<int> tleaves {1024};   // 0 would follow the source leaf (pre-decoupling behaviour)
+  std::vector<std::pair<int, int>> leaf_pairs;   // non-empty => --pairs overrides leaf x tleaf
   int repeats = 3, warmup = 1;
   bool do_naive = true;
   bool bad_args = false;
@@ -236,6 +297,9 @@ main (int argc, char **argv)
     } else if (a == "--leaf") {
       std::string s;
       if (next (s) && !parse_spec_int (s, leaves)) bad_args = true;
+    } else if (a == "--pairs") {
+      std::string s;
+      if (next (s) && !parse_pairs (s, leaf_pairs)) bad_args = true;
     } else if (a == "--tleaf") {
       std::string s;
       if (next (s) && !parse_spec_int (s, tleaves)) bad_args = true;
@@ -263,6 +327,14 @@ main (int argc, char **argv)
     MPI_Finalize ();
     return 2;
   }
+
+  // Without --pairs the leaf axes are a full cross product, which is what the
+  // leaf-optimum sweep wants. Building the list here means the sweep loop has
+  // exactly one shape to walk either way.
+  if (leaf_pairs.empty ())
+    for (int l : leaves)
+      for (int t : tleaves)
+        leaf_pairs.emplace_back (l, t);
 
   // ----------------------------------------------------------------
   //  Bind this rank's CUDA device exactly as ngpb's main() does. On a
@@ -435,13 +507,18 @@ main (int argc, char **argv)
 
   for (double mac : macs) {
     for (int order : orders) {
-      for (int leaf : leaves) {
-       for (int tleaf : tleaves) {
+      for (const std::pair<int, int> &lp : leaf_pairs) {
+       {
+        const int leaf  = lp.first;
+        const int tleaf = lp.second;
+
         // Record what actually RAN, not what was asked for: 0 follows the source leaf, and the
-        // energy entry points clamp to FMM_BDIM. Resolving both here means the CSV can never
-        // disagree with the configuration the timing came from.
+        // energy entry points clamp to FMM_MAX_TLEAF. Resolving both here means the CSV can never
+        // disagree with the configuration the timing came from. Must mirror resolve_tleaf() in
+        // src/fmm.cu -- note it clamps CAPACITY only; the launch width is a separate constant
+        // (FMM_L2P_BLOCK) now that l2p_p2p_kernel strides over its leaf's points.
         int tleaf_eff = (tleaf < 1) ? leaf : tleaf;
-        if (tleaf_eff > FMM_BDIM) tleaf_eff = FMM_BDIM;
+        if (tleaf_eff > FMM_MAX_TLEAF) tleaf_eff = FMM_MAX_TLEAF;
 
         double last_relerr_pol = NAN, last_relerr_ion = NAN;
         double last_build = 0.0, last_pol_t = 0.0, last_ion_t = 0.0;
