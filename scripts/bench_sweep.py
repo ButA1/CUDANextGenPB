@@ -597,7 +597,11 @@ def run_fmm_sweep(folder, args):
 
     molecule = os.path.basename(read_prm_value(original_text, "input", "filename"))
     amgx_config = resolve_amgx_config(folder, args.amgx_config)
-    out_csv = args.out or os.path.join(folder, "fmm_sweep.csv")
+    # Absolute, because fmm_replay is spawned with cwd=folder: a relative --out
+    # given on the command line is relative to where the USER stands, not to the
+    # test folder, and would otherwise resolve to <folder>/<folder>/name.csv.
+    out_csv = os.path.abspath(args.out) if args.out \
+        else os.path.join(folder, "fmm_sweep.csv")
     prefix = "fmm_inputs"
 
     # energy_method=2 so the dump run also produces one FMM evaluation to eyeball;

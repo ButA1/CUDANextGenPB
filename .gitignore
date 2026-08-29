@@ -125,5 +125,6 @@ src/tools/*.o
 test*/bench_runs.csv
 test*/bench_runs_summary.csv
 test*/bench_meta.json
+test*/*.mixed_backup
 test*/bench_logs/
 test*/options.prm.bench_backup

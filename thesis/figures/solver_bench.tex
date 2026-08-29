@@ -27,19 +27,22 @@
 \begin{tikzpicture}
 \begin{axis}[
     ybar,
-    width=9.6cm, height=6.4cm,
-    bar width=26pt,
-    enlarge x limits=0.18,
-    ymin=0, ymax=0.383123,
+    width=13.1cm, height=6.4cm,
+    bar width=10pt,
+    enlarge x limits=0.28,
+    ymin=0, ymax=106.549,
     ylabel={\solverMetric{} time [s]},
     ylabel style={font=\footnotesize},
-    xtick={0,1,2},
-    xticklabels={{LIS},{AMGX\\(default)},{AMGX\\(tuned)}},
-    xmin=-0.7, xmax=2.7,
+    symbolic x coords={1CCM,6VYB,1vsz},
+    xtick=data,
     xticklabel style={font=\footnotesize, align=center},
     tick label style={font=\scriptsize},
     ymajorgrids=true,
     major grid style={black!12},
+    legend style={
+      at={(0.5,-0.16)}, anchor=north, draw=none,
+      legend columns=3, font=\footnotesize, column sep=0.8em,
+    },
     % Run-to-run spread is only a few percent, so the upper whisker is 1-2 mm and
     % the lower half is buried in the bar fill. Caps nearly as wide as the bar
     % are what make it read as an error bar rather than a stray tick.
@@ -50,30 +53,33 @@
     % is what matters.
     error bars/error bar style={black!85, line width=0.8pt},
     error bars/error mark options={
-      mark size=6pt, rotate=90, line width=0.8pt, black!85,
+      mark size=2.5pt, rotate=90, line width=0.8pt, black!85,
     },
     every node near coord/.append style={
       font=\tiny, color=black!60, anchor=south, yshift=5pt,
     },
 ]
   \addplot+[
-    ybar, bar shift=0pt, fill=solverlis, draw=solverlis!70!black, line width=0.4pt,
+    ybar, fill=solverlis, draw=solverlis!70!black, line width=0.4pt,
     nodes near coords, point meta=explicit symbolic,
     error bars/.cd, y dir=both, y explicit,
-  ] table[x=idx, y=value, y error minus=em, y error plus=ep, meta=iters,
-          discard if not={config}{lis}] {figures/data/solver_bench.dat};
+  ] table[x=molecule, y=lis, y error minus=lis_em, y error plus=lis_ep,
+          meta=lis_it] {figures/data/solver_bench.dat};
+  \addlegendentry{LIS}
   \addplot+[
-    ybar, bar shift=0pt, fill=solveramgx, draw=solveramgx!70!black, line width=0.4pt,
+    ybar, fill=solveramgx, draw=solveramgx!70!black, line width=0.4pt,
     nodes near coords, point meta=explicit symbolic,
     error bars/.cd, y dir=both, y explicit,
-  ] table[x=idx, y=value, y error minus=em, y error plus=ep, meta=iters,
-          discard if not={config}{amgx}] {figures/data/solver_bench.dat};
+  ] table[x=molecule, y=amgx, y error minus=amgx_em, y error plus=amgx_ep,
+          meta=amgx_it] {figures/data/solver_bench.dat};
+  \addlegendentry{AMGX (default)}
   \addplot+[
-    ybar, bar shift=0pt, fill=solvercfg, draw=solvercfg!70!black, line width=0.4pt,
+    ybar, fill=solvercfg, draw=solvercfg!70!black, line width=0.4pt,
     nodes near coords, point meta=explicit symbolic,
     error bars/.cd, y dir=both, y explicit,
-  ] table[x=idx, y=value, y error minus=em, y error plus=ep, meta=iters,
-          discard if not={config}{amgxcfg}] {figures/data/solver_bench.dat};
+  ] table[x=molecule, y=amgxcfg, y error minus=amgxcfg_em, y error plus=amgxcfg_ep,
+          meta=amgxcfg_it] {figures/data/solver_bench.dat};
+  \addlegendentry{AMGX (tuned)}
 
 \end{axis}
 \end{tikzpicture}

@@ -213,6 +213,18 @@ parse_pairs (const std::string &spec, std::vector<std::pair<int, int>> &out)
 }
 
 static double
+median_of (std::vector<double> v)
+{
+  if (v.empty ())
+    return NAN;
+
+  std::sort (v.begin (), v.end ());
+  const size_t n = v.size ();
+
+  return (n % 2) ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+static double
 relerr (double value, double ref)
 {
   if (ref == 0.0)
@@ -347,6 +359,52 @@ main (int argc, char **argv)
   setup_gpu_topology (MPI_COMM_WORLD);
 
   // ----------------------------------------------------------------
+  //  Open the output BEFORE the expensive load, and fail collectively.
+  //
+  //  Both halves matter. Opening it late means an unwritable path is only
+  //  discovered after reading ~650 MB of dump per rank; failing on rank 0 alone
+  //  means the other ranks march on into the first MPI_Barrier of the sweep and
+  //  the job HANGS instead of exiting, which on a cluster burns the allocation
+  //  until the wall clock kills it.
+  // ----------------------------------------------------------------
+  FILE *csv = nullptr;
+  {
+    int csv_ok = 1;
+
+    if (rank == 0 && !csv_path.empty ()) {
+      csv = std::fopen (csv_path.c_str (), "w");
+
+      if (!csv) {
+        std::fprintf (stderr, "error: cannot open %s for writing\n", csv_path.c_str ());
+        std::fprintf (stderr, "       (paths are relative to the CURRENT directory, "
+                              "which is where mpirun was started)\n");
+        csv_ok = 0;
+      }
+    }
+
+    int all_csv_ok = 0;
+    MPI_Allreduce (&csv_ok, &all_csv_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+
+    if (!all_csv_ok) {
+      MPI_Finalize ();
+      return 1;
+    }
+
+    if (csv) {
+      // energy_coul is constant across the sweep, but scripts/plot_fmm_sweep.py
+      // needs it to form energy_sum = pol + ionic + coul on the same scale as a
+      // bench_sweep.py CSV -- it is part of the relative-error denominator.
+      // src_leaf/tgt_leaf replace the old single `leaf` column. Older CSVs with a `leaf`
+      // column were produced when one value sized BOTH trees, i.e. they sample only the
+      // src_leaf == tgt_leaf diagonal -- do not concatenate them with new rows.
+      std::fprintf (csv, "method,mac,order,src_leaf,tgt_leaf,repeat,ranks,"
+                         "t_build_s,t_pol_s,t_ionic_s,t_total_s,"
+                         "energy_pol,energy_ionic,energy_coul,"
+                         "relerr_pol,relerr_ionic\n");
+    }
+  }
+
+  // ----------------------------------------------------------------
   //  Load this rank's slice of the dump.
   // ----------------------------------------------------------------
   energy_inputs_t in;
@@ -399,30 +457,6 @@ main (int argc, char **argv)
   // ----------------------------------------------------------------
   double *d_atoms = nullptr, *d_charges = nullptr;
   atoms_to_device (num_atoms, in.atoms.data (), in.charges.data (), &d_atoms, &d_charges);
-
-  FILE *csv = nullptr;
-
-  if (rank == 0 && !csv_path.empty ()) {
-    csv = std::fopen (csv_path.c_str (), "w");
-
-    if (!csv) {
-      std::fprintf (stderr, "error: cannot open %s for writing\n", csv_path.c_str ());
-      atoms_free_device (d_atoms, d_charges);
-      MPI_Finalize ();
-      return 1;
-    }
-
-    // energy_coul is constant across the sweep, but scripts/plot_fmm_sweep.py
-    // needs it to form energy_sum = pol + ionic + coul on the same scale as a
-    // bench_sweep.py CSV -- it is part of the relative-error denominator.
-    // src_leaf/tgt_leaf replace the old single `leaf` column. Older CSVs with a `leaf`
-    // column were produced when one value sized BOTH trees, i.e. they sample only the
-    // src_leaf == tgt_leaf diagonal -- do not concatenate them with new rows.
-    std::fprintf (csv, "method,mac,order,src_leaf,tgt_leaf,repeat,ranks,"
-                       "t_build_s,t_pol_s,t_ionic_s,t_total_s,"
-                       "energy_pol,energy_ionic,energy_coul,"
-                       "relerr_pol,relerr_ionic\n");
-  }
 
   // Sum the per-rank contributions exactly the way energy_cuda_fast does:
   // form energy_pol / energy_react locally, then MPI_Reduce the results.
@@ -500,95 +534,149 @@ main (int argc, char **argv)
   // ----------------------------------------------------------------
   long done = 0;
 
-  if (rank == 0)
-    std::printf ("%-6s %-5s %-6s %-6s %10s %10s %10s %12s %12s\n",
-                 "mac", "order", "sleaf", "tleaf", "build[s]", "pol[s]", "ionic[s]",
-                 "relerr_pol", "relerr_ion");
+  // ----------------------------------------------------------------
+  //  Flatten the grid, then sweep it REPEAT-MAJOR: pass 0 is the discarded
+  //  warm-up, passes 1..repeats are timed, and every pass visits every
+  //  configuration once.
+  //
+  //  The obvious nesting -- all repeats of one configuration back to back --
+  //  measures a 15-second window per configuration, so anything that loads the
+  //  machine for longer than that (a LaTeX build, a browser tab, another job)
+  //  inflates every repeat of whichever configurations it overlaps by the same
+  //  amount. The repeat spread stays tight and the median is confidently wrong;
+  //  a 17% error hid behind a 3.5% spread on 6VYB that way. Interleaving puts a
+  //  configuration's repeats minutes apart, so a transient becomes an outlier in
+  //  one of three samples and the median rejects it.
+  // ----------------------------------------------------------------
+  struct sweep_cfg { double mac; int order, leaf, tleaf_eff; };
+  std::vector<sweep_cfg> cfgs;
 
-  for (double mac : macs) {
-    for (int order : orders) {
+  for (double mac : macs)
+    for (int order : orders)
       for (const std::pair<int, int> &lp : leaf_pairs) {
-       {
-        const int leaf  = lp.first;
-        const int tleaf = lp.second;
-
         // Record what actually RAN, not what was asked for: 0 follows the source leaf, and the
         // energy entry points clamp to FMM_MAX_TLEAF. Resolving both here means the CSV can never
         // disagree with the configuration the timing came from. Must mirror resolve_tleaf() in
         // src/fmm.cu -- note it clamps CAPACITY only; the launch width is a separate constant
         // (FMM_L2P_BLOCK) now that l2p_p2p_kernel strides over its leaf's points.
-        int tleaf_eff = (tleaf < 1) ? leaf : tleaf;
+        int tleaf_eff = (lp.second < 1) ? lp.first : lp.second;
         if (tleaf_eff > FMM_MAX_TLEAF) tleaf_eff = FMM_MAX_TLEAF;
+        cfgs.push_back ({mac, order, lp.first, tleaf_eff});
+      }
 
-        double last_relerr_pol = NAN, last_relerr_ion = NAN;
-        double last_build = 0.0, last_pol_t = 0.0, last_ion_t = 0.0;
+  const size_t ncfg = cfgs.size ();
+  std::vector<std::vector<double>> acc_build (ncfg), acc_pol (ncfg), acc_ion (ncfg);
+  std::vector<double> last_e_pol (ncfg, NAN), last_e_ion (ncfg, NAN);
 
-        for (int rep = 0; rep < warmup + repeats; ++rep) {
-          MPI_Barrier (MPI_COMM_WORLD);
-          double t0 = MPI_Wtime ();
+  for (int rep = 0; rep < warmup + repeats; ++rep) {
+    if (rank == 0) {
+      if (rep < warmup)
+        std::printf ("warm-up pass over %zu configurations ...\n", ncfg);
+      else
+        std::printf ("pass %d of %d ...\n", rep - warmup + 1, repeats);
+      std::fflush (stdout);
+    }
 
-          fmm_tree *tree = nullptr;
-          fmm_build_atom_tree (num_atoms, d_atoms, d_charges, mac, order, leaf, &tree);
-          cudaDeviceSynchronize ();
-          double t1 = MPI_Wtime ();
+    for (size_t ci = 0; ci < ncfg; ++ci) {
+      const sweep_cfg &c = cfgs[ci];
 
-          double first_int = fmm_polarization_energy (tree, num_pts, in.V_pol.data (),
-                                                      in.flux_pol.data (), tleaf_eff);
-          cudaDeviceSynchronize ();
-          double t2 = MPI_Wtime ();
+      MPI_Barrier (MPI_COMM_WORLD);
+      double t0 = MPI_Wtime ();
 
-          double second_int = 0.0;
-          if (in.do_ionic)
-            second_int = fmm_ionic_energy (tree, num_tri_verts, in.vert_ion.data (),
-                                           in.norms_ion.data (), in.phi_ion.data (),
-                                           in.area_ion.data (), in.inv_4pi, tleaf_eff);
-          cudaDeviceSynchronize ();
-          double t3 = MPI_Wtime ();
+      fmm_tree *tree = nullptr;
+      fmm_build_atom_tree (num_atoms, d_atoms, d_charges, c.mac, c.order, c.leaf, &tree);
+      cudaDeviceSynchronize ();
+      double t1 = MPI_Wtime ();
 
-          fmm_free_tree (tree);
+      double first_int = fmm_polarization_energy (tree, num_pts, in.V_pol.data (),
+                                                  in.flux_pol.data (), c.tleaf_eff);
+      cudaDeviceSynchronize ();
+      double t2 = MPI_Wtime ();
 
-          double e_pol = 0.0, e_ionic = 0.0;
-          reduce_energies (first_int, second_int, e_pol, e_ionic);
+      double second_int = 0.0;
+      if (in.do_ionic)
+        second_int = fmm_ionic_energy (tree, num_tri_verts, in.vert_ion.data (),
+                                       in.norms_ion.data (), in.phi_ion.data (),
+                                       in.area_ion.data (), in.inv_4pi, c.tleaf_eff);
+      cudaDeviceSynchronize ();
+      double t3 = MPI_Wtime ();
 
-          double t_build = reduce_time (t1 - t0);
-          double t_pol   = reduce_time (t2 - t1);
-          double t_ionic = reduce_time (t3 - t2);
+      fmm_free_tree (tree);
 
-          if (rank == 0 && rep >= warmup) {
-            double t_total = t_build + t_pol + t_ionic;
-            double rp = do_naive ? relerr (e_pol, ref_pol) : NAN;
-            double ri = (do_naive && in.do_ionic) ? relerr (e_ionic, ref_ionic) : NAN;
+      double e_pol = 0.0, e_ionic = 0.0;
+      reduce_energies (first_int, second_int, e_pol, e_ionic);
 
-            if (csv)
-              std::fprintf (csv, "fmm,%g,%d,%d,%d,%d,%d,"
-                                 "%.9f,%.9f,%.9f,%.9f,%.17g,%.17g,%.17g,%.6e,%.6e\n",
-                            mac, order, leaf, tleaf_eff, rep - warmup, size,
-                            t_build, t_pol, t_ionic, t_total,
-                            e_pol, e_ionic, in.coul_energy, rp, ri);
+      double t_build = reduce_time (t1 - t0);
+      double t_pol   = reduce_time (t2 - t1);
+      double t_ionic = reduce_time (t3 - t2);
 
-            last_build = t_build;
-            last_pol_t = t_pol;
-            last_ion_t = t_ionic;
-            last_relerr_pol = rp;
-            last_relerr_ion = ri;
-          }
-        }
+      if (rank == 0 && rep >= warmup) {
+        double t_total = t_build + t_pol + t_ionic;
+        double rp = do_naive ? relerr (e_pol, ref_pol) : NAN;
+        double ri = (do_naive && in.do_ionic) ? relerr (e_ionic, ref_ionic) : NAN;
 
-        if (rank == 0) {
-          std::printf ("%-6g %-5d %-6d %-6d %10.4f %10.4f %10.4f %12.3e %12.3e\n",
-                       mac, order, leaf, tleaf_eff, last_build, last_pol_t, last_ion_t,
-                       last_relerr_pol, last_relerr_ion);
-          std::fflush (stdout);
+        // Rows arrive configuration-interleaved rather than grouped. The repeat
+        // column identifies them and every consumer groups by configuration, so
+        // the ordering in the file does not matter.
+        if (csv)
+          std::fprintf (csv, "fmm,%g,%d,%d,%d,%d,%d,"
+                             "%.9f,%.9f,%.9f,%.9f,%.17g,%.17g,%.17g,%.6e,%.6e\n",
+                        c.mac, c.order, c.leaf, c.tleaf_eff, rep - warmup, size,
+                        t_build, t_pol, t_ionic, t_total,
+                        e_pol, e_ionic, in.coul_energy, rp, ri);
 
-          if (csv)
-            std::fflush (csv);
-        }
-
-        ++done;
-       }
+        acc_build[ci].push_back (t_build);
+        acc_pol[ci].push_back (t_pol);
+        acc_ion[ci].push_back (t_ionic);
+        last_e_pol[ci] = e_pol;
+        last_e_ion[ci] = e_ionic;
       }
     }
+
+    if (rank == 0 && csv)
+      std::fflush (csv);
   }
+
+  // ----------------------------------------------------------------
+  //  Summary. Median over the passes, and the spread alongside it: a wide
+  //  spread now means the machine was busy during some pass, which is exactly
+  //  the signal the old nesting could not produce.
+  // ----------------------------------------------------------------
+  if (rank == 0) {
+    std::printf ("\n%-6s %-5s %-6s %-6s %10s %10s %10s %8s %12s %12s\n",
+                 "mac", "order", "sleaf", "tleaf", "build[s]", "pol[s]", "ionic[s]",
+                 "spread", "relerr_pol", "relerr_ion");
+
+    for (size_t ci = 0; ci < ncfg; ++ci) {
+      const sweep_cfg &c = cfgs[ci];
+
+      double mb = median_of (acc_build[ci]);
+      double mp = median_of (acc_pol[ci]);
+      double mi = median_of (acc_ion[ci]);
+
+      std::vector<double> totals;
+      for (size_t k = 0; k < acc_build[ci].size (); ++k)
+        totals.push_back (acc_build[ci][k] + acc_pol[ci][k] + acc_ion[ci][k]);
+
+      double spread = NAN;
+      if (!totals.empty ()) {
+        double lo = *std::min_element (totals.begin (), totals.end ());
+        double hi = *std::max_element (totals.begin (), totals.end ());
+        spread = (lo > 0.0) ? (hi - lo) / lo : NAN;
+      }
+
+      double rp = do_naive ? relerr (last_e_pol[ci], ref_pol) : NAN;
+      double ri = (do_naive && in.do_ionic) ? relerr (last_e_ion[ci], ref_ionic) : NAN;
+
+      std::printf ("%-6g %-5d %-6d %-6d %10.4f %10.4f %10.4f %7.1f%% %12.3e %12.3e%s\n",
+                   c.mac, c.order, c.leaf, c.tleaf_eff, mb, mp, mi,
+                   100.0 * spread, rp, ri,
+                   (spread > 0.05) ? "  <-- noisy" : "");
+    }
+    std::fflush (stdout);
+  }
+
+  done = (long) ncfg;
 
   if (rank == 0) {
     std::printf ("\n%ld configurations x %d repeats done\n", done, repeats);

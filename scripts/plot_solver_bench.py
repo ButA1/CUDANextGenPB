@@ -59,9 +59,17 @@ def classify(row):
 
 
 def collect(folder, csv_path, metric_col):
+    # Filter on the folder column, not just the file. One CSV can hold runs from
+    # several test folders -- bench_sweep.py writes wherever -o points, so a sweep
+    # of test2 with -o test1/bench_runs.csv lands both molecules in one file. Every
+    # row records the folder it came from, so the split is exact; without this the
+    # two molecules would be averaged together and labelled with whichever one
+    # happened to be first in the file.
+    want = os.path.abspath(folder)
     with open(csv_path, newline="") as fh:
         rows = [r for r in csv.DictReader(fh)
-                if r.get("status") == "ok" and r.get("sweep") == "A"]
+                if r.get("status") == "ok" and r.get("sweep") == "A"
+                and (r.get("folder") or want) == want]
     if not rows:
         return None
 
@@ -420,6 +428,10 @@ def main():
                     help="basename for the generated files (default: solver_bench)")
     ap.add_argument("--metric", default="solve", choices=sorted(METRICS),
                     help="which stage the columns show (default: solve)")
+    ap.add_argument("--csv", default=None,
+                    help="read every folder's rows from this one CSV instead of "
+                         "<folder>/bench_runs.csv; rows are still split by their "
+                         "folder column, so one mixed file can feed several molecules")
     ap.add_argument("--relative", action="store_true",
                     help="plot each molecule relative to its fastest configuration "
                          "instead of absolute seconds")
@@ -428,7 +440,7 @@ def main():
     metric_col = METRICS[args.metric][0]
     datasets = []
     for folder in args.folders:
-        csv_path = os.path.join(folder, "bench_runs.csv")
+        csv_path = args.csv or os.path.join(folder, "bench_runs.csv")
         if not os.path.exists(csv_path):
             print("skipping {}: no bench_runs.csv".format(folder), file=sys.stderr)
             continue

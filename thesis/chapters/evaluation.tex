@@ -233,6 +233,23 @@ Even two A100s managed to only be 1 second faster.
 This clearly demonstrates the strong scaling wall of Krylov methods.
 It is still surprising that the untamed GA100 chip of the A100 did not manage to beat its cut-down sibling GA102 of the RTX 3080 by all that much, despite the lack of FP64 performance of the latter.
 
+% ------------------------------------------------------------------------
+%  NOTE (Claude): figures + numbers only. The prose here is yours to write --
+%  what follows are the measurements, so you do not have to dig them out of the
+%  CSVs. Delete these comment blocks as you replace them.
+%
+%  SOLVER, median solve stage over 3 repeats (scripts/plot_solver_bench.py):
+%      1CCM   LIS 0.3232   AMGX 0.2270   AMGX tuned 0.2052   (1.57x / 1.11x / 1.00x)
+%      6VYB   LIS 93.392   AMGX 10.305   AMGX tuned 6.2760   (14.88x / 1.64x / 1.00x)
+%      1vsz   LIS 51.244   AMGX 5.7106   AMGX tuned 3.5285   (14.52x / 1.62x / 1.00x)
+%  Iterations: LIS 125/176/168, AMGX default 371/527/523, AMGX tuned 41/51/51.
+%  Setup vs solve for the tuned config on 6VYB: 0.3445 s setup, 2.0798 s solve;
+%  the default spends 0.0054 s on setup and 6.4642 s solving.
+%  Residuals: LIS ~8e-7, AMGX default ~5e-9..4e-8, tuned ~4e-9..3e-8 -- i.e. AMGX
+%  is both faster AND converging tighter, so the speed-up is not from stopping early.
+%  The LIS/tuned ratio is ~14.9x on 6VYB and ~14.5x on 1vsz but only 1.57x on 1CCM.
+% ------------------------------------------------------------------------
+
 \input{figures/solver_bench.tex}
 \input{figures/solver_bench_table.tex}
 
@@ -241,8 +258,67 @@ It is still surprising that the untamed GA100 chip of the A100 did not manage to
 
 \subsubsection{FMM parameters}
 
-\input{figures/fmm_sweep_test1.tex}
-\input{figures/fmm_sweep_test1_table.tex}
+% ------------------------------------------------------------------------
+%  The pre-split sweep: one leaf size driving both trees, theta 0.2-0.8, p 6-10.
+%  Naive O(NM) reference: 24.73 s on 6VYB, 5.51 s on 1VSZ.
+%
+%  The observation that motivated the split: the n_leaf = 64 and n_leaf = 256
+%  panels are nearly indistinguishable and both beat 32 and 128. Nsight showed
+%  the far field was faster at 256 and the near field at 64 -- one number was
+%  tying two opposing effects together.
+% ------------------------------------------------------------------------
+
+\input{figures/fmm_presplit_6vyb.tex}
+\input{figures/fmm_presplit_1vsz.tex}
+
+% ------------------------------------------------------------------------
+%  Source x target leaf grid, theta = 0.3, p = 9, 3 repeats.
+%
+%  1VSZ: optimum 16/512 at 1.3582 s, INTERIOR on both axes.
+%    best target per source leaf:  8 -> 1.5119   16 -> 1.3582
+%                                 32 -> 1.5045   64 -> 1.9295
+%    target axis at src=16: 1.9252 / 1.5442 / 1.3582 / 1.5389 / 1.9084 / 2.6856
+%                           for tgt = 128 / 256 / 512 / 1024 / 2048 / 4096
+%
+%  6VYB: fastest 8/1024 at 3.4184 s, but src=8 is the EDGE of the swept range --
+%    the source axis never turns over. Not a bracketed optimum.
+%    best target per source leaf:  8 -> 3.4184   16 -> 3.6017
+%                                 32 -> 4.5280   64 -> 6.2721
+%
+%  CAVEAT -- the source optimum depends on p, so "8/1024 is optimal" is only true
+%  at the theta/p this grid was run at. Measured on 6VYB, clean runs (spread <2.5%):
+%      theta 0.3, p 9   : 8/1024 = 3.411   16/1024 = 3.749   -> src 8 wins by 9%
+%      theta 0.4, p 11  : 8/1024 = 3.255   16/1024 = 3.027   -> src 16 wins by 7%
+%  A noisier matrix (4-6% spread) suggests p is the driver, not theta: src 8 wins
+%  at p=9 for both theta 0.4 and 0.5, src 16 wins at p=11 for both. Mechanism: a
+%  higher p makes each M2L dearer, favouring fewer/larger source boxes; a lower p
+%  makes M2L cheap, so a deeper tree that shrinks the near field pays off.
+%  The TARGET axis optimum (~512-1024) is the stable part across all of this.
+%
+%  Note also that the earlier "the closer the two leaf sizes, the better" reading
+%  came from sweep2.csv, whose target axis stopped at 256. In that grid src 16
+%  wins 9 of 16 (theta, order, tgt) combinations and src 32 the other 7, so src 8
+%  never wins -- but the grid never reached the tgt = 512-1024 region where it does.
+% ------------------------------------------------------------------------
+
+\input{figures/leaf_sweep_6vyb.tex}
+\input{figures/leaf_sweep_1vsz.tex}
+
+% ------------------------------------------------------------------------
+%  theta x p at 16/1024, 3 repeats. Cheapest configuration per error target is in
+%  the generated tables; the naive O(NM) references are 24.78 s (6VYB) and
+%  5.70 s (1VSZ).
+%      6VYB   1e-10: theta 0.4, p 11 -> 3.0346 s (8.16x)
+%             1e-6 : theta 0.6, p 6  -> 0.6641 s (37.31x)
+%      1VSZ   1e-10: theta 0.3, p 7  -> 1.2549 s (4.54x)
+%             1e-6 : theta 0.7, p 6  -> 0.2333 s (24.43x)
+%  The smaller system gains less, as expected for O(N) vs O(NM) at small N.
+% ------------------------------------------------------------------------
+
+\input{figures/fmm_ptheta_6vyb.tex}
+\input{figures/fmm_ptheta_6vyb_table.tex}
+\input{figures/fmm_ptheta_1vsz.tex}
+\input{figures/fmm_ptheta_1vsz_table.tex}
 
 \subsection{Create Markers}
 \label{sec:evaluation-results-create-markers}
