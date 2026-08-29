@@ -31,6 +31,10 @@
     (2mm,8mm)     circle (7mm)
 }
 
+% outer boundary of the bounded domain D, enclosing both subdomains
+\draw[rounded corners=3mm] (-20mm,-22mm) rectangle (42mm,20mm);
+\node[lbl] at (-15mm,15mm) {$D$};
+
 \path[fill=black] \moleculeOuter;
 \path[fill=white] \moleculeInner;
 
