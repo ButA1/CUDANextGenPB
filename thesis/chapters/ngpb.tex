@@ -202,7 +202,7 @@ This is standard practice with octrees and avoids quadrants that share no vertic
 After the grid construction, NGPB computes the surface of the molecule \snakecase{init_analytical_surf_ns}.
 It does this with NanoShaper, which casts rays in the fine region using the same $1/scale$ grid.
 This also initializes the ray cache.
-Next it constructs the ``epsilon map'' $\varepsilon(\mathbf{r})$ according to Eq.~\ref{eq:dielectric-step-function} for the entire space inside \snakecase{create_markers}.
+Next it constructs the ``epsilon map'' $\varepsilon(\mathbf{r})$ according to Eq.~\eqref{eq:dielectric-step-function} for the entire space inside \snakecase{create_markers}.
 
 \subsubsection{Ray Cache}
 

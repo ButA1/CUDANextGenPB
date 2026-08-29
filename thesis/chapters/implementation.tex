@@ -10,7 +10,7 @@ This project is built using a good old Makefile, with operating-system-specific 
 The flags in the \texttt{local\_settings.mk} take precedence over those in the Makefile.
 It is compiled using the \texttt{mpicxx} compiler, so I needed to employ the same strategy as shown in the RWTH tutorial \cite{rwth_cuda}.
 
-As a first step, I added CUDA compilation target in the Makefile to compile CUDA source files with \texttt{nvcc}.
+As a first step, I added a CUDA compilation target in the Makefile to compile CUDA source files with \texttt{nvcc}.
 Next, I added the \texttt{-dlink} flag to resolve CUDA runtime symbols between CUDA and non-CUDA object files.
 This creates an intermediate object file \texttt{device\_link.o}.
 To make \texttt{nvcc} compile header files, I included \texttt{CPPFLAGS} and MPI's internal flags by reading them from the shell using \texttt{shell \$(CXX) --showme:compile}.
@@ -20,7 +20,7 @@ Finally, I passed all CUDA object files, including \texttt{device\_link.o} to \t
 \section{Linear Equation Solver}
 \label{sec:implementation-lin-eq-solver}
 
-I chose to implement AMGX over cuDSS due to high memory usage of the latter.
+I chose AMGX over cuDSS due to high memory usage of the latter.
 Since AMGX is not part of the standard CUDA toolchain, the \texttt{LDFLAGS} of \texttt{local\_settings.mk} needed to be updated with \texttt{-lamgxsh} and the \texttt{rpath}.
 Since NGPB already has a choice between two linear solvers, I simply added AMGX as an option to the \texttt{linear\_solver} parameter in PRM file.
 Settings for LIS are inserted directly into the file.
@@ -43,7 +43,7 @@ So instead I gathered the entire matrix to rank 0 and uploaded the matrix from t
 Through experimentation, I settled on two configurations: one that focuses on speed, and the other that focuses on being memory efficient.
 
 The memory-efficient configuration can be seen in Listing~\ref{lst:amgx-block-jacobi-default}.
-It uses preconditioned CG with Block-Jacobi as the preconditioner, which creates very little overhead.
+It uses preconditioned conjugate gradient (PCG) with Block-Jacobi as the preconditioner, which creates very little overhead.
 It needs a lot of iterations (around 500 for 6VYB) but all of them are extremely cheap, resulting in a surprisingly fast config, beating a similar configuration, also with PCG, but using V-cycle AMG preconditioning with a coarsening factor of \snakecase{SIZE_2}.
 Despite it needing fewer iterations, those iterations were very expensive.
 This is also the built-in fallback configuration compiled into \snakecase{amgx_solver.cu}, used whenever no \texttt{amgx\_config} file is given, or the given one fails to load.
@@ -120,13 +120,13 @@ The naive kernels are surprisingly useful on workstation GPUs, which are not hel
 For gaming GPUs, mixed precision is a very good option if some loss of accuracy is acceptable.
 FMM represents a middle ground, which at certain settings achieves 0 additional error increase over NGPB's default error level, while being significantly faster on gaming GPUs than the naive kernels.
 
-\subsection{Naive Kernels}
+\subsection{Naive Implementation}
 \label{sec:implementation-energy-calculation-naive-kernels}
 
 The first implementation was to create naive kernels for all three energies: the Coulomb, polarization and ionic.
 The result of the polarization energy is reused for the second term of the ionic energy Eq.~\eqref{eq:ionic-energy}, as both are point-discrete.
 This mirrors the original implementation.
-The ionic kernel only calculates the first term of the ionic energy, or to be more specific, the triangle-discrete term Eq.~\eqref{eq:ionic-energy-discrete}.
+The ionic kernel only calculates the first term of the ionic energy, or to be more specific, the triangle-discrete term of Eq.~\eqref{eq:ionic-energy-discrete}.
 The atoms, charges, flux, triangle corners and normals were put into flat arrays and passed to the kernels as needed.
 Even systems like 6VYB with 44k atoms or 1VSZ with 180k atoms fit comfortably into the 10GB of VRAM of an RTX 3080.
 
@@ -137,7 +137,7 @@ However, this turned out to be a very small issue, as the ionic and polarization
 The polarization and ionic kernels are launched for all surface points and triangles in parallel.
 It immediately became apparent that those are the more computationally intense kernels, being highly FP64-bound.
 
-Despite the fact that the optimization is very straightforward, the new GPU-accelerated version of \snakecase{energy_fast}, dubbed \snakecase{energy_cuda_fast}, ran 6VYB 17x faster on the RTX 3080 and a whopping 240x faster on an A100.
+Despite the fact that the optimization is very straightforward, the new GPU-accelerated version of \snakecase{energy_fast}, dubbed \snakecase{energy_cuda_fast}, ran 6VYB 17x faster on the RTX 3080 and a whopping 240x faster on an A100 than the CPU baseline.
 
 \subsubsection{Further optimizations}
 
@@ -146,7 +146,7 @@ I used CUDA's \snakecase{__restrict__} keyword of the data pointers, which preve
 This is something the compiler should handle automatically, but this keyword gives assurance and does nothing in the worst case.
 
 Tiling was deemed ineffective.
-Though it would have helped a bit for the Coulomb kernel, the gain was just 10x on a kernel that took around 1ms on 6VYB.
+Though it would have sped up the Coulomb kernel tenfold, this would have reduced it from 30ms to 3ms when calculating 6VYB.
 The other two kernels were heavily FP64-bound,
 and since tiling only helps with memory throughput, I subsequently dropped it.
 
@@ -167,36 +167,19 @@ For this I modified \texttt{normal\_intersection} to return \texttt{true} if it 
 As this occurrence is very rare, it did not affect the speed, and even the accuracy in many cases.
 
 % TODO pseudo code could be nice, but its also really trivial
+% prof hasn't complained, I guess it is just trivial enough
 
-\subsection{Mixed Precision}
-\label{sec:implementation-energy-calculation-mixed-precision}
-
-%TODO because turns out "mixed precision" was not mixed at all
-
-\subsection{FMM}
+\subsection{Fast Multipole Method Implementation}
 \label{sec:implementation-energy-calculation-fmm}
 
 Particularly for the polarization and ionic energies, it was obvious that in order to achieve any significant level of speedup, a more sophisticated approach was required while retaining the level of accuracy.
 For this purpose I built a fairly non-standard implementation of FMM, with the only ``normal'' things about it being the overall algorithm.
-It uses an LBVH tree, iterative dual-tree traversal with a double-sided $B_{max}$ MAC, spherical harmonic expansions with both associated-Legendre and pole-free Cartesian recurrence.
-
-\subsubsection{Overview}
-% TODO add overview
-The rough structure of my implementation is as follows:
+It uses a linear bounding volume hierarchy instead of a quad- or octree.
+The far- and near field are partitioned through an iteratively reformulated dual-tree traversal \cite{yokota2013dualtree}.
+For the multipole expansion I chose spherical harmonics but I had to evaluate their regular harmonics differently.
 On the CPU side, the previously mentioned data packing takes place, as is the case with the naive kernels.
-Then a LBVH source tree is constructed from the molecular particles.
-Directly after its construction, the multipole expansions are passed upwards.
-The source tree is reused for both energy calculations, while two different target trees are constructed for point-discrete and triangle-discrete calculations.
-Then for each target tree, it traverses the source and target using DTT, and creates interaction lists for the far field and near field.
-For the far-field interactions, the M2L translations are performed and passed downwards using L2L.
-Finally, both the L2P and P2P interactions are handled in a fused evaluation.
 
-Figure~\ref{fig:fmm-overview} shows the same pipeline as a flow chart, split into the eight groups the sections below follow, and marks for each stage whether it runs on the host or on the device.
-Each group is then broken out at the level of individual kernels in its own subsubsection, where the figure also records how every device kernel maps its work onto blocks and threads.
-
-\input{figures/fmm_overview}
-
-\subsubsection{Multipole Expansion}
+\subsubsection{Multipole Expansion and Translation Operators}
 
 Since both polarization energy Eq.~\eqref{eq:polarization-energy} and the second term of the ionic energy Eq.~\eqref{eq:ionic-energy} are variations of the Laplace kernel, I used spherical harmonics and the translation operators taken from ``A Fast Adaptive Multipole Algorithm in Three Dimensions'' paper \cite{cheng1999fastadaptive}. 
 The first term, though, has a different shape $r/|r|^3$, which is equal to the gradient of the Laplace kernel $\nabla 1/|r| = r/|r|^3$.
@@ -218,16 +201,6 @@ with the $P_n(x)$ being Legendre polynomials computed by Rodrigues formula:
 \end{equation}
 I created a device function \texttt{solid\_harmonics}, which computes either the regular harmonics $Y_n^m(\theta,\varphi) \cdot r^n$ or the irregular harmonics $\frac{Y_n^m(\theta,\varphi)}{r^{n+1}}$.
 I used spherical parametrization to calculate the necessary trigonometric functions from the Cartesian shift vector, avoiding the conversion from Cartesian to spherical coordinates.
-
-Computing the derivative exposed one large problem: the derivative diverged at the gradient center, causing catastrophic accuracy loss for the ionic energy term.
-Among other places, the regular harmonics appear in the L2P operator \ref{eq:l2l-potential}, where the local expansion is evaluated at the leaf's center.
-This is fine in the case of the potential, but diverges for the derivative, so I evaluated regular harmonics using pole-free Cartesian recurrences derived from the recurrence relations in \cite{perezjorda1996solidharmonics} instead of the associated Legendre recurrence:
-\begin{equation}
-    diagonal: R_m^m = -\sqrt{\frac{2m-1}{2m}} (x+iy) R_{m-1}^{m-1},   R_0^0 = 1
-\end{equation}
-\begin{equation}
-    vertical: R_n^m = \frac{2n-1}{\sqrt{(n-m)(n+m)}} \cdot z \cdot R_{n-1}^m - \sqrt{\frac{(n+m-1)(n-m-1)}{(n+m)(n-m)}} \cdot r^2 \cdot R_{n-2}^m
-\end{equation}
 
 The concrete forms of the translation operators used, following the notation of the paper, all rely on the coefficients:
 \begin{equation}
@@ -282,14 +255,8 @@ L2L shifts a local expansion $O_n^m$, centered at $X_0=(\rho,\alpha,\beta)$, dow
     L_j^k = \sum_{n=j}^{p}\sum_{m=-n}^{n} \frac{O_n^m \, i^{|m|-|m-k|-|k|} \, A_{n-j}^{m-k} \, A_j^k \, Y_{n-j}^{m-k}(\alpha,\beta) \, \rho^{n-j}}{(-1)^{n+j} \, A_n^m}
     \label{eq:l2l-coeffs}
 \end{equation}
-The coefficient order grows outward with the degree $n$ by $2n+1$, meaning that an expansion of degree 1 $M_1^m$ has 3 coefficients, while $M_2^m$ has 5, $M_3^m$ has 7, etc.
-A coefficient $M_n^m$ is always the complex conjugate of $M_n^{-m}$.
-This allowed me to pack them in a lower-triangular layout, with interleaving real and imaginary parts, storing only the positive $m$.
-To get the coefficient $M_n^{-m}$, I simply looked up $M_n^m$, and inverted its imaginary part.
-This way the number of coefficients grows only by $n+1$.
-For the buffer size, that means the number of coefficients truncated at degree $p$ goes from $\sum_{n=0}^{p}(2n+1) = (p+1)^2$ to $\sum_{n=0}^{p}(n+1) = \frac{(p+1)(p+2)}{2}$
 
-\subsection{Automatic Differentiation}
+\subsubsection{Automatic Differentiation}
 
 Automatic differentiation is a programming technique to compute the differential function.
 It exploits the fact that computer programs at their core use simple arithmetic operations like summation, multiplication, division and so on.
@@ -299,9 +266,50 @@ after computing the value, the derivative is traced back.
 Forward mode can be implemented through operator overloads, where the overloaded arithmetic operation handles both the value and the derivative calculation.
 That means that the program functions themselves do not need to be altered, as the additional calculations are handled through the overloads of the basic arithmetic that they already use.
 
-\subsubsection{Source Tree Construction}
+Computing the derivative exposed one large problem: the derivative diverged at the gradient center, causing catastrophic accuracy loss for the ionic energy term.
+Among other places, the regular harmonics appear in the L2P operator \ref{eq:l2l-potential}, where the local expansion is evaluated at the leaf's center.
+This is fine in the case of the potential, but diverges for the derivative, so I evaluated regular harmonics using pole-free Cartesian recurrences derived from the recurrence relations in \cite{perezjorda1996solidharmonics} instead of the associated Legendre recurrence:
+\begin{equation}
+    diagonal: R_m^m = -\sqrt{\frac{2m-1}{2m}} (x+iy) R_{m-1}^{m-1},   R_0^0 = 1
+    \label{eq:Cartesian-recurrence-diagonal}
+\end{equation}
+\begin{equation}
+    vertical: R_n^m = \frac{2n-1}{\sqrt{(n-m)(n+m)}} \cdot z \cdot R_{n-1}^m - \sqrt{\frac{(n+m-1)(n-m-1)}{(n+m)(n-m)}} \cdot r^2 \cdot R_{n-2}^m
+    \label{eq:Cartesian-recurrence-vertical}
+\end{equation}
 
-The source tree is constructed using Karras's LBVH algorithm \cite{karras2012lbvh}.
+\subsubsection{Storage Optimization}
+
+The coefficient order grows outward with the degree $n$ by $2n+1$, meaning that an expansion of degree 1 $M_1^m$ has 3 coefficients, while $M_2^m$ has 5, $M_3^m$ has 7, etc.
+A coefficient $M_n^m$ is always the complex conjugate of $M_n^{-m}$.
+This allowed me to pack them in a lower-triangular layout, with interleaving real and imaginary parts, storing only the positive $m$.
+To get the coefficient $M_n^{-m}$, I simply looked up $M_n^m$, and inverted its imaginary part.
+This way the number of coefficients grows only by $n+1$.
+For the buffer size, that means the number of coefficients truncated at degree $p$ goes from $\sum_{n=0}^{p}(2n+1) = (p+1)^2$ to $\sum_{n=0}^{p}(n+1) = \frac{(p+1)(p+2)}{2}$
+
+I precomputed and cached a bunch of expressions that only depended on the iterators $n$ and $m$ like Eq.~\eqref{eq:translation-coeff-a} or parts of the Cartesian recurrence Eq.~\eqref{eq:Cartesian-recurrence-diagonal} and Eq.~\eqref{eq:Cartesian-recurrence-vertical} in constant memory.
+I also cached the reciprocal of Eq.~\eqref{eq:translation-coeff-a} to avoid divisions in the translation operators.
+
+\subsubsection{Overview}
+
+The rough structure of my implementation can be seen in Figure~\ref{fig:fmm-overview}.
+
+Then a LBVH source tree is constructed from the molecular particles.
+Directly after its construction, the multipole expansions are passed upwards.
+The source tree is reused for both energy calculations, while two different target trees are constructed for point-discrete and triangle-discrete calculations.
+Then for each target tree, it traverses the source and target using DTT, and creates interaction lists for the far field and near field.
+For the far-field interactions, the M2L translations are performed and passed downwards using L2L.
+Finally, both the L2P and P2P interactions are handled in a fused evaluation.
+
+Figure~\ref{fig:fmm-overview} shows the same pipeline as a flow chart, split into the eight groups the sections below follow, and marks for each stage whether it runs on the host or on the device.
+Each group is then broken out at the level of individual kernels in its own subsubsection, where the figure also records how every device kernel maps its work onto blocks and threads.
+
+\input{figures/fmm_overview}
+
+\subsubsection{1. Source Tree Construction}
+
+The flow of the source tree construction can be see in Figure~\ref{fig:fmm-g1}.
+The source tree is constructed using Karras's LBVH algorithm \cite{karras2012lbvh}, which I explained in \ref{sec:optimization-techniques-cuda-optimizations-lbhv}.
 First it computes a bounding box over all atoms using a grid-stride \texttt{bbox\_kernel}.
 % It combines custom atomicMinDouble and atomicMaxDouble into 6 shared variables per block, before comparing the result of the block against the global memory.
 % Although not efficient, this at least reduces the traffic from once per thread to 6 times the amount of blocks.
@@ -310,7 +318,7 @@ First it computes a bounding box over all atoms using a grid-stride \texttt{bbox
 % I might switch to cub Reduce instead, this is embarrassingly bad
 % I also should be vary of being that precise right now
 Next, it creates the Morton codes for each atom in the \texttt{morton\_kernel}, before sorting using a radix sort and reordering them by those codes in \texttt{reorder\_kernel}.
-Then follows the bottom-up build of the tree, exactly as described in \ref{sec:alternative-techniques-cuda-optimizations-lbhv}.
+Then follows the bottom-up build of the tree, exactly as described in \ref{sec:optimization-techniques-cuda-optimizations-lbhv}.
 Afterwards, it computes the bounding boxes of the internal nodes bottom-up in \texttt{summarize\_aabb\_kernel}.
 
 The resulting structure is a binary radix tree, which is different from a traditional octree used in FMM.
@@ -338,8 +346,9 @@ Lastly, it allocates the buffer for the multipole moments with size $n_box \cdot
 
 \input{figures/fmm_g1}
 
-\subsubsection{Upward Pass}
+\subsubsection{2. Upward Pass}
 
+After the source tree construction comes the upward pass, which can be seen in Figure~\ref{fig:fmm-g2}.
 The \snakecase{src_p2m_kernel} seeds the box leaves with a monopole, which is then passed upward using M2M Eq.~\eqref{eq:m2m-potential}, which is equivalent to using the P2M.
 This is not optimal, and using a proper P2M would be better. However, this kernel runs once per tree build, and its influence is minimal.
 It is launched with one thread per atom, one block per box leaf.
@@ -348,9 +357,10 @@ The \snakecase{src_m2m_kernel} is launched with one thread per box leaf climbing
 
 \input{figures/fmm_g2}
 
-\subsubsection{Target Tree Construction}
+\subsubsection{3. Target Tree Construction}
 
 The target tree is built twice, once for the point-discrete, and once for the triangle-discrete calculations.
+The flow of a single construction cycle can be seen in Figure~\ref{fig:fmm-g3}
 The LBVH path from the source tree builder is reused almost entirely.
 The only difference is the \snakecase{reorder_geom_kernel}, which only reorders the atoms geometrically, as the target tree carries no charges, and also records the original caller's permutation, so the results scatter back to that layout.
 Just like in the source tree, the box and frontier nodes are marked, and a dense slot map for them is created.
@@ -361,10 +371,10 @@ Because many threads write into the same row concurrently, each row carries an a
 
 \input{figures/fmm_g3}
 
-\subsubsection{Traversal}
+\subsubsection{4. Dual-tree Traversal}
 
 %It's not actually traversal, I just collect the interaction lists
-The traverse is a breadth-first descent based on the DTT \cite{yokota2013dualtree} algorithm described in \ref{sec:alternative-techniques-nbody-fmm-dtt}, using the double-sided $B_{max}$ MAC controlled through $\theta$.
+Figure~\ref{fig:fmm-g4} shows the breadth-first traversal based on the DTT \cite{yokota2013dualtree} algorithm described in \ref{sec:alternative-techniques-nbody-fmm-dtt}, using the double-sided $B_{max}$ MAC controlled through $\theta$.
 Rather than the $B_{\max}$ of each cell, I use the half-diagonals $r_A$ and $r_B$ of the bounding boxes, accepting a pair when $r_A + r_B < \theta R$
 (Figure~\ref{fig:fmm-mac}).
 \input{figures/mac_criterion}
@@ -383,17 +393,18 @@ This approach is surprisingly robust, and handles even very large systems like H
 
 \input{figures/fmm_g4}
 
-\subsubsection{Near-Field List Grouping}
+\subsubsection{5. P2P CSR}
 
 After the traversal, the P2P pairs are unsorted.
-So they are grouped by the target leaf inside \snakecase{fmm_build_p2p_csr}, using the exact same machinery as the L2L worklist.
+So they are grouped by the target leaf inside \snakecase{fmm_build_p2p_csr} as seen in Figure~\ref{fig:fmm-g5}, using the exact same machinery as the L2L worklist.
 A first pass counts the near sources of each target, an exclusive scan turns those counts into the CSR row offsets, and a final scatter pass writes each pair's source leaf into its target's row. 
 This way, I avoided a BFS descent later when evaluating P2P.
 
 \input{figures/fmm_g5}
 
-\subsubsection{Downward Pass}
+\subsubsection{6. Downward Pass}
 
+The downward pass is demonstrated in Figure~\ref{fig:fmm-g6}
 Inside \snakecase{fmm_translations}, \snakecase{m2l_accumulate_kernel} translates the multipole expansions of the source tree to local expansions of the target tree using M2L Eq.~\eqref{eq:m2l-potential}.
 The harmonics buffers are sized to $P$ at compile time with templating, preventing register spills.
 A switch case in \snakecase{fmm_build_local} picks the corresponding template from the runtime $p$.
@@ -410,8 +421,9 @@ Since each write to the local moments is distinct, no atomics are needed at this
 
 \input{figures/fmm_g6}
 
-\subsubsection{Fused Evaluation}
+\subsubsection{7. Fused Evaluation}
 
+Finally, the near-field and far-field contributions are evaluated on the targets, as can be seen in Figure~\ref{fig:fmm-g7}.
 Both the P2P and L2P evaluations are rolled into a single kernel \snakecase{l2p_p2p_kernel} launched per block for every box target leaf, with every thread handling at most one atom.
 So the target position is loaded once and both contributions are summed in registers.
 \snakecase{launch_l2p_p2p} handles the compile-time $P$ selection, just like in the downward pass.
@@ -451,7 +463,7 @@ Every group leader also sets their \snakecase{device_id} through \snakecase{AMGX
 
 \subsubsection{Energy Calculation}
 
-There is not much to say here.
+This step is very trivial.
 Since the device is already set for all ranks during \snakecase{gpu_topology}, all kernels are automatically launched on the correct GPU.
 
 \FloatBarrier
@@ -475,12 +487,12 @@ Other ranks still insert their ray requests into the rays list, as was the case 
 After the collection pass, all pending rays are computed in bulk and all the requested rays are passed to the other ranks once.
 Finally, the quadrants are classified, still with \snakecase{is_in_ns_surf}, but this does not cast any new rays.
 
-\subsection{BIMPP}
+\subsection{Optimizing BIMPP}
 \label{sec:implementation-host-side-bimpp}
 
 Though it is just a dependency of NGPB, some systems of BIMPP were in dire need of optimization.
 These optimizations ended up being CPU only.
-I created a private fork of it, which I used instead of the special NGPB release.
+I created a private fork of it, which I used instead of the official NGPB-specific release.
 
 \subsubsection{sparse\_matrix\_template}
 \label{sec:implementation-host-side-bimpp-sparse-matrix-template}

@@ -206,7 +206,7 @@ This is particularly useful to avoid register spills, as the buffer size is alre
 \label{sec:optimization-techniques-cuda-optimizations-lbhv}
 
 Since both Barnes-Hut and FMM are treecode based, constructing a tree is of course an important first step.
-Nvidia researcher Tero Karras presented a highly optimized linear bounding volume hierarchy implementation in both blog~\cite{karras2012thinkingparallel} and paper~\cite{karras2012lbvh} form.
+Nvidia researcher Tero Karras presented a highly optimized linear bounding volume hierarchy (LBVH) implementation in both blog~\cite{karras2012thinkingparallel} and paper~\cite{karras2012lbvh} form.
 It uses Morton codes~\cite{morton1966geodetic}, also known as the Z-order curve, to sort objects in a domain, and then partition them into a tree.
 
 Morton codes are a technique to create a space-filling curve that maps objects in higher-dimensional space onto a single dimension.
