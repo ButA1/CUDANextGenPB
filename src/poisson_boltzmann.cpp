@@ -201,7 +201,7 @@ main (int argc, char **argv)
     std::cout << "\n========= [ Building Epsilon Map ] =========\n";
   }
 
-  pb.create_markers_fast (ray_cache);
+  pb.create_markers (ray_cache);
 
   if (rank == 0)
     std::cout << "============================================\n";

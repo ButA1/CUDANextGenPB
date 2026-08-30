@@ -213,6 +213,98 @@ def aggregate(rows, metric_col="energy_pol", require_baseline=True,
     return points, info
 
 
+def _f(x):
+    x = (x or "").strip()
+    return float(x) if x else None
+
+
+def stock_floor(bench_csv, replay_csv=None, metric_col="energy_pol"):
+    r"""How well stock NextGenPB reproduces its own polarisation energy.
+
+    The sweep figures plot FMM error against the naive $O(N^2)$ GPU sum, which
+    invites the question the number alone cannot answer: how accurate is the code
+    being replaced?  This measures that, as the largest disagreement between
+    evaluations that are supposed to give the identical answer:
+
+      cpu_vs_naive        the stock CPU path (energy_method=0) against the naive
+                          GPU sum (energy_method=1) of the SAME pipeline run, so
+                          both see the same solved potential.  This is the pure
+                          summation-order difference.
+      spread_cpu          run-to-run spread of energy_method=0 at one fixed
+                          configuration, and likewise spread_naive.  Non-zero
+                          because AMGX is not bitwise reproducible, so phi -- and
+                          with it the energy -- moves slightly between runs.
+      pipeline_vs_replay  the naive result of the pipeline run against the naive
+                          result the replay computes from the dump.  Different
+                          pipeline runs, so this again carries the solver's
+                          non-determinism; it bounds how far the replay's y-axis
+                          reference can sit from the pipeline's.
+
+    The floor is the max of whichever of these the CSVs support.  Reporting only
+    cpu_vs_naive would over-claim: on 1VSZ it is 2.9e-13 while the repeat spread
+    at a fixed configuration is 2.8e-12, i.e. an order of magnitude larger, so a
+    line drawn at 2.9e-13 would sit well inside the noise of its own measurement.
+
+    Only a full-pipeline bench_sweep.py CSV can supply this.  A replay CSV cannot:
+    its only reference IS the naive kernel, so the CPU path is never evaluated
+    there (see normalise_replay).
+
+    Returns a dict of the components plus "floor", or None if bench_csv holds no
+    solver configuration with both energy methods.
+    """
+    with open(bench_csv, newline="") as fh:
+        rows = [r for r in csv.DictReader(fh) if r.get("status") == "ok"]
+
+    # Grouped by solver configuration on purpose: energy_pol rides on the solved
+    # potential, so comparing an LIS run against an AMGX one measures the linear
+    # solve and not the energy summation at all.
+    groups = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        method = r.get("energy_method")
+        if method not in ("0", "1"):
+            continue
+        val = _f(r.get(metric_col))
+        if val is None:
+            continue
+        key = (r.get("np"), r.get("linear_solver"), r.get("amgx_config"),
+               r.get("sweep"))
+        groups[key][method].append(val)
+
+    usable = [(k, d) for k, d in groups.items() if d["0"] and d["1"]]
+    if not usable:
+        return None
+    # The best-sampled configuration, so the spreads rest on as many repeats as
+    # the data allows.
+    _, best = max(usable, key=lambda kd: len(kd[1]["0"]) + len(kd[1]["1"]))
+
+    cpu, naive = best["0"], best["1"]
+    mean_cpu, mean_naive = statistics.fmean(cpu), statistics.fmean(naive)
+
+    out = {
+        "cpu_vs_naive": abs(mean_naive - mean_cpu) / abs(mean_cpu),
+        "spread_cpu": (max(cpu) - min(cpu)) / abs(mean_cpu),
+        "spread_naive": (max(naive) - min(naive)) / abs(mean_naive),
+        "n_cpu": len(cpu), "n_naive": len(naive),
+        "cpu_energy": mean_cpu, "naive_energy": mean_naive,
+        "pipeline_vs_replay": None,
+    }
+
+    if replay_csv:
+        with open(replay_csv, newline="") as fh:
+            vals = [_f(r.get(metric_col)) for r in csv.DictReader(fh)
+                    if r.get("method") == "naive"]
+        vals = [v for v in vals if v is not None]
+        if vals:
+            mean_replay = statistics.fmean(vals)
+            out["pipeline_vs_replay"] = (abs(mean_naive - mean_replay)
+                                         / abs(mean_replay))
+
+    out["floor"] = max(v for k, v in out.items()
+                       if k in ("cpu_vs_naive", "spread_cpu", "spread_naive",
+                                "pipeline_vs_replay") and v is not None)
+    return out
+
+
 def machine_note(machine, ranks):
     r"""The "measured on X with N ranks" sentence every figure caption carries.
 

@@ -221,6 +221,18 @@ Next I will show the comparison between LIS and AMGX, as well as the tuned confi
 The energy calculation results are a lot more intricate, particularly due to my FMM implementation having different parameters.
 It also lead to the discovery, that due to NGPB evaluating the molecular atoms against the surface, having a shared leaf size for both trees was actually detrimental.
 
+\subsection{Create Markers}
+\label{sec:evaluation-results-create-markers}
+
+\subsection{BIMPP}
+\label{sec:evaluation-results-bimpp}
+
+\subsubsection{sparse\_matrix\_template}
+
+\subsubsection{bim3a\_solution\_with\_ghosts}
+
+\subsection{Baseline}
+
 \subsection{Linear Equation Solver}
 \label{sec:evaluation-results-lin-eq-solver}
 
@@ -264,13 +276,88 @@ It is still surprising that the untamed GA100 chip of the A100 did not manage to
 
 The FMM has multiple parameters, which I needed to balance against each other to find the optimum, those being the order of the multipole expansion $P$, the MAC parameter $\theta$ and the number of particles inside one leaf $n_{leaf}$.
 I made four sweeps of $P$ and $\theta$ for values between 6 to 10 and 0.2 to 0.8 for both 6VYB (test1) and 1VSZ (test2) on my local machine,
-I've plotted their speed against their relative error compared to the CPU reference, taken from an average of 3 runs,
+I've plotted their speed against their relative error compared to the naive $O(N^2)$ GPU sum over the same inputs, taken from an average of 3 runs,
 which can be seen in Figure~\ref{fig:fmm_presplit_6vyb} and \ref{fig:fmm_presplit_1vsz}.
+
+% ------------------------------------------------------------------------
+%  NOTE (Claude) -- delete once the surrounding text is written.
+%
+%  All four accuracy-vs-work figures (presplit 6.2/6.3, ptheta 6.9/6.10) come
+%  from fmm_replay, whose ONLY reference is the naive GPU kernel. There is no
+%  CPU path in a replay, so "error against the CPU reference" was wrong in both
+%  the captions and the sentence above; corrected to the naive O(N^2) sum.
+%
+%  The grey band is new: the relative error stock NGPB itself reaches in the
+%  polarisation energy on the analytical Kirkwood sphere, 1.246641e-10. It is
+%  the accuracy of the METHOD being replaced, so it is the level an approximation
+%  has to reach to cost nothing in accuracy -- which is the reading that makes
+%  the 1.5e-10 target above defensible rather than arbitrary.
+%
+%  CHECK THIS: table 6.2 (tab:ngpb-error-magnitudes) gives the Kirkwood
+%  polarisation error as 7.38e-10, not 1.246641e-10. Those cannot both be the
+%  same measurement. If 7.38e-10 is what the NGPB authors reported and
+%  1.246641e-10 is your own test3 run, say so where the number is quoted; if
+%  1.246641e-10 supersedes it, table 6.2 needs updating. Whichever it is, the
+%  band is redrawn by changing one number:
+%      --kirkwood-err 1.246641e-10
+%
+%  NOT drawn, but worth a sentence somewhere: the pipeline does not reproduce
+%  its own polarisation energy below ~5e-12 (scripts/fmm_csv.py:stock_floor,
+%  reported by --stock-csv). Largest disagreement between evaluations that
+%  should be identical:
+%
+%                            6VYB (test1)    1VSZ (test2)
+%    CPU vs naive, same run    4.72e-12         2.94e-13
+%    repeat spread, CPU        2.93e-12         2.76e-12
+%    repeat spread, naive      6.25e-13         1.79e-12
+%    pipeline vs replay naive  1.19-1.74e-12    0.64-4.13e-12
+%
+%  Only the first row is a summation-order difference; the rest is AMGX, which
+%  is not bitwise reproducible, so phi -- and with it the energy -- moves
+%  between runs. So the accuracy axis is meaningful over roughly 5e-12 .. 1e-4,
+%  and configurations separated by less than that are not ranked, they are noise.
+%
+%  Regenerated with (from the repository root):
+%    M='the local system (Table~\ref{tab:test-systems})'
+%    K=1.246641e-10
+%    python3 scripts/plot_fmm_sweep.py test1 --csv test1/fmm_sweep_6VYB_presplit.csv \
+%        --tag fmm_presplit_6vyb --molecule 6VYB --natoms 44495 \
+%        --kirkwood-err $K --machine "$M"
+%    python3 scripts/plot_fmm_sweep.py test2 --csv test2/fmm_sweep.csv \
+%        --tag fmm_presplit_1vsz --molecule 1VSZ --natoms 14299 \
+%        --kirkwood-err $K --machine "$M"
+%    python3 scripts/plot_fmm_sweep.py test1 --csv test1/ptheta.csv \
+%        --tag fmm_ptheta_6vyb --molecule 6VYB --natoms 44495 \
+%        --kirkwood-err $K --machine "$M"
+%    python3 scripts/plot_fmm_sweep.py test2 --csv test2/ptheta.csv \
+%        --tag fmm_ptheta_1vsz --molecule 1VSZ --natoms 14299 \
+%        --kirkwood-err $K --machine "$M"
+%  Add --stock-csv test<N>/bench_runs.csv to print the reproducibility numbers
+%  above; it changes nothing that is drawn.
+%
+%  Both ptheta figures now carry P = 6..12, and the data does NOT say what the
+%  earlier config sweep at other leaf pairs said. At 16/1024, P = 12 is MORE
+%  accurate than P = 11 at 12 of the 14 (molecule, theta) points -- typically
+%  by 3-6x -- and is simply 1.14-1.28x slower everywhere. So it loses on cost,
+%  not on conditioning:
+%
+%    theta   6VYB P11 -> P12               1VSZ P11 -> P12
+%    0.2    1.11e-14 -> 9.86e-15 (1.15x)  4.09e-15 -> 1.21e-15 (1.21x)
+%    0.3    3.13e-12 -> 1.59e-13 (1.14x)  4.18e-12 -> 7.71e-13 (1.14x)
+%    0.4    5.52e-11 -> 1.47e-11 (1.15x)  1.11e-10 -> 5.97e-11 (1.27x)
+%    0.5    4.94e-10 -> 1.05e-09 (1.17x)  1.93e-09 -> 7.60e-10 (1.25x)
+%    (bracket = P12/P11 time; the two 6VYB reversals are theta 0.5 and 0.8)
+%
+%  It still reaches the Pareto front at the accurate end: 3 of the front points
+%  on each molecule are P = 12, all at theta 0.2-0.4. It just never wins at the
+%  1.5e-10 target, where a lower P and a larger theta get there sooner. Do not
+%  write "P = 12 is less accurate" on the strength of this figure.
+% ------------------------------------------------------------------------
 
 \input{figures/fmm_presplit_6vyb.tex}
 \input{figures/fmm_presplit_1vsz.tex}
 
-Since it was my goal to achieve a relative error of the polarization energy in the order of $10^{-10}$ or lower, two configurations for test1 seem to be hitting that goal while being the fastest: $P = 9$, $\theta = 0.3$, $n_{leaf} = 64$ and $P = 10$, $\theta = 0.4$, $n_{leaf} = 256$.
+Since it was my goal to achieve a relative error of the polarization energy of 1.5e-10 or lower, two configurations for test1 seem to be reaching that goal while being the fastest: $P = 9$, $\theta = 0.3$, $n_{leaf} = 64$ and $P = 10$, $\theta = 0.4$, $n_{leaf} = 256$.
 Profiling both configurations using \snakecase{ncu} revealed that each configurations are quick for very different reasons.
 The \snakecase{l2p_p2p_kernel} ran much quicker with $P = 9$, $\theta = 0.3$, $n_{leaf} = 64$ while \snakecase{m2l_accumulate_kernel} was much quicker with $P = 10$, $\theta = 0.4$, $n_{leaf} = 256$.
 The underlying reason is that the source tree containing the atoms and the target tree containing the surface points have wildly different sizes.
@@ -291,52 +378,37 @@ It also shows that they differ for both molecules, which is probably due to thei
 I initially assumed that the ideal counts would exactly where the geometric leaf sizes of both tree would be equal, but further testing demonstrated that the optima shifted with different $P$ and $\theta$.
 This can be explained by the cost of P2P and M2L not being equal.
 The balance shifts towards P2P when the cost of M2L increases through rasing of $P$.
-I demonstrated this effect for 6VYB in the left diagram of the Figure~\ref{fig:leaf_optimum_shift_6vyb}, where the optimal $n_{leaf,src}$ rises monotonically with the order of $P$.
+I demonstrated this effect for 6VYB in the left diagram of the Figure~\ref{fig:leaf_optimum_shift_6vyb}, where the optimal $n_{leaf,src}$ rises monotonically with the order of $P$ (4, 4, 8, 8, 16, 16 for $P$ 6..11).
 Meanwhile $\theta$ has a much weaker secondary effect, flattening the the curve as it increases but not relocating the optimum.
 Over $\theta = 0.3$ to $0.6$ the optimum does not move at all.
-This also means that this balances is shifted once again on the cluster, where the cost of P2P is greatly reduced, thanks to higher FP64 performance.
-On top of it all, the number of ranks also influence the balance, though in a predictable way.
-Each rank holds an exact copy of the source tree, but their target tree only is built from the particles of the domain region owned by the rank.
-Even though regions are not equally populated, this still roughly equates to the number of particles being divided by the number of ranks.
-Despite the multitude of variables, the general direction for searching optima is clear, and considering the accuracy target, the mission now became a search for the fastest configuration that still satisfies it.
-
-For my local machine the measured optimal configurations for 6VYB (test1) and 1VSZ (test2) can be seen in Table~\ref{tab:fmm_ptheta_6vyb-pareto} and \ref{tab:fmm_ptheta_1vsz-pareto}.
-For the stated accuracy goal of a potential energy relative error of less than 1.5e-10, the most efficient config for 6VYB was $P=11$, $\theta=0.4$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
-For 1VSZ the most efficient config was $P=7$, $\theta=0.3$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
-Note that despite having the same $n_{leaf,src}$ and $n_{leaf,tgt}$, their radically different $P$
-
-% ------------------------------------------------------------------------
-%  Source x target leaf grid, theta = 0.3, p = 9, 3 repeats.
-%
-%  1VSZ: optimum 16/512 at 1.3582 s, INTERIOR on both axes.
-%    best target per source leaf:  8 -> 1.5119   16 -> 1.3582
-%                                 32 -> 1.5045   64 -> 1.9295
-%    target axis at src=16: 1.9252 / 1.5442 / 1.3582 / 1.5389 / 1.9084 / 2.6856
-%                           for tgt = 128 / 256 / 512 / 1024 / 2048 / 4096
-%
-%  6VYB: fastest 8/1024 at 3.4184 s, but src=8 is the EDGE of the swept range --
-%    the source axis never turns over. Not a bracketed optimum.
-%    best target per source leaf:  8 -> 3.4184   16 -> 3.6017
-%                                 32 -> 4.5280   64 -> 6.2721
-%
-%  CAVEAT -- the source optimum depends on p, so "8/1024 is optimal" is only true
-%  at the theta/p this grid was run at. Measured on 6VYB, clean runs (spread <2.5%):
-%      theta 0.3, p 9   : 8/1024 = 3.411   16/1024 = 3.749   -> src 8 wins by 9%
-%      theta 0.4, p 11  : 8/1024 = 3.255   16/1024 = 3.027   -> src 16 wins by 7%
-%  A noisier matrix (4-6% spread) suggests p is the driver, not theta: src 8 wins
-%  at p=9 for both theta 0.4 and 0.5, src 16 wins at p=11 for both. Mechanism: a
-%  higher p makes each M2L dearer, favouring fewer/larger source boxes; a lower p
-%  makes M2L cheap, so a deeper tree that shrinks the near field pays off.
-%  The TARGET axis optimum (~512-1024) is the stable part across all of this.
-%
-%  Note also that the earlier "the closer the two leaf sizes, the better" reading
-%  came from sweep2.csv, whose target axis stopped at 256. In that grid src 16
-%  wins 9 of 16 (theta, order, tgt) combinations and src 32 the other 7, so src 8
-%  never wins -- but the grid never reached the tgt = 512-1024 region where it does.
-% ------------------------------------------------------------------------
 
 \input{figures/leaf_sweep_6vyb.tex}
 \input{figures/leaf_sweep_1vsz.tex}
+
+\input{figures/leaf_optimum_shift_6vyb.tex}
+\input{figures/leaf_optimum_shift_6vyb_table.tex}
+
+This also means that this balances is shifted once again on the cluster, where the cost of P2P is greatly reduced, thanks to higher FP64 performance.
+The left diagrams of Figures~\ref{fig:platform_shift_1vsz} and \ref{fig:platform_shift_6vyb} both show this effect though an increase in optimal $n_{leaf,src}$, which increases the number of P2P calculations through the two mechanism that explained above.
+On top of it all, the number of ranks also influence the balance.
+Each rank holds an exact copy of the source tree, but their target tree only is built from the particles of the domain region owned by the rank.
+Even though regions are not equally populated, this still roughly equates to the number of particles being divided by the number of ranks, acting like a multiplier on the $n_{leaf,tgt}$.
+This can be clearly seen in the right diagram of Figure~\ref{fig:platform_shift_6vyb}, showing a decrease in the optimal $n_{leaf,tgt}$.
+Though the same cannot be objectively said about 1VSZ, it is clear from the curve that the A100-16 rank curve is almost flat between 512 and 1024, while the A100-4 rank curve has much more clear minima.
+
+\input{figures/platform_shift_6vyb.tex}
+\input{figures/platform_shift_6vyb_table.tex}
+\input{figures/platform_shift_1vsz.tex}
+
+Despite the multitude of variables, the general direction for searching optima is clear, and considering the accuracy target, the mission now became a search for the fastest configuration that still satisfies it.
+For my local machine the measured optimal configurations for 6VYB (test1) and 1VSZ (test2) can be seen in Table~\ref{tab:fmm_ptheta_6vyb-pareto} and \ref{tab:fmm_ptheta_1vsz-pareto}.
+For the stated accuracy goal of a potential energy relative error of less than 1.5e-10, the most efficient config for 6VYB was $P=11$, $\theta=0.4$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
+For 1VSZ the most efficient config was $P=7$, $\theta=0.3$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
+
+\input{figures/fmm_ptheta_6vyb.tex}
+\input{figures/fmm_ptheta_6vyb_table.tex}
+\input{figures/fmm_ptheta_1vsz.tex}
+\input{figures/fmm_ptheta_1vsz_table.tex}
 
 % ------------------------------------------------------------------------
 %  NOTE (Claude) -- delete this block once the surrounding text is written.
@@ -350,8 +422,6 @@ Note that despite having the same $n_{leaf,src}$ and $n_{leaf,tgt}$, their radic
 %        --tag leaf_optimum_shift_6vyb
 %
 %  OBSERVATIONS CUT FROM THE CAPTIONS (they are yours to make in the body text):
-%   - Fig. leaf_optimum_shift: the minimum walks monotonically toward larger
-%     source leaves as P rises, because P enters the cost of an M2L but NOT the
 %     tree geometry -- fmm_build_atom_tree uses it only to size the moment array
 %     (t->comp = comp_of(p)); everything geometric comes from the atoms, the leaf
 %     size and theta. So a dearer far field is paid for with fewer, larger source
@@ -396,8 +466,6 @@ Note that despite having the same $n_{leaf,src}$ and $n_{leaf,tgt}$, their radic
 %  three) but no theta_vs_leaf.csv, so the right-hand panel cannot be built.
 % ------------------------------------------------------------------------
 
-\input{figures/leaf_optimum_shift_6vyb.tex}
-\input{figures/leaf_optimum_shift_6vyb_table.tex}
 
 % ------------------------------------------------------------------------
 %  theta x p at 16/1024, 3 repeats. Cheapest configuration per error target is in
@@ -410,19 +478,6 @@ Note that despite having the same $n_{leaf,src}$ and $n_{leaf,tgt}$, their radic
 %  The smaller system gains less, as expected for O(N) vs O(NM) at small N.
 % ------------------------------------------------------------------------
 
-\input{figures/fmm_ptheta_6vyb.tex}
-\input{figures/fmm_ptheta_6vyb_table.tex}
-\input{figures/fmm_ptheta_1vsz.tex}
-\input{figures/fmm_ptheta_1vsz_table.tex}
 
-\subsection{Create Markers}
-\label{sec:evaluation-results-create-markers}
-
-\subsection{BIMPP}
-\label{sec:evaluation-results-bimpp}
-
-\subsubsection{sparse\_matrix\_template}
-
-\subsubsection{bim3a\_solution\_with\_ghosts}
 
 \subsection{Overall}

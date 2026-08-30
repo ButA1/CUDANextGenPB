@@ -30,4 +30,18 @@
 
 TOPO=2node
 MPI_MODE=srun
-source "$SLURM_SUBMIT_DIR/scaling_body.sh"
+BODY="$SLURM_SUBMIT_DIR/scaling_body.sh"
+if [ ! -r "$BODY" ]; then
+    echo "MISSING: $BODY" >&2
+    echo "" >&2
+    echo "This wrapper only sets the SBATCH directives; the actual job lives in" >&2
+    echo "scaling_body.sh, which all three scaling jobs share. Copy it across:" >&2
+    echo "" >&2
+    echo "    scp scaling_body.sh run_scaling_*.slurm <cluster>:$SLURM_SUBMIT_DIR/" >&2
+    echo "    scp -r scripts <cluster>:$SLURM_SUBMIT_DIR/" >&2
+    echo "" >&2
+    echo "scripts/ too: --sweeps s and --mpi-cmd are recent additions to" >&2
+    echo "bench_sweep.py and an older copy rejects both." >&2
+    exit 1
+fi
+source "$BODY"

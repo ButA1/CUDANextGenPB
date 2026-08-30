@@ -64,15 +64,17 @@
     log basis x=10, log basis y=10,
     xtick={0.5,1,2,5,10,20}, xticklabels={0.5,1,2,5,10,20},
     ytick={1e-16,1e-14,1e-12,1e-10,1e-08,1e-06,0.0001},
-    legend columns=7,
+    legend columns=5,
     legend style={draw=none, font=\footnotesize, column sep=0.6em},
 ]
 
-\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = 32/32$}, legend to name=fmmlegendfmmpresplit6vyb]
-  % resolution floor of the comparison
+\nextgroupplot[title={$n_{leaf} = 32$}, legend to name=fmmlegendfmmpresplit6vyb]
+  % stock NextGenPB error on the analytical Kirkwood sphere
   \addplot[draw=none, fill=black!7, forget plot]
-    coordinates {(0.434589,3.33333e-17) (34.3197,3.33333e-17) (34.3197,\fmmNaiveErrfmmpresplitvyb) (0.434589,\fmmNaiveErrfmmpresplitvyb)}
+    coordinates {(0.434589,3.33333e-17) (34.3197,3.33333e-17) (34.3197,\fmmKirkErrfmmpresplitvyb) (0.434589,\fmmKirkErrfmmpresplitvyb)}
     \closedcycle;
+  \addplot[black!45, densely dotted, line width=1.0pt, forget plot]
+    coordinates {(0.434589,\fmmKirkErrfmmpresplitvyb) (34.3197,\fmmKirkErrfmmpresplitvyb)};
   % naive O(N^2) energy time
   \addplot[black!55, dashed, line width=0.8pt, forget plot]
     coordinates {(\fmmNaiveTimefmmpresplitvyb,3.33333e-17) (\fmmNaiveTimefmmpresplitvyb,0.000232409)};
@@ -103,13 +105,17 @@
   \addlegendentry{Pareto front}
   \addlegendimage{black!55, dashed, line width=0.8pt}
   \addlegendentry{naive $O(N^2)$}
+  \addlegendimage{black!45, densely dotted, line width=1.0pt}
+  \addlegendentry{stock NGPB error}
 
 
-\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = 64/64$}]
-  % resolution floor of the comparison
+\nextgroupplot[title={$n_{leaf} = 64$}]
+  % stock NextGenPB error on the analytical Kirkwood sphere
   \addplot[draw=none, fill=black!7, forget plot]
-    coordinates {(0.434589,3.33333e-17) (34.3197,3.33333e-17) (34.3197,\fmmNaiveErrfmmpresplitvyb) (0.434589,\fmmNaiveErrfmmpresplitvyb)}
+    coordinates {(0.434589,3.33333e-17) (34.3197,3.33333e-17) (34.3197,\fmmKirkErrfmmpresplitvyb) (0.434589,\fmmKirkErrfmmpresplitvyb)}
     \closedcycle;
+  \addplot[black!45, densely dotted, line width=1.0pt, forget plot]
+    coordinates {(0.434589,\fmmKirkErrfmmpresplitvyb) (34.3197,\fmmKirkErrfmmpresplitvyb)};
   % naive O(N^2) energy time
   \addplot[black!55, dashed, line width=0.8pt, forget plot]
     coordinates {(\fmmNaiveTimefmmpresplitvyb,3.33333e-17) (\fmmNaiveTimefmmpresplitvyb,0.000232409)};
@@ -133,11 +139,13 @@
       {figures/data/fmm_presplit_6vyb.dat};
 
 
-\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = 128/128$}]
-  % resolution floor of the comparison
+\nextgroupplot[title={$n_{leaf} = 128$}]
+  % stock NextGenPB error on the analytical Kirkwood sphere
   \addplot[draw=none, fill=black!7, forget plot]
-    coordinates {(0.434589,3.33333e-17) (34.3197,3.33333e-17) (34.3197,\fmmNaiveErrfmmpresplitvyb) (0.434589,\fmmNaiveErrfmmpresplitvyb)}
+    coordinates {(0.434589,3.33333e-17) (34.3197,3.33333e-17) (34.3197,\fmmKirkErrfmmpresplitvyb) (0.434589,\fmmKirkErrfmmpresplitvyb)}
     \closedcycle;
+  \addplot[black!45, densely dotted, line width=1.0pt, forget plot]
+    coordinates {(0.434589,\fmmKirkErrfmmpresplitvyb) (34.3197,\fmmKirkErrfmmpresplitvyb)};
   % naive O(N^2) energy time
   \addplot[black!55, dashed, line width=0.8pt, forget plot]
     coordinates {(\fmmNaiveTimefmmpresplitvyb,3.33333e-17) (\fmmNaiveTimefmmpresplitvyb,0.000232409)};
@@ -161,11 +169,13 @@
       {figures/data/fmm_presplit_6vyb.dat};
 
 
-\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = 256/256$}]
-  % resolution floor of the comparison
+\nextgroupplot[title={$n_{leaf} = 256$}]
+  % stock NextGenPB error on the analytical Kirkwood sphere
   \addplot[draw=none, fill=black!7, forget plot]
-    coordinates {(0.434589,3.33333e-17) (34.3197,3.33333e-17) (34.3197,\fmmNaiveErrfmmpresplitvyb) (0.434589,\fmmNaiveErrfmmpresplitvyb)}
+    coordinates {(0.434589,3.33333e-17) (34.3197,3.33333e-17) (34.3197,\fmmKirkErrfmmpresplitvyb) (0.434589,\fmmKirkErrfmmpresplitvyb)}
     \closedcycle;
+  \addplot[black!45, densely dotted, line width=1.0pt, forget plot]
+    coordinates {(0.434589,\fmmKirkErrfmmpresplitvyb) (34.3197,\fmmKirkErrfmmpresplitvyb)};
   % naive O(N^2) energy time
   \addplot[black!55, dashed, line width=0.8pt, forget plot]
     coordinates {(\fmmNaiveTimefmmpresplitvyb,3.33333e-17) (\fmmNaiveTimefmmpresplitvyb,0.000232409)};
@@ -195,17 +205,13 @@
 \ref{fmmlegendfmmpresplit6vyb}
 
 \caption[FMM parameter sweep: accuracy against work]{\textbf{FMM accuracy against
-    work on \fmmMoleculefmmpresplitvyb{} (\fmmNatomsfmmpresplitvyb{} atoms).} Each point is one
-    $(\theta,\,P,\,n_{leaf})$ configuration; the horizontal axis is the
-    median energy-calculation time over \fmmRepeatsfmmpresplitvyb{} repeats and the vertical axis the
-    relative error in the \fmmMetricfmmpresplitvyb{} against the CPU path
-    (\texttt{energy\_method\,=\,0}) of the same sweep, so solver error cancels.
-    Panels are the leaf size, colour the multipole order $P$, and the points
-    along each line the multipole acceptance criterion $\theta$, increasing from
-    $0.2$ at the accurate end to $0.8$. The grey line is the Pareto front over
-    the whole sweep, repeated in every panel. The dashed vertical line is the
-    naive $O(N^2)$ GPU path: only configurations to its left are worth using.
-    The shaded band is that path's own deviation from the CPU reference --
-    differences below it are not resolvable.\fmmMachinefmmpresplitvyb\fmmSubsetNotefmmpresplitvyb}
+    work on \fmmMoleculefmmpresplitvyb{} (\fmmNatomsfmmpresplitvyb{} atoms).} Horizontal axis: median
+    energy-calculation time over \fmmRepeatsfmmpresplitvyb{} repeats. Vertical axis: relative
+    error in the \fmmMetricfmmpresplitvyb{} against the naive $O(N^2)$ GPU sum over the same
+    inputs.\fmmPanelClausefmmpresplitvyb{} Colour is the multipole order $P$; the points along
+    each line are the multipole acceptance criterion $\theta$, rising from $0.2$
+    at the accurate end to $0.8$. Grey marks the Pareto front over the whole
+    sweep and the dashed vertical line the naive path's own
+    time.\fmmKirkClausefmmpresplitvyb\fmmMachinefmmpresplitvyb\fmmSubsetNotefmmpresplitvyb}
 \label{fig:fmm_presplit_6vyb}
 \end{figure}

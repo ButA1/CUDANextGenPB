@@ -1,0 +1,13 @@
+{
+  "host": "gpu026",
+  "started": "2026-08-30T15:03:47+00:00",
+  "folder": "/beegfs/home/users/l/leirex/test5/rank4_1VSZ",
+  "molecule": "1VSZ.pqr",
+  "amgx_config": "amgx_pcgf_amg_block_jacobi.json",
+  "np": 4,
+  "repeats": 3,
+  "sweeps": "a",
+  "gpus": [
+    "NVIDIA A100-PCIE-40GB, 40960 MiB, 595.45.04"
+  ]
+}

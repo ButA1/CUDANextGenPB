@@ -13,10 +13,10 @@ encoding:
 
 Every configuration in the sweep appears exactly once.  Each panel also carries
 the Pareto front computed over the *whole* sweep (grey), so it is visible at a
-glance which leaf size owns the frontier, plus two reference marks taken from the
-same CSV: a vertical line at the naive (energy_method=1) energy time, and a shaded
-band below the naive path's own deviation from the CPU reference -- the floor
-under which an accuracy difference is not resolvable.
+glance which leaf size owns the frontier, plus two reference marks: a vertical
+line at the naive (energy_method=1) energy time, taken from the same CSV, and a
+shaded band up to the error stock NextGenPB itself reaches on the analytical
+Kirkwood sphere, which comes from test3 and has to be passed in.
 
 Writes, relative to the thesis directory:
     figures/data/<tag>.dat          one row per configuration
@@ -25,8 +25,10 @@ Writes, relative to the thesis directory:
     figures/<tag>.tex               the figure, \\input-able like the others
     figures/<tag>_table.tex         best configuration per error target
 
-Errors are relative to the energy_method=0 run *of the same sweep* (same linear
-solver), so what is plotted is FMM truncation error and not solver error.
+Errors are relative to the baseline of the same sweep, so what is plotted is FMM
+truncation error and not solver error.  On a replay CSV that baseline is the
+naive GPU sum over the same dumped inputs -- there is no CPU path in a replay,
+so do not describe it as one.
 """
 
 import argparse
@@ -108,7 +110,7 @@ def write_pareto_dat(path, front, metric):
 
 FMM_MACROS = ["fmmMolecule", "fmmNatoms", "fmmNaiveTime", "fmmNaiveErr",
               "fmmCpuTime", "fmmMetric", "fmmRepeats", "fmmSubsetNote",
-              "fmmMachine"]
+              "fmmMachine", "fmmKirkErr", "fmmKirkClause", "fmmPanelClause"]
 
 
 def macro_suffix(tag):
@@ -134,8 +136,35 @@ def localise(text, tag):
     return text.replace("TAG", tag)
 
 
+def sci(x):
+    r"""1.246641e-10 -> $1.25\times10^{-10}$."""
+    mant, exp = "{:.2e}".format(x).split("e")
+    return "$%s\\times10^{%d}$" % (mant, int(exp))
+
+
+def kirkwood_clause(err):
+    """The caption sentence for the Kirkwood band, or nothing.
+
+    Descriptive only: what the line IS, not what it means for the choice of
+    configuration. That reading belongs in the body text.
+    """
+    if err is None:
+        return ""
+    return (" The horizontal line marks the relative error stock NextGenPB "
+            "reaches in this quantity on the analytical Kirkwood sphere, %s."
+            % sci(err))
+
+
+def panel_clause(npanels):
+    """The caption sentence naming what the panels are, if there are several."""
+    if npanels <= 1:
+        return ""
+    return " Panels are the leaf size, shared by both trees."
+
+
 def write_ref_tex(path, molecule, natoms, naive_t, naive_e, base_t, metric, nrep,
-                  shown=None, n_total=None, tag="", machine_note=""):
+                  shown=None, n_total=None, tag="", machine_note="",
+                  kirkwood_err=None, npanels=1):
     def num(x, default="0"):
         return default if x is None else "{:.6g}".format(x)
 
@@ -164,6 +193,15 @@ def write_ref_tex(path, molecule, natoms, naive_t, naive_e, base_t, metric, nrep
         fh.write(localise("\\def\\fmmRepeats{%s}\n" % nrep, tag))
         fh.write(localise("\\def\\fmmSubsetNote{%s}\n" % note, tag))
         fh.write(localise("\\def\\fmmMachine{%s}\n" % machine_note, tag))
+        # Not measurable from any sweep CSV: it is the error against the
+        # analytical Kirkwood sphere, a different test system entirely. It has
+        # to be handed in with --kirkwood-err; without it the band is not drawn.
+        fh.write(localise("\\def\\fmmKirkErr{%s}\n"
+                          % num(kirkwood_err, str(ERR_FLOOR)), tag))
+        fh.write(localise("\\def\\fmmKirkClause{%s}\n"
+                          % kirkwood_clause(kirkwood_err), tag))
+        fh.write(localise("\\def\\fmmPanelClause{%s}\n"
+                          % panel_clause(npanels), tag))
 
 
 FIGURE_TEMPLATE = r"""% ------------------------------------------------------------------------
@@ -211,7 +249,7 @@ COLORDEFS
       xticklabels at=edge bottom,
       yticklabels at=edge left,
     },
-    width=7.2cm, height=5.4cm,
+    width=PLOTW, height=PLOTH,
     xmode=log, ymode=log,
     xlabel={energy calculation [s]},
     ylabel={relative error},
@@ -228,7 +266,7 @@ COLORDEFS
     log basis x=10, log basis y=10,
     xtick={XTICKS}, xticklabels={XTICKLABELS},
     ytick={YTICKS},
-    legend columns=7,
+    legend columns=LEGENDCOLS,
     legend style={draw=none, font=\footnotesize, column sep=0.6em},
 ]
 PANELS
@@ -239,29 +277,21 @@ PANELS
 \ref{LEGENDNAME}
 
 \caption[FMM parameter sweep: accuracy against work]{\textbf{FMM accuracy against
-    work on \fmmMolecule{} (\fmmNatoms{} atoms).} Each point is one
-    $(\theta,\,P,\,n_{leaf})$ configuration; the horizontal axis is the
-    median energy-calculation time over \fmmRepeats{} repeats and the vertical axis the
-    relative error in the \fmmMetric{} against the CPU path
-    (\texttt{energy\_method\,=\,0}) of the same sweep, so solver error cancels.
-    Panels are the leaf size, colour the multipole order $P$, and the points
-    along each line the multipole acceptance criterion $\theta$, increasing from
-    $0.2$ at the accurate end to $0.8$. The grey line is the Pareto front over
-    the whole sweep, repeated in every panel. The dashed vertical line is the
-    naive $O(N^2)$ GPU path: only configurations to its left are worth using.
-    The shaded band is that path's own deviation from the CPU reference --
-    differences below it are not resolvable.\fmmMachine\fmmSubsetNote}
+    work on \fmmMolecule{} (\fmmNatoms{} atoms).} Horizontal axis: median
+    energy-calculation time over \fmmRepeats{} repeats. Vertical axis: relative
+    error in the \fmmMetric{} against the naive $O(N^2)$ GPU sum over the same
+    inputs.\fmmPanelClause{} Colour is the multipole order $P$; the points along
+    each line are the multipole acceptance criterion $\theta$, rising from $0.2$
+    at the accurate end to $0.8$. Grey marks the Pareto front over the whole
+    sweep and the dashed vertical line the naive path's own
+    time.\fmmKirkClause\fmmMachine\fmmSubsetNote}
 \label{fig:TAG}
 \end{figure}
 """
 
 PANEL_TEMPLATE = r"""
-\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = PAIRLABEL$}LEGENDOPT]
-  % resolution floor of the comparison
-  \addplot[draw=none, fill=black!7, forget plot]
-    coordinates {(XMIN,YMIN) (XMAX,YMIN) (XMAX,\fmmNaiveErr) (XMIN,\fmmNaiveErr)}
-    \closedcycle;
-  % naive O(N^2) energy time
+\nextgroupplot[title={PANELTITLE}LEGENDOPT]
+KIRKBAND  % naive O(N^2) energy time
   \addplot[black!55, dashed, line width=0.8pt, forget plot]
     coordinates {(\fmmNaiveTime,YMIN) (\fmmNaiveTime,YMAX)};
   % Pareto front over the whole sweep
@@ -269,12 +299,24 @@ PANEL_TEMPLATE = r"""
     table[x=time, y=err] {figures/data/TAG_pareto.dat};
 SERIESLEGEND"""
 
+# How accurate stock NextGenPB is against the analytical Kirkwood sphere -- the
+# accuracy of the method being replaced, and so the level an approximation has to
+# reach to be free. It comes from a different test system (test3) and cannot be
+# derived from any sweep CSV, so it is passed in with --kirkwood-err.
+KIRKWOOD_BAND = r"""  % stock NextGenPB error on the analytical Kirkwood sphere
+  \addplot[draw=none, fill=black!7, forget plot]
+    coordinates {(XMIN,YMIN) (XMAX,YMIN) (XMAX,\fmmKirkErr) (XMIN,\fmmKirkErr)}
+    \closedcycle;
+  \addplot[black!45, densely dotted, line width=1.0pt, forget plot]
+    coordinates {(XMIN,\fmmKirkErr) (XMAX,\fmmKirkErr)};
+"""
+
 # Only the first panel feeds the shared legend; the other three repeat the same
 # five series and must not add duplicate entries.
 # PORDER, not P: the placeholders are substituted by plain string replace, so a
 # one-letter one would also rewrite any literal P the other substitutions put in
 # -- which it did, turning the legend entry "$P=6$" into "$6=6$".
-SERIES_TEMPLATE = r"""  \addplot[color=COLOR, mark=MARK, mark size=1.15pt, line width=0.9pt FORGET]
+SERIES_TEMPLATE = r"""  \addplot[color=COLOR, mark=MARK, mark size=MARKSIZE, line width=SERIESLW FORGET]
     table[x=time, y=ERRCOL, discard if not two={pairid}{PAIRID}{p}{PORDER}]
       {figures/data/TAG.dat};
 ENTRY"""
@@ -285,8 +327,13 @@ LEGEND_EXTRA = r"""  \addlegendimage{fmmfront, line width=1.6pt}
   \addlegendentry{naive $O(N^2)$}
 """
 
+LEGEND_KIRKWOOD = r"""  \addlegendimage{black!45, densely dotted, line width=1.0pt}
+  \addlegendentry{stock NGPB error}
+"""
 
-def build_figure(tag, points, metric, pairs, naive_t, naive_e, out_path):
+
+def build_figure(tag, points, metric, pairs, naive_t, naive_e, out_path,
+                 kirkwood_err=None):
     errcol = "err_" + metric
     times = [d["time"] for d in points]
     errs = [d["err"][metric] for d in points]
@@ -296,8 +343,17 @@ def build_figure(tag, points, metric, pairs, naive_t, naive_e, out_path):
     lo_t = min(times + ([naive_t] if naive_t else []))
     hi_t = max(times + ([naive_t] if naive_t else []))
     xmin, xmax = lo_t / 1.35, hi_t * 1.35
-    lo_e = min(errs + ([naive_e] if naive_e else []))
-    ymin, ymax = lo_e / 3.0, max(errs) * 4.0
+    extra_e = [e for e in (naive_e, kirkwood_err) if e]
+    ymin = min(errs + extra_e) / 3.0
+    ymax = max(errs + extra_e) * 4.0
+
+    # A single-panel figure has the whole text width to itself, so the 7.2 cm
+    # that four panels have to share leaves it a postage stamp. Everything that
+    # scales with it -- marks, line widths -- grows with it, or the plot just
+    # gets emptier rather than more readable.
+    single = len(pairs) == 1
+    plotw, ploth = ("14.2cm", "8.8cm") if single else ("7.2cm", "5.4cm")
+    marksize, serieslw = ("1.7pt", "1.1pt") if single else ("1.15pt", "0.9pt")
 
     # Only the orders actually being drawn get a series, a colour and a legend
     # entry -- the sweep may hold more than the figure shows.
@@ -321,6 +377,8 @@ def build_figure(tag, points, metric, pairs, naive_t, naive_e, out_path):
         series = "".join(
             SERIES_TEMPLATE
             .replace("COLOR", p_style(p)[0])
+            .replace("MARKSIZE", marksize)
+            .replace("SERIESLW", serieslw)
             .replace("MARK", p_style(p)[2])
             .replace("ERRCOL", errcol)
             .replace("FORGET", "" if first else ", forget plot")
@@ -330,12 +388,19 @@ def build_figure(tag, points, metric, pairs, naive_t, naive_e, out_path):
             .replace("TAG", tag)
             for p in p_shown
         )
+        # Before the split one leaf size drove both trees, so naming both here
+        # would invent a distinction the run did not have.
+        title = ("$n_{leaf} = %d$" % sleaf if sleaf == tleaf
+                 else "$n_{leaf,src}/n_{leaf,tgt} = %d/%d$" % (sleaf, tleaf))
+        legend = (LEGEND_EXTRA + (LEGEND_KIRKWOOD if kirkwood_err else "")
+                  if first else "")
         panel = (PANEL_TEMPLATE
                  .replace("SERIES", series)
                  .replace("LEGENDOPT",
                           ", legend to name=" + legend_name if first else "")
-                 .replace("LEGEND", LEGEND_EXTRA if first else "")
-                 .replace("PAIRLABEL", "%d/%d" % (sleaf, tleaf))
+                 .replace("LEGEND", legend)
+                 .replace("KIRKBAND", KIRKWOOD_BAND if kirkwood_err else "")
+                 .replace("PANELTITLE", title)
                  .replace("TAG", tag)
                  .replace("XMIN", "{:.6g}".format(xmin))
                  .replace("XMAX", "{:.6g}".format(xmax))
@@ -346,6 +411,14 @@ def build_figure(tag, points, metric, pairs, naive_t, naive_e, out_path):
     cols, rows = group_size(len(pairs))
     body = (FIGURE_TEMPLATE
             .replace("GROUPSIZE", "{} by {}".format(cols, rows))
+            # Five is the most that fits the text block. A pgfplots legend sizes
+            # each column to its widest cell over ALL rows, so the three wide
+            # reference entries stretch three columns no matter which row they
+            # land on -- six columns overflows by 38pt and seven by 105pt, which
+            # is what clipped "naive O(N^2)" off the right margin.
+            .replace("LEGENDCOLS", str(min(max(len(p_shown), 3), 5)))
+            .replace("PLOTW", plotw)
+            .replace("PLOTH", ploth)
             .replace("COLORDEFS", colordefs)
             .replace("PANELS", "\n".join(panels))
             .replace("LEGENDNAME", legend_name)
@@ -431,6 +504,18 @@ def main():
     ap.add_argument("--mac-values", default=None,
                     help="only draw these mac values, e.g. 0.2,0.4,0.6,0.8. "
                          "Display only, as above.")
+    ap.add_argument("--kirkwood-err", type=float, default=None,
+                    help="relative error stock NextGenPB reaches in this energy "
+                         "on the analytical Kirkwood sphere, drawn as a "
+                         "horizontal band. It comes from a different test system "
+                         "(test3) and cannot be derived from a sweep CSV, so it "
+                         "has to be given here; without it no band is drawn.")
+    ap.add_argument("--stock-csv", default=None,
+                    help="full-pipeline bench_sweep.py CSV of the same molecule. "
+                         "Diagnostic only, NOT drawn: prints how well the "
+                         "pipeline reproduces its own energy (CPU vs naive GPU "
+                         "sum, plus the run-to-run spread), which bounds how "
+                         "finely two configurations can be told apart at all.")
     args = ap.parse_args()
 
     csv_path = args.csv or os.path.join(args.folder, "bench_runs.csv")
@@ -494,13 +579,19 @@ def main():
     fig = os.path.join(args.thesis, "figures", tag + ".tex")
     tab = os.path.join(args.thesis, "figures", tag + "_table.tex")
 
+    kirkwood_err = args.kirkwood_err
+    stock = fmm_csv.stock_floor(args.stock_csv, csv_path, metric_col) \
+        if args.stock_csv else None
+
     write_dat(dat, shown, front_ids)
     write_pareto_dat(par, front, args.metric)
     write_ref_tex(reftex, molecule, natoms, naive_t, naive_e, base_t,
                   args.metric, int(nrep), shown if thinned else None, len(points),
                   tag=tag,
-                  machine_note=fmm_csv.machine_note(args.machine, info["ranks"]))
-    build_figure(tag, shown, args.metric, pairs, naive_t, naive_e, fig)
+                  machine_note=fmm_csv.machine_note(args.machine, info["ranks"]),
+                  kirkwood_err=kirkwood_err, npanels=len(pairs))
+    build_figure(tag, shown, args.metric, pairs, naive_t, naive_e, fig,
+                 kirkwood_err=kirkwood_err)
     targets = [float(t) for t in args.targets.split(",")]
     table_rows = write_table(tab, front, args.metric, naive_t, naive_e, targets, tag)
 
@@ -508,6 +599,23 @@ def main():
     print("Pareto front   : {} points".format(len(front)))
     print("naive O(N^2)   : {:.4f} s, own error {:.2e}".format(naive_t or 0, naive_e or 0))
     print("CPU reference  : {:.4f} s".format(base_t))
+    if kirkwood_err:
+        print("Kirkwood band  : {:.4e}  (drawn)".format(kirkwood_err))
+    else:
+        print("Kirkwood band  : not drawn -- pass --kirkwood-err")
+    if stock:
+        # Not drawn. Reported because it bounds how finely two configurations
+        # can be told apart at all: below it the pipeline does not reproduce
+        # itself, so an accuracy ranking there is ranking noise.
+        print("reproducibility: {:.2e}  (diagnostic, from {})".format(
+            stock["floor"], args.stock_csv))
+        print("    CPU vs naive, same run        {:.2e}  (n={}/{})".format(
+            stock["cpu_vs_naive"], stock["n_cpu"], stock["n_naive"]))
+        print("    repeat spread, CPU / naive    {:.2e} / {:.2e}".format(
+            stock["spread_cpu"], stock["spread_naive"]))
+        if stock["pipeline_vs_replay"] is not None:
+            print("    pipeline naive vs replay      {:.2e}".format(
+                stock["pipeline_vs_replay"]))
     print()
     print("wrote {}".format(dat))
     print("      {}".format(par))
