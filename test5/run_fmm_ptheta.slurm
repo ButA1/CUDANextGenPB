@@ -41,6 +41,13 @@ module load singularity
 BASE="$SLURM_SUBMIT_DIR"
 SIF="${SIF:-$BASE/ngpb.sif}"
 SRC="${SRC:-}"
+# The dump run is a real ngpb solve, so it needs its AMGX config like any other. The
+# 2026-08-30 submission had no such handling here: the prm carried over
+# "amgx_config = amgx_pcgf_amg_poly_cluster.json" from the H1N1 scripts, nothing copied a
+# matching json, and ngpb silently fell back to its built-in configuration -- a different
+# solve, hence a slightly different phi in the dump. Harmless for timings and for errors
+# measured against the naive baseline on that same dump, but not something to leave in.
+AMGX_CFG="${AMGX_CFG:-$BASE/amgx_pcgf_amg_block_jacobi.json}"
 MOL="${MOL:-6VYB}"
 PQR="${PQR:-$BASE/$MOL.pqr}"
 RUNDIR="${RUNDIR:-$BASE/ptheta_$MOL}"
@@ -60,7 +67,7 @@ ORDER="${ORDER:-6:11}"                 # 11 is the ceiling: p=12 measured slower
 # the two trees actually bought.
 PAIRS="${PAIRS:-16/1024,16/512,32/1024,64/64}"
 
-for f in "$SIF" "$PRM" "$PQR"; do
+for f in "$SIF" "$PRM" "$PQR" "$AMGX_CFG"; do
     [ -e "$f" ] || { echo "MISSING: $f" >&2; exit 1; }
 done
 
@@ -99,15 +106,21 @@ fi
 
 # --- 2. Case directory ---------------------------------------------------------------------
 mkdir -p "$RUNDIR"
-cp "$PQR" "$RUNDIR/"
+cp "$PQR" "$AMGX_CFG" "$RUNDIR/"
 
 # Delete-then-insert: see the same block in run_fmm_sweep.slurm. The fmm_* values are
-# irrelevant here -- the dump is taken in phase 1, before any of them apply.
-sed -E '/^[[:space:]]*(energy_method|energy_dump)[[:space:]]*=/d' "$PRM" \
+# irrelevant here -- the dump is taken in phase 1, before any of them apply. amgx_config is
+# deleted and reinserted rather than substituted, because the cluster's options.prm has the
+# key and the one in git does not; a substitution would be a silent no-op on the latter.
+sed -E '/^[[:space:]]*(energy_method|energy_dump|amgx_config)[[:space:]]*=/d' "$PRM" \
   | sed -E "s|^[[:space:]]*filename[[:space:]]*=.*|filename = $(basename "$PQR")|" \
-  | awk '{ print }
-         /^\[algorithm\]/ { print "energy_method = 2"; print "energy_dump = fmm_inputs" }' \
-  > "$RUNDIR/options.prm"
+  | awk -v cfg="$(basename "$AMGX_CFG")" '
+        { print }
+        /^\[algorithm\]/ {
+            print "amgx_config = " cfg
+            print "energy_method = 2"
+            print "energy_dump = fmm_inputs"
+        }' > "$RUNDIR/options.prm"
 
 cd "$RUNDIR"
 

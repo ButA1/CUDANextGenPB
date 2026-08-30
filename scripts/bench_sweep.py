@@ -363,6 +363,49 @@ def build_plan(amgx_config, sweeps, original_text=""):
             # clutter the config_id, so they ride along on method 2 alone.
             extra = fmm_now if method == 2 else dict.fromkeys(fmm_now, None)
             plan.append(("B", dict(base, energy_method=method, **extra)))
+
+    if "s" in sweeps:
+        # The multi-GPU scaling matrix: every energy path crossed with every AMGX
+        # configuration, so both marginals are measurable from one run.  The same
+        # six rows are submitted at 1 GPU, 2 GPUs on one node, and 2 GPUs across
+        # two nodes; speedup is then a ratio of matching config_ids, which is why
+        # this is a fixed list and not something the caller composes.
+        #
+        # energy_method=0 (CPU) is NOT here.  It took 515 s at 16 ranks against
+        # 1.8 s for the naive kernel; including it would triple the queue time to
+        # rescale a stage nobody runs.  LIS is out for the same reason.
+        #
+        # The two FMM entries carry the leaf pair measured optimal AT 16 RANKS ON
+        # THE CLUSTER, which is what these jobs run -- not the 4-rank local optima.
+        # The target points are distributed across ranks while the atom tree is
+        # replicated, so the rank count moves the optimum: local (4 ranks) peaks at
+        # 8/1024 for 0.3/p9, the cluster (16 ranks) at 16/512.
+        #
+        #   0.3 / p9    16/512   1.442 s   <- full 4x6 grid, leafsweep_6VYB
+        #               32/1024  1.456 s   (+1.0%)
+        #                8/1024  1.484 s   (+2.9%)  the local optimum, here 3% off
+        #   0.4 / p11   32/1024  1.446 s   <- best of the 4 pairs in ptheta_6VYB
+        #               16/1024  1.524 s   (+5.4%)  no full grid exists at p11
+        #               16/512   1.608 s  (+11.2%)
+        #
+        # Do NOT "tidy" these to a common leaf pair, and do not move one axis on its
+        # own: the two knobs trade against each other along s*t ~ const, so dropping
+        # tgt 1024 -> 512 at src 8 gives 8/512 = 1.696 s, WORSE than either optimum.
+        # The optimal product also grows with p, which is why p11 sits at 32/1024.
+        #
+        # All three topologies use 16 ranks, so per-rank target counts -- and hence
+        # this optimum -- are identical across them. One list serves all three.
+        for solver_cfg in (amgx_config, None):
+            for energy in (
+                {"energy_method": 1, "fmm_mac": None, "fmm_multipole_order": None,
+                 "fmm_leaf_size": None, "fmm_target_leaf_size": None},
+                {"energy_method": 2, "fmm_mac": "0.3", "fmm_multipole_order": "9",
+                 "fmm_leaf_size": "16", "fmm_target_leaf_size": "512"},
+                {"energy_method": 2, "fmm_mac": "0.4", "fmm_multipole_order": "11",
+                 "fmm_leaf_size": "32", "fmm_target_leaf_size": "1024"},
+            ):
+                plan.append(("S", dict(linear_solver="amgx",
+                                       amgx_config=solver_cfg, **energy)))
     return plan
 
 
@@ -424,12 +467,22 @@ class PrmGuard:
         os.chmod(self.prm, self.mode)
 
 
-def run_once(folder, np_ranks, timeout_s, env, launcher=()):
+def run_once(folder, np_ranks, timeout_s, env, launcher=(), mpi_cmd=()):
     # The launcher wraps the WHOLE command, mpirun included -- that is the
     # container idiom the cluster jobs already use ("singularity exec --nv SIF
     # mpirun -n N ngpb"), where the MPI doing the launching must be the one
     # inside the image, not the host's.
-    cmd = list(launcher) + ["mpirun", "-n", str(np_ranks), "ngpb", "--prmfile", PRM]
+    #
+    # mpi_cmd REPLACES "mpirun -n N" instead of prefixing it, because a
+    # multi-node container run cannot be expressed as a prefix: there the launch
+    # has to be the host's srun with one container per rank
+    # ("srun --mpi=pmix --cpu-bind=none singularity exec --nv SIF"), not one
+    # container running mpirun.  ngpb --prmfile is still appended, so whatever is
+    # passed here must end at the point where the executable goes.
+    if mpi_cmd:
+        cmd = list(mpi_cmd) + ["ngpb", "--prmfile", PRM]
+    else:
+        cmd = list(launcher) + ["mpirun", "-n", str(np_ranks), "ngpb", "--prmfile", PRM]
     start = time.perf_counter()
     proc = subprocess.Popen(
         cmd, cwd=folder, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -461,8 +514,10 @@ def main():
                     help="MPI ranks per run (default: 4)")
     ap.add_argument("-r", "--repeats", type=int, default=10,
                     help="repeats per configuration (default: 10)")
-    ap.add_argument("--sweeps", default="ab", choices=["a", "b", "ab"],
-                    help="which sweeps to run: a=linear solver, b=energy method (default: ab)")
+    ap.add_argument("--sweeps", default="ab", choices=["a", "b", "ab", "s"],
+                    help="which sweeps to run: a=linear solver, b=energy method, "
+                         "s=multi-GPU scaling matrix (energy path x amgx config) "
+                         "(default: ab)")
     ap.add_argument("--amgx-config", default=None,
                     help="path to amgx_pcgf_amg_block_jacobi.json "
                          "(default: the copy in the test folder, else data/)")
@@ -485,6 +540,12 @@ def main():
                          "(relative errors are left blank)")
     ap.add_argument("--restore", action="store_true",
                     help="restore options.prm from a leftover backup and exit")
+    ap.add_argument("--mpi-cmd", default="",
+                    help="REPLACE \"mpirun -n <np>\" with this command, e.g. "
+                         "\"srun --mpi=pmix --cpu-bind=none singularity exec --nv ngpb.sif\". "
+                         "Needed for multi-node container runs, which srun launches as one "
+                         "container per rank rather than one container running mpirun. "
+                         "\"ngpb --prmfile\" is appended. Overrides --launcher and --np.")
     ap.add_argument("--launcher", default="",
                     help="command prefix for every run, e.g. "
                          "\"singularity exec --nv --bind $SRC:/usr/local/nextgenPB ngpb.sif\". "
@@ -525,6 +586,11 @@ def main():
 
     args = ap.parse_args()
     args.launcher = shlex.split(args.launcher)
+    args.mpi_cmd = shlex.split(args.mpi_cmd)
+    if args.mpi_cmd and args.launcher:
+        # Silently prefixing one with the other would build a command that looks
+        # plausible and launches the wrong number of ranks. Refuse instead.
+        ap.error("--mpi-cmd replaces the launcher; do not pass both")
 
     if args.restore:
         for folder in args.folders:
@@ -538,7 +604,9 @@ def main():
 
     # Both live inside the image when a launcher is set; nothing on the host
     # PATH is expected to match, so there is nothing worth pre-checking.
-    if not args.launcher:
+    # --mpi-cmd names its own launcher (srun) and its own container, so neither
+    # mpirun nor ngpb is expected on the host PATH there either.
+    if not args.launcher and not args.mpi_cmd:
         if shutil.which("mpirun") is None:
             return _die("mpirun not found on PATH")
         if shutil.which("ngpb") is None:
@@ -662,7 +730,7 @@ def run_fmm_sweep(folder, args):
         print("[1/2] dumping energy inputs ...", end=" ", flush=True)
         guard.write(render_prm(original_text, settings))
         status, code, wall, out = run_once(folder, args.np, args.timeout, env,
-                                           args.launcher)
+                                           args.launcher, args.mpi_cmd)
         print("{} ({:.1f}s)".format(status, wall))
 
         if status != "ok":
@@ -845,7 +913,7 @@ def execute(guard, folder, original_text, settings, sweep, rep, args, env,
             log_dir, molecule, reference):
     guard.write(render_prm(original_text, settings))
     status, code, wall, out = run_once(folder, args.np, args.timeout, env,
-                                       args.launcher)
+                                       args.launcher, args.mpi_cmd)
     parsed = parse_log(out)
 
     cid = config_id(sweep, settings)
