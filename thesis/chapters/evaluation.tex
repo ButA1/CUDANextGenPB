@@ -120,6 +120,7 @@ Mesh settings were mostly kept at the given values, though I already pointed out
         test4 & 30sfere.pqr & Analytical & \snakecase{mesh_shape}=0, \texttt{perfil1}=0.20,\newline\texttt{perfil2}=0.20, \texttt{scale}=2.0 & \\
         test5 & 6VYB.pqr (cluster) & Comparative & \snakecase{mesh_shape}=0, \texttt{perfil1}=0.95,\newline\texttt{perfil2}=0.2, \texttt{scale}=2.0 & \\
         \bottomrule
+        % TODO add the other ones
     \end{tabular}
     \caption{Test cases and their NGPB configuration parameters.}
     \label{tab:test-cases}
@@ -215,7 +216,10 @@ It was seen more as a correctness criterion: ``Did it fit into VRAM at all?'', e
 \section{Results}
 \label{sec:evaluation-results}
 
-One general observation I made is that the number of atoms does not automatically correlate
+In this section I first touch on the improvements to the host-side optimizations to establish the speedup, which both the baseline and the CUDA optimization benefit from.
+Next I will show the comparison between LIS and AMGX, as well as the tuned configuration for the latter, on both the local machine and the cluster.
+The energy calculation results are a lot more intricate, particularly due to my FMM implementation having different parameters.
+It also lead to the discovery, that due to NGPB evaluating the molecular atoms against the surface, having a shared leaf size for both trees was actually detrimental.
 
 \subsection{Linear Equation Solver}
 \label{sec:evaluation-results-lin-eq-solver}
@@ -258,18 +262,48 @@ It is still surprising that the untamed GA100 chip of the A100 did not manage to
 
 \subsubsection{FMM parameters}
 
-% ------------------------------------------------------------------------
-%  The pre-split sweep: one leaf size driving both trees, theta 0.2-0.8, p 6-10.
-%  Naive O(NM) reference: 24.73 s on 6VYB, 5.51 s on 1VSZ.
-%
-%  The observation that motivated the split: the n_leaf = 64 and n_leaf = 256
-%  panels are nearly indistinguishable and both beat 32 and 128. Nsight showed
-%  the far field was faster at 256 and the near field at 64 -- one number was
-%  tying two opposing effects together.
-% ------------------------------------------------------------------------
+The FMM has multiple parameters, which I needed to balance against each other to find the optimum, those being the order of the multipole expansion $P$, the MAC parameter $\theta$ and the number of particles inside one leaf $n_{leaf}$.
+I made four sweeps of $P$ and $\theta$ for values between 6 to 10 and 0.2 to 0.8 for both 6VYB (test1) and 1VSZ (test2) on my local machine,
+I've plotted their speed against their relative error compared to the CPU reference, taken from an average of 3 runs,
+which can be seen in Figure~\ref{fig:fmm_presplit_6vyb} and \ref{fig:fmm_presplit_1vsz}.
 
 \input{figures/fmm_presplit_6vyb.tex}
 \input{figures/fmm_presplit_1vsz.tex}
+
+Since it was my goal to achieve a relative error of the polarization energy in the order of $10^{-10}$ or lower, two configurations for test1 seem to be hitting that goal while being the fastest: $P = 9$, $\theta = 0.3$, $n_{leaf} = 64$ and $P = 10$, $\theta = 0.4$, $n_{leaf} = 256$.
+Profiling both configurations using \snakecase{ncu} revealed that each configurations are quick for very different reasons.
+The \snakecase{l2p_p2p_kernel} ran much quicker with $P = 9$, $\theta = 0.3$, $n_{leaf} = 64$ while \snakecase{m2l_accumulate_kernel} was much quicker with $P = 10$, $\theta = 0.4$, $n_{leaf} = 256$.
+The underlying reason is that the source tree containing the atoms and the target tree containing the surface points have wildly different sizes.
+At a grid of scale of 2, the surface points far outnumber the number of atoms in the molecule, and they are also much denser.
+Clustering both trees with the same leaf count causes wildly different geometric leaf sizes.
+M2L cost tracks with the total box-pair computed by the DTT, which were dominated by the number of box nodes of the much denser target tree.
+Increasing the number of particles per leaf reduced that number, making M2L faster.
+However, raising the number of particles per leaf also increased the radii used in the MAC test (see Figure~\ref{fig:fmm-mac}).
+This meant it would fail more often, inflating the number of direct P2P interactions.
+Considering two best settings sat a $n_{leaf}$ of 64 and 256, but not 128 showed that this relationship was a U-shaped curve, with no optimum in between.
+The solution was to split $n_{leaf}$ into source tree leaf counts $n_{leaf,src}$ and target tree leaf counts $n_{leaf,tgt}$.
+This allowed me to reduce $n_{leaf,src}$ while increasing $n_{leaf,tgt}$.
+Setting them to 64 and 256 respectively at $P = 10$, $\theta = 0.4$ slashed the time in half!
+
+Next I tried to find the optima for both values.
+As seen in Figures~\ref{fig:leaf_sweep_6vyb} and \ref{fig:leaf_sweep_1vsz} the optimal values of $n_{leaf,src}$ and $n_{leaf,tgt}$ diverged into different directions.
+It also shows that they differ for both molecules, which is probably due to their different shapes.
+I initially assumed that the ideal counts would exactly where the geometric leaf sizes of both tree would be equal, but further testing demonstrated that the optima shifted with different $P$ and $\theta$.
+This can be explained by the cost of P2P and M2L not being equal.
+The balance shifts towards P2P when the cost of M2L increases through rasing of $P$.
+I demonstrated this effect for 6VYB in the left diagram of the Figure~\ref{fig:leaf_optimum_shift_6vyb}, where the optimal $n_{leaf,src}$ rises monotonically with the order of $P$.
+Meanwhile $\theta$ has a much weaker secondary effect, flattening the the curve as it increases but not relocating the optimum.
+Over $\theta = 0.3$ to $0.6$ the optimum does not move at all.
+This also means that this balances is shifted once again on the cluster, where the cost of P2P is greatly reduced, thanks to higher FP64 performance.
+On top of it all, the number of ranks also influence the balance, though in a predictable way.
+Each rank holds an exact copy of the source tree, but their target tree only is built from the particles of the domain region owned by the rank.
+Even though regions are not equally populated, this still roughly equates to the number of particles being divided by the number of ranks.
+Despite the multitude of variables, the general direction for searching optima is clear, and considering the accuracy target, the mission now became a search for the fastest configuration that still satisfies it.
+
+For my local machine the measured optimal configurations for 6VYB (test1) and 1VSZ (test2) can be seen in Table~\ref{tab:fmm_ptheta_6vyb-pareto} and \ref{tab:fmm_ptheta_1vsz-pareto}.
+For the stated accuracy goal of a potential energy relative error of less than 1.5e-10, the most efficient config for 6VYB was $P=11$, $\theta=0.4$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
+For 1VSZ the most efficient config was $P=7$, $\theta=0.3$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
+Note that despite having the same $n_{leaf,src}$ and $n_{leaf,tgt}$, their radically different $P$
 
 % ------------------------------------------------------------------------
 %  Source x target leaf grid, theta = 0.3, p = 9, 3 repeats.
@@ -303,6 +337,67 @@ It is still surprising that the untamed GA100 chip of the A100 did not manage to
 
 \input{figures/leaf_sweep_6vyb.tex}
 \input{figures/leaf_sweep_1vsz.tex}
+
+% ------------------------------------------------------------------------
+%  NOTE (Claude) -- delete this block once the surrounding text is written.
+%  Evidence for the "the optima shifted with different P and theta" sentence
+%  above. 6VYB, target leaf held at 1024, medians of 3, spreads 0.8-3.1%.
+%  Generated by:
+%    python3 scripts/plot_leaf_optimum_shift.py \
+%        --p-csv test1/leaf_vs_p_low.csv test1/leaf_vs_p.csv \
+%        --theta-csv test1/theta_vs_leaf.csv \
+%        --order 9 --tgt 1024 --molecule 6VYB --natoms 21339 \
+%        --tag leaf_optimum_shift_6vyb
+%
+%  OBSERVATIONS CUT FROM THE CAPTIONS (they are yours to make in the body text):
+%   - Fig. leaf_optimum_shift: the minimum walks monotonically toward larger
+%     source leaves as P rises, because P enters the cost of an M2L but NOT the
+%     tree geometry -- fmm_build_atom_tree uses it only to size the moment array
+%     (t->comp = comp_of(p)); everything geometric comes from the atoms, the leaf
+%     size and theta. So a dearer far field is paid for with fewer, larger source
+%     boxes and correspondingly more direct P2P work. A looser theta flattens the
+%     optimum without relocating it.
+%   - Fig. leaf_sweep (both molecules): the two knobs pull opposite ways -- the
+%     source leaf bounds the box radius the MAC tests against and so sets the
+%     near-field P2P work, while the target leaf sets the target box count and so
+%     sets the M2L pair count. That is why sweeping them as one number, along the
+%     n_leaf,src = n_leaf,tgt diagonal, finds only a flat region instead of the
+%     optimum.
+%
+%  P (theta = 0.4): the optimum walks 4, 4, 8, 8, 16, 16 for P = 6..11.
+%      p=6   src 4    0.900 s   runner-up +17.7%
+%      p=7   src 4    1.176 s   runner-up  +3.8%   <- transition
+%      p=8   src 8    1.539 s   runner-up  +7.7%
+%      p=9   src 8    1.961 s   runner-up  +5.9%
+%      p=10  src 16   2.429 s   runner-up  +1.8%   <- transition
+%      p=11  src 16   2.900 s   runner-up  +7.9%
+%  The margin collapsing AT the two transitions and sitting at 6-8% away from
+%  them is the strong part of this: that is what a continuous optimum crossing
+%  a power-of-two grid looks like, and it is better evidence than six argmins.
+%
+%  theta (p = 9): the optimum does NOT move -- src 8 at every theta. What
+%  changes is how sharp it is; the runner-up margin shrinks monotonically:
+%      theta 0.3  +9.4%    theta 0.5  +4.9%
+%      theta 0.4  +5.7%    theta 0.6  +3.5%
+%  So locally theta is a second-order effect on the LOCATION and a first-order
+%  one on the DEPTH. Worth writing it that way -- "theta flattens the optimum,
+%  p relocates it" is what the data supports, and claiming theta moves it
+%  locally would overstate the evidence.
+%
+%  TWO CAVEATS:
+%  1. p=6 and p=7 are NOT bracketed -- src 4 is the smallest value swept and it
+%     wins both. Either start the claim at p=8, or add src 2 (~3 min of replay).
+%  2. On the CLUSTER, over the wider theta = 0.2..0.8, theta does move the
+%     transition (p=10 at theta<=0.5 down to p=8-9 at theta>=0.6). Different
+%     machine and only four leaf pairs, so keep that as a separate statement
+%     rather than folding it into this figure.
+%
+%  No 1VSZ version: test2 has leaf_vs_p.csv (p=9..11 only, giving src 16 at all
+%  three) but no theta_vs_leaf.csv, so the right-hand panel cannot be built.
+% ------------------------------------------------------------------------
+
+\input{figures/leaf_optimum_shift_6vyb.tex}
+\input{figures/leaf_optimum_shift_6vyb_table.tex}
 
 % ------------------------------------------------------------------------
 %  theta x p at 16/1024, 3 repeats. Cheapest configuration per error target is in

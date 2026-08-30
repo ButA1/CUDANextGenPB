@@ -68,6 +68,10 @@ def normalise_replay(rows):
         common = {
             "status": "ok",
             "sweep": "B",
+            # Carried so a caption can state the rank count without being told
+            # it. The replay calls it "ranks", bench_sweep.py calls it "np";
+            # both end up here under the bench_sweep name.
+            "np": r.get("ranks", ""),
             # Phase 2 only: tree build + polarisation + ionic. The phase-1 mesh
             # sweep is not re-run, so this is slightly below a pipeline t_energy.
             "t_energy": r["t_total_s"],
@@ -204,8 +208,49 @@ def aggregate(rows, metric_col="energy_pol", require_baseline=True,
                    if base else None),
         "molecule": (rows[0].get("molecule", "") if rows else "") or "",
         "natoms": (rows[0].get("num_atoms", "") if rows else "") or "",
+        "ranks": ranks_of(rows),
     }
     return points, info
+
+
+def machine_note(machine, ranks):
+    r"""The "measured on X with N ranks" sentence every figure caption carries.
+
+    A reviewer asked for it on every figure, so it is built in one place and the
+    plotters only supply the machine name. `ranks` comes from the CSV, never from
+    the caller, so it cannot disagree with the data it labels.
+    """
+    where = machine or "\\textbf{[machine not recorded]}"
+    if ranks:
+        return " Measured on %s with %s MPI ranks." % (where, ranks)
+    return (" Measured on %s; the rank count is not recorded in the source CSV."
+            % where)
+
+
+def add_machine_argument(ap):
+    """The --machine flag, worded the same way for every plotter."""
+    ap.add_argument("--machine", default=None,
+                    help="where the data was captured, inserted verbatim into "
+                         "the caption, e.g. \"the local system "
+                         "(Table~\\ref{tab:test-systems})\" or \"an A100 node of "
+                         "the TU Berlin HPC\". The rank count is read from the "
+                         "CSV and appended automatically. Omitting this puts a "
+                         "visible [machine not recorded] in the caption rather "
+                         "than quietly leaving it out.")
+
+
+def ranks_of(rows):
+    """The MPI rank count these rows were measured at, or None if not one value.
+
+    Captions have to state it -- the energy stage is distributed over the ranks,
+    so a time measured at 4 ranks is not comparable to one at 16 -- and deriving
+    it from the CSV is the only way it cannot silently disagree with the data.
+    Mixed rank counts return None rather than a number, because a single figure
+    drawn across two of them has a problem no caption can fix.
+    """
+    seen = {(r.get("np") or "").strip() for r in rows}
+    seen.discard("")
+    return seen.pop() if len(seen) == 1 else None
 
 
 # --------------------------------------------------------------------------

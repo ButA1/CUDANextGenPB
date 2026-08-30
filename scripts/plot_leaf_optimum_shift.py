@@ -37,6 +37,7 @@ theta instead. Shares the CSV layer, fmm_csv.py.
 
 import argparse
 import os
+import re
 import statistics
 import sys
 
@@ -55,7 +56,7 @@ RAMP = [
 MARKS = ["*", "square*", "triangle*", "diamond*", "pentagon*", "oplus*"]
 
 SHIFT_MACROS = ["shiftMolecule", "shiftNatoms", "shiftMac", "shiftOrder",
-                "shiftTgt", "shiftRepeats"]
+                "shiftTgt", "shiftRepeats", "shiftMachine"]
 
 
 def localise(text, tag):
@@ -66,8 +67,13 @@ def localise(text, tag):
     typeset last. Same treatment as plot_leaf_sweep.py.
     """
     sfx = "".join(c for c in tag if c.isalpha())
+    # (?![A-Za-z]) is load-bearing: a LaTeX control sequence ends at the
+    # first non-letter, so a plain replace of \\leafMac also rewrites the
+    # \\leafMachine that starts with it -- which it did, silently producing
+    # \\leafMacleafsweepvybhine and an undefined macro in the caption.
     for name in SHIFT_MACROS:
-        text = text.replace("\\" + name, "\\" + name + sfx)
+        text = re.sub(r"\\" + name + r"(?![A-Za-z])",
+                      "\\\\" + name + sfx, text)
     return text.replace("SFX", sfx).replace("TAG", tag)
 
 
@@ -165,7 +171,7 @@ PANELS
     \emph{Left:} one line per multipole order, at $\theta = \shiftMac{}$.
     \emph{Right:} one line per $\theta$, at $P = \shiftOrder{}$, each normalised
     to its own minimum so the shapes stay comparable across a fourfold range in
-    absolute time. Both axes are powers of two.}
+    absolute time. Both axes are powers of two.\shiftMachine}
 \label{fig:TAG}
 \end{figure}
 """
@@ -222,7 +228,7 @@ TABLE_TEMPLATE = r"""% ---------------------------------------------------------
     leaf size on \shiftMolecule{}, target leaf \shiftTgt{}.} Left block: against
     multipole order, at $\theta = \shiftMac{}$. Right block: against $\theta$, at
     $P = \shiftOrder{}$. \emph{margin} is how much slower the runner-up source
-    leaf size is.}
+    leaf size is.\shiftMachine}
 \label{tab:TAG}
 \begin{tabular}{rrrr@{\hskip 2em}rrrr}
 \toprule
@@ -271,6 +277,7 @@ def main():
     ap.add_argument("--molecule", default=None,
                     help="molecule name for the caption (a replay CSV has no such column)")
     ap.add_argument("--natoms", default=None, help="atom count for the caption")
+    fmm_csv.add_machine_argument(ap)
     ap.add_argument("--stat", default="median",
                     choices=sorted(fmm_csv.TIME_STATS),
                     help="how to collapse timing repeats; use min for shared "
@@ -368,6 +375,8 @@ def main():
         "\\def\\shiftOrder{%d}\n" % order,
         "\\def\\shiftTgt{%d}\n" % tgt,
         "\\def\\shiftRepeats{%d}\n" % nrep,
+        "\\def\\shiftMachine{%s}\n"
+        % fmm_csv.machine_note(args.machine, p_info["ranks"]),
     ]
     with open(reftex, "w") as fh:
         fh.write(localise("".join(ref_buf), args.tag))

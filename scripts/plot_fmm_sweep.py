@@ -32,6 +32,7 @@ solver), so what is plotted is FMM truncation error and not solver error.
 import argparse
 import math
 import os
+import re
 import statistics
 import sys
 
@@ -106,7 +107,8 @@ def write_pareto_dat(path, front, metric):
 
 
 FMM_MACROS = ["fmmMolecule", "fmmNatoms", "fmmNaiveTime", "fmmNaiveErr",
-              "fmmCpuTime", "fmmMetric", "fmmRepeats", "fmmSubsetNote"]
+              "fmmCpuTime", "fmmMetric", "fmmRepeats", "fmmSubsetNote",
+              "fmmMachine"]
 
 
 def macro_suffix(tag):
@@ -122,13 +124,18 @@ def localise(text, tag):
     and the captions all read whichever \def happened to run last.
     """
     sfx = macro_suffix(tag)
+    # (?![A-Za-z]) is load-bearing: a LaTeX control sequence ends at the
+    # first non-letter, so a plain replace of \\leafMac also rewrites the
+    # \\leafMachine that starts with it -- which it did, silently producing
+    # \\leafMacleafsweepvybhine and an undefined macro in the caption.
     for name in FMM_MACROS:
-        text = text.replace("\\" + name, "\\" + name + sfx)
+        text = re.sub(r"\\" + name + r"(?![A-Za-z])",
+                      "\\\\" + name + sfx, text)
     return text.replace("TAG", tag)
 
 
 def write_ref_tex(path, molecule, natoms, naive_t, naive_e, base_t, metric, nrep,
-                  shown=None, n_total=None, tag=""):
+                  shown=None, n_total=None, tag="", machine_note=""):
     def num(x, default="0"):
         return default if x is None else "{:.6g}".format(x)
 
@@ -156,6 +163,7 @@ def write_ref_tex(path, molecule, natoms, naive_t, naive_e, base_t, metric, nrep
         fh.write(localise("\\def\\fmmMetric{%s}\n" % METRICS[metric][1], tag))
         fh.write(localise("\\def\\fmmRepeats{%s}\n" % nrep, tag))
         fh.write(localise("\\def\\fmmSubsetNote{%s}\n" % note, tag))
+        fh.write(localise("\\def\\fmmMachine{%s}\n" % machine_note, tag))
 
 
 FIGURE_TEMPLATE = r"""% ------------------------------------------------------------------------
@@ -242,7 +250,7 @@ PANELS
     the whole sweep, repeated in every panel. The dashed vertical line is the
     naive $O(N^2)$ GPU path: only configurations to its left are worth using.
     The shaded band is that path's own deviation from the CPU reference --
-    differences below it are not resolvable.\fmmSubsetNote}
+    differences below it are not resolvable.\fmmMachine\fmmSubsetNote}
 \label{fig:TAG}
 \end{figure}
 """
@@ -371,7 +379,7 @@ def write_table(path, front, metric, naive_t, naive_e, targets, tag=""):
            "{\\textbf{Cheapest FMM configuration reaching each error "
            "target on \\fmmMolecule{}.} Taken from the Pareto front of "
            "figure~\\ref{fig:TAG}; the speed-up is against the "
-           "naive $O(N^2)$ GPU path (\\fmmNaiveTime\\,s).}\n",
+           "naive $O(N^2)$ GPU path (\\fmmNaiveTime\\,s).\\fmmMachine}\n",
            "\\label{tab:TAG-pareto}\n",
            "\\begin{tabular}{lrrrrrr}\n\\toprule\n",
            "error target & $\\theta$ & $P$ & $n_{leaf,src}$ & "
@@ -402,6 +410,7 @@ def main():
                     help="thesis directory to write into (default: thesis)")
     ap.add_argument("--tag", default=None,
                     help="basename for the generated files (default: fmm_sweep_<folder>)")
+    fmm_csv.add_machine_argument(ap)
     ap.add_argument("--stat", default="median",
                     choices=sorted(fmm_csv.TIME_STATS),
                     help="how to collapse timing repeats; use min for shared "
@@ -489,7 +498,8 @@ def main():
     write_pareto_dat(par, front, args.metric)
     write_ref_tex(reftex, molecule, natoms, naive_t, naive_e, base_t,
                   args.metric, int(nrep), shown if thinned else None, len(points),
-                  tag=tag)
+                  tag=tag,
+                  machine_note=fmm_csv.machine_note(args.machine, info["ranks"]))
     build_figure(tag, shown, args.metric, pairs, naive_t, naive_e, fig)
     targets = [float(t) for t in args.targets.split(",")]
     table_rows = write_table(tab, front, args.metric, naive_t, naive_e, targets, tag)

@@ -34,6 +34,7 @@ parameter on x and has no error axis at all, so they share the CSV layer
 
 import argparse
 import os
+import re
 import statistics
 import sys
 
@@ -54,7 +55,7 @@ MARKS = ["*", "square*", "triangle*", "diamond*", "pentagon*", "oplus*"]
 
 
 LEAF_MACROS = ["leafMolecule", "leafNatoms", "leafMac", "leafOrder",
-               "leafRepeats", "leafBest", "leafNaiveNote"]
+               "leafRepeats", "leafBest", "leafNaiveNote", "leafMachine"]
 
 
 def localise(text, tag):
@@ -65,8 +66,13 @@ def localise(text, tag):
     read whichever figure was typeset last.
     """
     sfx = "".join(c for c in tag if c.isalpha())
+    # (?![A-Za-z]) is load-bearing: a LaTeX control sequence ends at the
+    # first non-letter, so a plain replace of \\leafMac also rewrites the
+    # \\leafMachine that starts with it -- which it did, silently producing
+    # \\leafMacleafsweepvybhine and an undefined macro in the caption.
     for name in LEAF_MACROS:
-        text = text.replace("\\" + name, "\\" + name + sfx)
+        text = re.sub(r"\\" + name + r"(?![A-Za-z])",
+                      "\\\\" + name + sfx, text)
     return text.replace("SFX", sfx).replace("TAG", tag)
 
 
@@ -149,7 +155,7 @@ PANELS
     over \leafRepeats{} repeats against the \emph{source} (atom) tree leaf size,
     one line per target leaf size. Right: the same against the \emph{target}
     tree leaf size, one line per source leaf size. Both axes are powers of two.
-    The fastest configuration is \leafBest{}.\leafNaiveNote}
+    The fastest configuration is \leafBest{}.\leafNaiveNote\leafMachine}
 \label{fig:TAG}
 \end{figure}
 """
@@ -227,6 +233,7 @@ def main():
     ap.add_argument("--molecule", default=None,
                     help="molecule name for the caption (a replay CSV has no such column)")
     ap.add_argument("--natoms", default=None, help="atom count for the caption, as above")
+    fmm_csv.add_machine_argument(ap)
     ap.add_argument("--stat", default="median",
                     choices=sorted(fmm_csv.TIME_STATS),
                     help="how to collapse timing repeats; use min for shared "
@@ -305,6 +312,8 @@ def main():
         "\\def\\leafRepeats{%d}\n" % nrep,
         "\\def\\leafBest{$%d/%d$}\n" % (best["sleaf"], best["tleaf"]),
         "\\def\\leafNaiveNote{%s}\n" % naive_note,
+        "\\def\\leafMachine{%s}\n"
+        % fmm_csv.machine_note(args.machine, info["ranks"]),
     ]
     with open(reftex, "w") as fh:
         fh.write(localise("".join(ref_buf), tag))
