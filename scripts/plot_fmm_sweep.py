@@ -4,7 +4,7 @@ Turn a bench_sweep.py FMM sweep into a pgfplots accuracy-vs-work figure.
 
 The sweep varies three knobs (fmm_mac, fmm_multipole_order, fmm_leaf_size), which
 is one dimension too many to put on axes.  So the axes are the *outcome* --
-energy-stage time against relative error, both log -- and the knobs become visual
+energy-calculation time against relative error, both log -- and the knobs become visual
 encoding:
 
     panel  = fmm_leaf_size          (2x2 group plot)
@@ -205,7 +205,7 @@ COLORDEFS
     },
     width=7.2cm, height=5.4cm,
     xmode=log, ymode=log,
-    xlabel={energy stage [s]},
+    xlabel={energy calculation [s]},
     ylabel={relative error},
     xlabel style={font=\footnotesize},
     ylabel style={font=\footnotesize},
@@ -232,11 +232,11 @@ PANELS
 
 \caption[FMM parameter sweep: accuracy against work]{\textbf{FMM accuracy against
     work on \fmmMolecule{} (\fmmNatoms{} atoms).} Each point is one
-    $(\theta,\,p,\,n_{\mathrm{leaf}})$ configuration; the horizontal axis is the
-    median energy-stage time over \fmmRepeats{} repeats and the vertical axis the
+    $(\theta,\,P,\,n_{leaf})$ configuration; the horizontal axis is the
+    median energy-calculation time over \fmmRepeats{} repeats and the vertical axis the
     relative error in the \fmmMetric{} against the CPU path
     (\texttt{energy\_method\,=\,0}) of the same sweep, so solver error cancels.
-    Panels are the leaf size, colour the multipole order $p$, and the points
+    Panels are the leaf size, colour the multipole order $P$, and the points
     along each line the multipole acceptance criterion $\theta$, increasing from
     $0.2$ at the accurate end to $0.8$. The grey line is the Pareto front over
     the whole sweep, repeated in every panel. The dashed vertical line is the
@@ -248,7 +248,7 @@ PANELS
 """
 
 PANEL_TEMPLATE = r"""
-\nextgroupplot[title={$n_{\mathrm{src}}/n_{\mathrm{tgt}} = PAIRLABEL$}LEGENDOPT]
+\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = PAIRLABEL$}LEGENDOPT]
   % resolution floor of the comparison
   \addplot[draw=none, fill=black!7, forget plot]
     coordinates {(XMIN,YMIN) (XMAX,YMIN) (XMAX,\fmmNaiveErr) (XMIN,\fmmNaiveErr)}
@@ -263,8 +263,11 @@ SERIESLEGEND"""
 
 # Only the first panel feeds the shared legend; the other three repeat the same
 # five series and must not add duplicate entries.
+# PORDER, not P: the placeholders are substituted by plain string replace, so a
+# one-letter one would also rewrite any literal P the other substitutions put in
+# -- which it did, turning the legend entry "$P=6$" into "$6=6$".
 SERIES_TEMPLATE = r"""  \addplot[color=COLOR, mark=MARK, mark size=1.15pt, line width=0.9pt FORGET]
-    table[x=time, y=ERRCOL, discard if not two={pairid}{PAIRID}{p}{P}]
+    table[x=time, y=ERRCOL, discard if not two={pairid}{PAIRID}{p}{PORDER}]
       {figures/data/TAG.dat};
 ENTRY"""
 
@@ -313,9 +316,9 @@ def build_figure(tag, points, metric, pairs, naive_t, naive_e, out_path):
             .replace("MARK", p_style(p)[2])
             .replace("ERRCOL", errcol)
             .replace("FORGET", "" if first else ", forget plot")
-            .replace("ENTRY", "  \\addlegendentry{$p=%d$}\n" % p if first else "")
+            .replace("ENTRY", "  \\addlegendentry{$P=%d$}\n" % p if first else "")
             .replace("PAIRID", str(pairid))
-            .replace("P", str(p))
+            .replace("PORDER", str(p))
             .replace("TAG", tag)
             for p in p_shown
         )
@@ -371,8 +374,8 @@ def write_table(path, front, metric, naive_t, naive_e, targets, tag=""):
            "naive $O(N^2)$ GPU path (\\fmmNaiveTime\\,s).}\n",
            "\\label{tab:TAG-pareto}\n",
            "\\begin{tabular}{lrrrrrr}\n\\toprule\n",
-           "error target & $\\theta$ & $p$ & $n_{\\mathrm{src}}$ & "
-           "$n_{\\mathrm{tgt}}$ & time [s] & speed-up \\\\\n\\midrule\n"]
+           "error target & $\\theta$ & $P$ & $n_{leaf,src}$ & "
+           "$n_{leaf,tgt}$ & time [s] & speed-up \\\\\n\\midrule\n"]
 
     for target, best, speedup in rows:
         buf.append("$10^{%d}$ & %.1f & %d & %d & %d & %.4f & $%.2f\\times$ \\\\\n" % (
@@ -384,6 +387,12 @@ def write_table(path, front, metric, naive_t, naive_e, targets, tag=""):
     with open(path, "w") as fh:
         fh.write(localise("".join(buf), tag))
 
+    # main() prints these back to the console. Lost when this function was
+    # rewritten to buffer-then-localise, which crashed AFTER every file was
+    # already written -- so the outputs were correct and the exit status was not.
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -393,6 +402,10 @@ def main():
                     help="thesis directory to write into (default: thesis)")
     ap.add_argument("--tag", default=None,
                     help="basename for the generated files (default: fmm_sweep_<folder>)")
+    ap.add_argument("--stat", default="median",
+                    choices=sorted(fmm_csv.TIME_STATS),
+                    help="how to collapse timing repeats; use min for shared "
+                         "cluster nodes, where contention only slows runs down")
     ap.add_argument("--metric", default="pol", choices=sorted(METRICS),
                     help="which energy the error is measured on (default: pol)")
     ap.add_argument("--targets", default="1e-10,1e-9,1e-8,1e-7,1e-6",
@@ -419,7 +432,7 @@ def main():
     metric_col = METRICS[args.metric][0]
 
     rows = fmm_csv.load(csv_path)
-    points, info = fmm_csv.aggregate(rows, metric_col)
+    points, info = fmm_csv.aggregate(rows, metric_col, stat=args.stat)
     if not points:
         sys.exit("no energy_method=2 rows -- nothing to plot")
 

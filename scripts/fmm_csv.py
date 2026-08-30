@@ -118,18 +118,34 @@ def _tleaf_of(row):
     return int(float(raw))
 
 
-def aggregate(rows, metric_col="energy_pol", require_baseline=True):
+TIME_STATS = {"median": statistics.median, "min": min, "mean": statistics.fmean}
+
+
+def aggregate(rows, metric_col="energy_pol", require_baseline=True,
+              stat="median"):
     """Collapse repeats -> one point per configuration.
 
-    Time is the median over repeats (robust to a stray slow run); the energy is
-    the mean (it barely moves, and averaging keeps the error estimate from riding
-    on one sample).
+    `stat` picks how the repeats of a timing collapse to one number.  "median"
+    is the default and is right for a quiet machine.  Use "min" for shared
+    cluster nodes: contention from a co-scheduled job only ever makes a run
+    slower, so the fastest repeat is the closest thing to an uncontended
+    measurement.  On the TU Berlin A100 runs 11 of 168 ptheta configurations had
+    one repeat 3-6x slower than its siblings, enough to move a median and flip
+    the winner in a cell; the leaf-sweep jobs on the same hardware had none.
+
+    The energy is always the mean -- it barely moves between repeats, and
+    averaging keeps the error estimate from riding on a single sample.
 
     Returns (points, info). Each point carries mac / p / sleaf / tleaf / time /
     err / n, plus the phase split (t_build, t_pol, t_ionic) where the source CSV
     had one. info carries the baseline and naive reference values, any of which
     may be None when require_baseline is False.
     """
+    try:
+        collapse = TIME_STATS[stat]
+    except KeyError:
+        sys.exit("unknown --stat %r (want one of %s)"
+                 % (stat, ", ".join(sorted(TIME_STATS))))
     sweep_b = [r for r in rows if r.get("sweep") == "B"]
     if not sweep_b:
         sys.exit("no sweep B rows in the CSV -- nothing to plot")
@@ -141,7 +157,7 @@ def aggregate(rows, metric_col="energy_pol", require_baseline=True):
     ref = statistics.fmean(float(r[metric_col]) for r in base) if base else None
 
     naive = [r for r in sweep_b if r.get("energy_method") == "1"]
-    naive_t = statistics.median(float(r["t_energy"]) for r in naive) if naive else None
+    naive_t = collapse(float(r["t_energy"]) for r in naive) if naive else None
     naive_e = None
     if naive and ref:
         naive_e = abs(statistics.fmean(float(r[metric_col]) for r in naive) - ref)
@@ -157,7 +173,7 @@ def aggregate(rows, metric_col="energy_pol", require_baseline=True):
 
     def med(grp, col):
         vals = [float(r[col]) for r in grp if (r.get(col) or "").strip()]
-        return statistics.median(vals) if vals else None
+        return collapse(vals) if vals else None
 
     points = []
     for (mac, p, sleaf, tleaf), grp in sorted(groups.items()):
@@ -173,7 +189,7 @@ def aggregate(rows, metric_col="energy_pol", require_baseline=True):
         points.append({
             "mac": mac, "p": p, "sleaf": sleaf, "tleaf": tleaf,
             "pair": "{}/{}".format(sleaf, tleaf),
-            "time": statistics.median(float(r["t_energy"]) for r in grp),
+            "time": collapse(float(r["t_energy"]) for r in grp),
             "t_build": med(grp, "t_build"),
             "t_pol": med(grp, "t_pol"),
             "t_ionic": med(grp, "t_ionic"),
@@ -184,7 +200,7 @@ def aggregate(rows, metric_col="energy_pol", require_baseline=True):
         "ref": ref,
         "naive_t": naive_t,
         "naive_e": naive_e,
-        "base_t": (statistics.median(float(r["t_energy"]) for r in base)
+        "base_t": (collapse(float(r["t_energy"]) for r in base)
                    if base else None),
         "molecule": (rows[0].get("molecule", "") if rows else "") or "",
         "natoms": (rows[0].get("num_atoms", "") if rows else "") or "",

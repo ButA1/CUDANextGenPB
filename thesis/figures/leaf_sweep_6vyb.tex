@@ -36,7 +36,7 @@
     },
     width=7.4cm, height=5.6cm,
     xmode=log, log basis x=2,
-    ylabel={energy stage [s]},
+    ylabel={energy calculation [s]},
     xlabel style={font=\footnotesize},
     ylabel style={font=\footnotesize},
     tick label style={font=\scriptsize},
@@ -50,41 +50,41 @@
     legend style={draw=none, font=\footnotesize, column sep=0.6em},
 ]
 
-\nextgroupplot[xlabel={$n_{\mathrm{leaf,\,src}}$}, xtick={8,16,32,64}, xticklabels={8,16,32,64}, legend to name=leafsweeplegendsrcleafsweepvyb]
+\nextgroupplot[xlabel={$n_{leaf,src}$}, xtick={8,16,32,64}, xticklabels={8,16,32,64}, legend to name=leafsweeplegendsrcleafsweepvyb]
 
   \addplot[color=leafA, mark=*, mark size=1.3pt, line width=0.9pt ]
     table[x=sleaf, y=time, discard if not={tleaf}{128}] {figures/data/leaf_sweep_6vyb.dat};
-  \addlegendentry{$n_{\mathrm{leaf,tgt}} = 128$}
+  \addlegendentry{$n_{leaf,tgt} = 128$}
   \addplot[color=leafB, mark=square*, mark size=1.3pt, line width=0.9pt ]
     table[x=sleaf, y=time, discard if not={tleaf}{256}] {figures/data/leaf_sweep_6vyb.dat};
-  \addlegendentry{$n_{\mathrm{leaf,tgt}} = 256$}
+  \addlegendentry{$n_{leaf,tgt} = 256$}
   \addplot[color=leafC, mark=triangle*, mark size=1.3pt, line width=0.9pt ]
     table[x=sleaf, y=time, discard if not={tleaf}{512}] {figures/data/leaf_sweep_6vyb.dat};
-  \addlegendentry{$n_{\mathrm{leaf,tgt}} = 512$}
+  \addlegendentry{$n_{leaf,tgt} = 512$}
   \addplot[color=leafD, mark=diamond*, mark size=1.3pt, line width=0.9pt ]
     table[x=sleaf, y=time, discard if not={tleaf}{1024}] {figures/data/leaf_sweep_6vyb.dat};
-  \addlegendentry{$n_{\mathrm{leaf,tgt}} = 1024$}
+  \addlegendentry{$n_{leaf,tgt} = 1024$}
   \addplot[color=leafE, mark=pentagon*, mark size=1.3pt, line width=0.9pt ]
     table[x=sleaf, y=time, discard if not={tleaf}{2048}] {figures/data/leaf_sweep_6vyb.dat};
-  \addlegendentry{$n_{\mathrm{leaf,tgt}} = 2048$}
+  \addlegendentry{$n_{leaf,tgt} = 2048$}
   \addplot[color=leafF, mark=oplus*, mark size=1.3pt, line width=0.9pt ]
     table[x=sleaf, y=time, discard if not={tleaf}{4096}] {figures/data/leaf_sweep_6vyb.dat};
-  \addlegendentry{$n_{\mathrm{leaf,tgt}} = 4096$}
+  \addlegendentry{$n_{leaf,tgt} = 4096$}
 
-\nextgroupplot[xlabel={$n_{\mathrm{leaf,\,tgt}}$}, xtick={128,256,512,1024,2048,4096}, xticklabels={128,256,512,1024,2048,4096}, legend to name=leafsweeplegendtgtleafsweepvyb]
+\nextgroupplot[xlabel={$n_{leaf,tgt}$}, xtick={128,256,512,1024,2048,4096}, xticklabels={128,256,512,1024,2048,4096}, legend to name=leafsweeplegendtgtleafsweepvyb]
 
   \addplot[color=leafA, mark=*, mark size=1.3pt, line width=0.9pt ]
     table[x=tleaf, y=time, discard if not={sleaf}{8}] {figures/data/leaf_sweep_6vyb.dat};
-  \addlegendentry{$n_{\mathrm{leaf,src}} = 8$}
+  \addlegendentry{$n_{leaf,src} = 8$}
   \addplot[color=leafB, mark=square*, mark size=1.3pt, line width=0.9pt ]
     table[x=tleaf, y=time, discard if not={sleaf}{16}] {figures/data/leaf_sweep_6vyb.dat};
-  \addlegendentry{$n_{\mathrm{leaf,src}} = 16$}
+  \addlegendentry{$n_{leaf,src} = 16$}
   \addplot[color=leafC, mark=triangle*, mark size=1.3pt, line width=0.9pt ]
     table[x=tleaf, y=time, discard if not={sleaf}{32}] {figures/data/leaf_sweep_6vyb.dat};
-  \addlegendentry{$n_{\mathrm{leaf,src}} = 32$}
+  \addlegendentry{$n_{leaf,src} = 32$}
   \addplot[color=leafD, mark=diamond*, mark size=1.3pt, line width=0.9pt ]
     table[x=tleaf, y=time, discard if not={sleaf}{64}] {figures/data/leaf_sweep_6vyb.dat};
-  \addlegendentry{$n_{\mathrm{leaf,src}} = 64$}
+  \addlegendentry{$n_{leaf,src} = 64$}
 
 \end{groupplot}
 \end{tikzpicture}
@@ -97,15 +97,10 @@
 
 \caption[FMM leaf sizes swept independently]{\textbf{The two FMM tree leaf sizes
     on \leafMoleculeleafsweepvyb{} (\leafNatomsleafsweepvyb{} atoms), swept independently at
-    $\theta = \leafMacleafsweepvyb{}$ and $p = \leafOrderleafsweepvyb{}$.} Left: median energy-stage time
+    $\theta = \leafMacleafsweepvyb{}$ and $P = \leafOrderleafsweepvyb{}$.} Left: median energy-calculation time
     over \leafRepeatsleafsweepvyb{} repeats against the \emph{source} (atom) tree leaf size,
     one line per target leaf size. Right: the same against the \emph{target}
-    tree leaf size, one line per source leaf size. Both axes are
-    powers of two. The two knobs pull opposite ways -- the source leaf bounds the
-    box radius the acceptance criterion tests against and so sets the near-field
-    P2P work, while the target leaf sets the target box count and so sets the M2L
-    pair count -- which is why sweeping them as a single number, along the
-    $n_{\mathrm{src}} = n_{\mathrm{tgt}}$ diagonal, finds only a flat region
-    instead of the optimum at \leafBestleafsweepvyb{}.\leafNaiveNoteleafsweepvyb}
+    tree leaf size, one line per source leaf size. Both axes are powers of two.
+    The fastest configuration is \leafBestleafsweepvyb{}.\leafNaiveNoteleafsweepvyb}
 \label{fig:leaf_sweep_6vyb}
 \end{figure}

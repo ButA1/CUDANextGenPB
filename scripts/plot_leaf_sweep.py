@@ -120,7 +120,7 @@ COLORDEFS
     },
     width=7.4cm, height=5.6cm,
     xmode=log, log basis x=2,
-    ylabel={energy stage [s]},
+    ylabel={energy calculation [s]},
     xlabel style={font=\footnotesize},
     ylabel style={font=\footnotesize},
     tick label style={font=\scriptsize},
@@ -145,22 +145,17 @@ PANELS
 
 \caption[FMM leaf sizes swept independently]{\textbf{The two FMM tree leaf sizes
     on \leafMolecule{} (\leafNatoms{} atoms), swept independently at
-    $\theta = \leafMac{}$ and $p = \leafOrder{}$.} Left: median energy-stage time
+    $\theta = \leafMac{}$ and $P = \leafOrder{}$.} Left: median energy-calculation time
     over \leafRepeats{} repeats against the \emph{source} (atom) tree leaf size,
     one line per target leaf size. Right: the same against the \emph{target}
-    tree leaf size, one line per source leaf size. Both axes are
-    powers of two. The two knobs pull opposite ways -- the source leaf bounds the
-    box radius the acceptance criterion tests against and so sets the near-field
-    P2P work, while the target leaf sets the target box count and so sets the M2L
-    pair count -- which is why sweeping them as a single number, along the
-    $n_{\mathrm{src}} = n_{\mathrm{tgt}}$ diagonal, finds only a flat region
-    instead of the optimum at \leafBest{}.\leafNaiveNote}
+    tree leaf size, one line per source leaf size. Both axes are powers of two.
+    The fastest configuration is \leafBest{}.\leafNaiveNote}
 \label{fig:TAG}
 \end{figure}
 """
 
 PANEL_TEMPLATE = r"""
-\nextgroupplot[xlabel={$n_{\mathrm{leaf,\,AXIS}}$}, xtick={XTICKS}, xticklabels={XTICKLABELS}LEGENDOPT]
+\nextgroupplot[xlabel={$n_{leaf,AXIS}$}, xtick={XTICKS}, xticklabels={XTICKLABELS}LEGENDOPT]
 NAIVE
 SERIESLEGEND"""
 
@@ -191,7 +186,7 @@ def build_panel(axis, xcol, filtcol, values, points, tag, legend_name, naive_t):
             .replace("FILTCOL", filtcol)
             .replace("FILTVAL", str(v))
             .replace("TAG", tag)
-            .replace("ENTRY", "  \\addlegendentry{$n_{\\mathrm{leaf,%s}} = %d$}\n"
+            .replace("ENTRY", "  \\addlegendentry{$n_{leaf,%s} = %d$}\n"
                               % (sub, v)))
 
     # Off by default: the naive path is several times slower than every FMM
@@ -232,6 +227,10 @@ def main():
     ap.add_argument("--molecule", default=None,
                     help="molecule name for the caption (a replay CSV has no such column)")
     ap.add_argument("--natoms", default=None, help="atom count for the caption, as above")
+    ap.add_argument("--stat", default="median",
+                    choices=sorted(fmm_csv.TIME_STATS),
+                    help="how to collapse timing repeats; use min for shared "
+                         "cluster nodes, where contention only slows runs down")
     ap.add_argument("--naive", action="store_true",
                     help="draw the naive O(N^2) time as a horizontal line. Off by "
                          "default: it is several times slower than every FMM "
@@ -248,7 +247,8 @@ def main():
     rows = fmm_csv.load(csv_path)
     # The error baseline is irrelevant here -- nothing on this figure is an error --
     # so a --no-naive CSV is still perfectly plottable.
-    points, info = fmm_csv.aggregate(rows, require_baseline=False)
+    points, info = fmm_csv.aggregate(rows, require_baseline=False,
+                                     stat=args.stat)
     if not points:
         sys.exit("no energy_method=2 rows -- nothing to plot")
 

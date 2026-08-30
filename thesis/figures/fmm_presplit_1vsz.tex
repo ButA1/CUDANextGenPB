@@ -49,7 +49,7 @@
     },
     width=7.2cm, height=5.4cm,
     xmode=log, ymode=log,
-    xlabel={energy stage [s]},
+    xlabel={energy calculation [s]},
     ylabel={relative error},
     xlabel style={font=\footnotesize},
     ylabel style={font=\footnotesize},
@@ -68,7 +68,7 @@
     legend style={draw=none, font=\footnotesize, column sep=0.6em},
 ]
 
-\nextgroupplot[title={$n_{\mathrm{src}}/n_{\mathrm{tgt}} = 32/32$}, legend to name=fmmlegendfmmpresplit1vsz]
+\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = 32/32$}, legend to name=fmmlegendfmmpresplit1vsz]
   % resolution floor of the comparison
   \addplot[draw=none, fill=black!7, forget plot]
     coordinates {(0.195107,3.33333e-17) (10.1424,3.33333e-17) (10.1424,\fmmNaiveErrfmmpresplitvsz) (0.195107,\fmmNaiveErrfmmpresplitvsz)}
@@ -82,30 +82,30 @@
   \addplot[color=fmmp6, mark=*, mark size=1.15pt, line width=0.9pt ]
     table[x=time, y=err_pol, discard if not two={pairid}{0}{p}{6}]
       {figures/data/fmm_presplit_1vsz.dat};
-  \addlegendentry{$p=6$}
+  \addlegendentry{$P=6$}
   \addplot[color=fmmp7, mark=square*, mark size=1.15pt, line width=0.9pt ]
     table[x=time, y=err_pol, discard if not two={pairid}{0}{p}{7}]
       {figures/data/fmm_presplit_1vsz.dat};
-  \addlegendentry{$p=7$}
+  \addlegendentry{$P=7$}
   \addplot[color=fmmp8, mark=triangle*, mark size=1.15pt, line width=0.9pt ]
     table[x=time, y=err_pol, discard if not two={pairid}{0}{p}{8}]
       {figures/data/fmm_presplit_1vsz.dat};
-  \addlegendentry{$p=8$}
+  \addlegendentry{$P=8$}
   \addplot[color=fmmp9, mark=diamond*, mark size=1.15pt, line width=0.9pt ]
     table[x=time, y=err_pol, discard if not two={pairid}{0}{p}{9}]
       {figures/data/fmm_presplit_1vsz.dat};
-  \addlegendentry{$p=9$}
+  \addlegendentry{$P=9$}
   \addplot[color=fmmp10, mark=pentagon*, mark size=1.15pt, line width=0.9pt ]
     table[x=time, y=err_pol, discard if not two={pairid}{0}{p}{10}]
       {figures/data/fmm_presplit_1vsz.dat};
-  \addlegendentry{$p=10$}
+  \addlegendentry{$P=10$}
   \addlegendimage{fmmfront, line width=1.6pt}
   \addlegendentry{Pareto front}
   \addlegendimage{black!55, dashed, line width=0.8pt}
   \addlegendentry{naive $O(N^2)$}
 
 
-\nextgroupplot[title={$n_{\mathrm{src}}/n_{\mathrm{tgt}} = 64/64$}]
+\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = 64/64$}]
   % resolution floor of the comparison
   \addplot[draw=none, fill=black!7, forget plot]
     coordinates {(0.195107,3.33333e-17) (10.1424,3.33333e-17) (10.1424,\fmmNaiveErrfmmpresplitvsz) (0.195107,\fmmNaiveErrfmmpresplitvsz)}
@@ -133,7 +133,7 @@
       {figures/data/fmm_presplit_1vsz.dat};
 
 
-\nextgroupplot[title={$n_{\mathrm{src}}/n_{\mathrm{tgt}} = 128/128$}]
+\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = 128/128$}]
   % resolution floor of the comparison
   \addplot[draw=none, fill=black!7, forget plot]
     coordinates {(0.195107,3.33333e-17) (10.1424,3.33333e-17) (10.1424,\fmmNaiveErrfmmpresplitvsz) (0.195107,\fmmNaiveErrfmmpresplitvsz)}
@@ -161,7 +161,7 @@
       {figures/data/fmm_presplit_1vsz.dat};
 
 
-\nextgroupplot[title={$n_{\mathrm{src}}/n_{\mathrm{tgt}} = 256/256$}]
+\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = 256/256$}]
   % resolution floor of the comparison
   \addplot[draw=none, fill=black!7, forget plot]
     coordinates {(0.195107,3.33333e-17) (10.1424,3.33333e-17) (10.1424,\fmmNaiveErrfmmpresplitvsz) (0.195107,\fmmNaiveErrfmmpresplitvsz)}
@@ -196,11 +196,11 @@
 
 \caption[FMM parameter sweep: accuracy against work]{\textbf{FMM accuracy against
     work on \fmmMoleculefmmpresplitvsz{} (\fmmNatomsfmmpresplitvsz{} atoms).} Each point is one
-    $(\theta,\,p,\,n_{\mathrm{leaf}})$ configuration; the horizontal axis is the
-    median energy-stage time over \fmmRepeatsfmmpresplitvsz{} repeats and the vertical axis the
+    $(\theta,\,P,\,n_{leaf})$ configuration; the horizontal axis is the
+    median energy-calculation time over \fmmRepeatsfmmpresplitvsz{} repeats and the vertical axis the
     relative error in the \fmmMetricfmmpresplitvsz{} against the CPU path
     (\texttt{energy\_method\,=\,0}) of the same sweep, so solver error cancels.
-    Panels are the leaf size, colour the multipole order $p$, and the points
+    Panels are the leaf size, colour the multipole order $P$, and the points
     along each line the multipole acceptance criterion $\theta$, increasing from
     $0.2$ at the accurate end to $0.8$. The grey line is the Pareto front over
     the whole sweep, repeated in every panel. The dashed vertical line is the
