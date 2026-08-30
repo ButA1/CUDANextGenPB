@@ -89,6 +89,14 @@ Once I settled on a path, that is where I would actually dig deeper and request 
 No plan survives first contact with the enemy, the enemy being my own laziness.
 At the beginning I procrastinated on inspecting the code until it was too late, and I lost valuable time rolling back code that I had a poor understanding of.
 
+\subsection{Code Quality}
+
+Claude Opus has produced functional code the vast majority of the time, and in the rare instances that it did not, it almost always managed to find and correct the mistakes.
+Only once has it failed to find a very obscure memory leak inside a code section, which I was luckily able to drop.
+It handles indices and pointer arithmetic extremely well, something that human developers often struggle with given the prominence of the ``off-by-one'' bug.
+However it does not always pick the most optimal or even most sensible implementation.
+It seems to favor those that pose the fewest risks, often commenting how another implementation would be more optimal, and the current one is still correct.
+
 \subsection{Plan Mode}
 
 Implementation was done almost exclusively through Claude's ``plan mode'', where the engineer specifies a feature, after which Claude explores all the necessary changes, and displays them in a plan.

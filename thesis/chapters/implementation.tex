@@ -374,7 +374,7 @@ Because many threads write into the same row concurrently, each row carries an a
 \subsubsection{4. Dual-tree Traversal}
 
 %It's not actually traversal, I just collect the interaction lists
-Figure~\ref{fig:fmm-g4} shows the breadth-first traversal based on the DTT \cite{yokota2013dualtree} algorithm described in \ref{sec:alternative-techniques-nbody-fmm-dtt}, using the double-sided $B_{max}$ MAC controlled through $\theta$.
+Figure~\ref{fig:fmm-g4} shows the breadth-first traversal based on the DTT \cite{yokota2013dualtree} algorithm described in \ref{sec:optimization-techniques-nbody-fmm-dtt}, using the double-sided $B_{max}$ MAC controlled through $\theta$.
 Rather than the $B_{\max}$ of each cell, I use the half-diagonals $r_A$ and $r_B$ of the bounding boxes, accepting a pair when $r_A + r_B < \theta R$
 (Figure~\ref{fig:fmm-mac}).
 \input{figures/mac_criterion}
@@ -423,6 +423,7 @@ Since each write to the local moments is distinct, no atomics are needed at this
 
 \subsubsection{7. Fused Evaluation}
 
+% TODO don't forget the block level stride
 Finally, the near-field and far-field contributions are evaluated on the targets, as can be seen in Figure~\ref{fig:fmm-g7}.
 Both the P2P and L2P evaluations are rolled into a single kernel \snakecase{l2p_p2p_kernel} launched per block for every box target leaf, with every thread handling at most one atom.
 So the target position is loaded once and both contributions are summed in registers.
