@@ -272,10 +272,14 @@ It is still surprising that the untamed GA100 chip of the A100 did not manage to
 \subsection{Energy Calculation}
 \label{sec:evaluation-results-energy-calculation}
 
+Before I can compare the CPU baseline and the 
+
 \subsubsection{FMM parameters}
 
 The FMM has multiple parameters, which I needed to balance against each other to find the optimum, those being the order of the multipole expansion $P$, the MAC parameter $\theta$ and the number of particles inside one leaf $n_{leaf}$.
-I made four sweeps of $P$ and $\theta$ for values between 6 to 10 and 0.2 to 0.8 for both 6VYB (test1) and 1VSZ (test2) on my local machine,
+I made four sweeps of $P$ and $\theta$ for values between 6 to 10 and 0.2 to 0.8 for 6VYB (test1) and 1VSZ (test2) on my local machine.
+FMM was slower than the naive kernel for 1CCM, no matter which configuration I used, which is why I did not consider it for the parameter choice.
+This molecule consists of only 642 atoms, at which point the overhead of FMM is simply too expensive.
 I've plotted their speed against their relative error compared to the naive $O(N^2)$ GPU sum over the same inputs, taken from an average of 3 runs,
 which can be seen in Figure~\ref{fig:fmm_presplit_6vyb} and \ref{fig:fmm_presplit_1vsz}.
 
@@ -329,11 +333,40 @@ which can be seen in Figure~\ref{fig:fmm_presplit_6vyb} and \ref{fig:fmm_prespli
 %    python3 scripts/plot_fmm_sweep.py test1 --csv test1/ptheta.csv \
 %        --tag fmm_ptheta_6vyb --molecule 6VYB --natoms 44495 \
 %        --kirkwood-err $K --machine "$M"
-%    python3 scripts/plot_fmm_sweep.py test2 --csv test2/ptheta.csv \
+%    python3 scripts/plot_fmm_sweep.py test2 --csv test2/confirm_16_512.csv \
 %        --tag fmm_ptheta_1vsz --molecule 1VSZ --natoms 14299 \
 %        --kirkwood-err $K --machine "$M"
 %  Add --stock-csv test<N>/bench_runs.csv to print the reproducibility numbers
-%  above; it changes nothing that is drawn.
+%  above; it changes nothing that is drawn. --top N sets how many rows the
+%  table lists (default 3).
+%
+%  NOTE THE 1VSZ SOURCE: confirm_16_512.csv, NOT ptheta.csv. The original
+%  ptheta sweep was pinned at 16/1024, a leaf pair inherited from a P=9,
+%  theta=0.3 leaf sweep and never re-checked at the P and theta that ended up
+%  winning. Re-sweeping the leaf plane at (P=7, theta=0.3) found 16/512 at
+%  0.998 s against 1.297 s for 16/1024 -- 23% faster AND 2.4x more accuracy
+%  headroom (4.07e-11 vs 9.74e-11), against repeat spreads of 1.2% and 3.3%.
+%  Re-sweeping the (P, theta) plane at 16/512 then reproduced P=7, theta=0.3
+%  at 0.991 s, so the search has converged. Figure and text now both say 512.
+%
+%  Both optima are therefore verified on BOTH planes -- (src,tgt) at the winning
+%  (P,theta), and (P,theta) at the winning leaf pair. That is a local optimum in
+%  all four coordinates, not a global one; the full 4D grid is 1225 configs and
+%  was not run. Say "local optimum", not "the optimum".
+%
+%      6VYB  P=11 theta=0.4  16/1024  3.000 s  5.5e-11  8.3x naive
+%      1VSZ  P= 7 theta=0.3  16/512   0.991 s  4.1e-11  5.8x naive
+%
+%  6VYB is confirmed but FLAT: 16/1024 also wins its leaf plane outright, yet
+%  the runner-up 8/2048 is only 3.1% behind against a 3.2% median repeat spread.
+%  Within measurement 16/1024, 8/2048 and 16/2048 are one configuration. 1VSZ is
+%  the clean one: 41% clear of its runner-up against a 4.7% spread.
+%
+%  Worth a sentence: the time-optimal SOURCE leaf at P=7 on 1VSZ is 8, not 16
+%  (tgt=512: 4:0.980  8:0.910  16:0.998  32:1.229 s), exactly as the falling-P
+%  argument predicts. 8/512 is disqualified on accuracy (1.03e-09, 8x over the
+%  ceiling), so 16 wins by default. The mechanism holds; it just is not what
+%  selects the configuration here.
 %
 %  Both ptheta figures now carry P = 6..12, and the data does NOT say what the
 %  earlier config sweep at other leaf pairs said. At 16/1024, P = 12 is MORE
@@ -396,14 +429,33 @@ Even though regions are not equally populated, this still roughly equates to the
 This can be clearly seen in the right diagram of Figure~\ref{fig:platform_shift_6vyb}, showing a decrease in the optimal $n_{leaf,tgt}$.
 Though the same cannot be objectively said about 1VSZ, it is clear from the curve that the A100-16 rank curve is almost flat between 512 and 1024, while the A100-4 rank curve has much more clear minima.
 
+In terms of accuracy: the rank 4 results from the A100 and the RTX 3080 are within a $10^{-12}$ relative error.
+An increase in ranks had the tendency to decrease the median error slightly, but this was only observed across 62\%-67\% of all runs.
+I will refrain from calling this a general trend, but rather fluctuations attributed to the observations made in \ref{sec:evaluation-experimental-setup-mpi-ranks}.
+
 \input{figures/platform_shift_6vyb.tex}
 \input{figures/platform_shift_6vyb_table.tex}
 \input{figures/platform_shift_1vsz.tex}
 
 Despite the multitude of variables, the general direction for searching optima is clear, and considering the accuracy target, the mission now became a search for the fastest configuration that still satisfies it.
-For my local machine the measured optimal configurations for 6VYB (test1) and 1VSZ (test2) can be seen in Table~\ref{tab:fmm_ptheta_6vyb-pareto} and \ref{tab:fmm_ptheta_1vsz-pareto}.
+I converged towards a local optimum through successive sweeps of the best configuration.
+
+One discovery I made while searching was that accuracy did not always monotonically increase with $P$.
+As an example: for 1VSZ and $\theta = 0.3$, $n_{leaf,src} = 16$, $n_{leaf,tgt} = 512$ the relative error went 8.0e-09, 4.1e-11, 6.8e-10, 1.2e-12, 7.7e-12, 1.6e-12, 3.0e-13 for $P = 6..12$.
+The relative error became worse going from $P = 7$ to $P = 8$.
+This necessitated the sweep across all $P$ every time I converged on a new optimum.
+Nevertheless it is not unexpected.
+The Cheng-Greengard-Rokhlin give an upper bound on a multipole converted to a local expansion with Theorem 2.4 of \cite{cheng1999fastadaptive}, and it roughly decays with $(\text{seperation ratio})^{(P+1)}$ scaled by the sum of the absolute charges.
+However three things made decide against striving towards it.
+Since the atoms carry both negative and positive charges, their net charge may be much lower than the sum of their absolutes.
+This is something Salmon \& Warren also state in \cite{salmon1994skeletons} \textit{``...the monopole contribution of a cell may be vanishingly small due to charge cancellation...''}.
+Second, this boundary makes no judgement on speed, just accuracy, and Salmon \& Warren have also shown that a few percent of accuracy may cost about 30 times as much computation.
+Lastly, it does not mean that the error for a singular result will be exactly on that boundary, or that it will also decrease monotonically with $P$.
+% TODO decide whether to include the θ/(2−θ) rate
+
+For my local machine the measured best configurations for 6VYB (test1) and 1VSZ (test2) can be seen in Table~\ref{tab:fmm_ptheta_6vyb-pareto} and \ref{tab:fmm_ptheta_1vsz-pareto}.
 For the stated accuracy goal of a potential energy relative error of less than 1.5e-10, the most efficient config for 6VYB was $P=11$, $\theta=0.4$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
-For 1VSZ the most efficient config was $P=7$, $\theta=0.3$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
+For 1VSZ the most efficient config was $P=7$, $\theta=0.3$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 512$.
 
 \input{figures/fmm_ptheta_6vyb.tex}
 \input{figures/fmm_ptheta_6vyb_table.tex}

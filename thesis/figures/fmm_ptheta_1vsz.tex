@@ -61,8 +61,8 @@
     major grid style={black!12},
     minor grid style={black!5},
     minor tick num=0,
-    ymin=3.33333e-17, ymax=9.05966e-05,
-    xmin=0.149495, xmax=7.69381,
+    ymin=3.33333e-17, ymax=3.00787e-05,
+    xmin=0.138557, xmax=7.75913,
     log basis x=10, log basis y=10,
     xtick={0.2,0.5,1,2,5}, xticklabels={0.2,0.5,1,2,5},
     ytick={1e-15,1e-13,1e-11,1e-09,1e-07,1e-05},
@@ -70,16 +70,16 @@
     legend style={draw=none, font=\footnotesize, column sep=0.6em},
 ]
 
-\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = 16/1024$}, legend to name=fmmlegendfmmptheta1vsz]
+\nextgroupplot[title={$n_{leaf,src}/n_{leaf,tgt} = 16/512$}, legend to name=fmmlegendfmmptheta1vsz]
   % stock NextGenPB error on the analytical Kirkwood sphere
   \addplot[draw=none, fill=black!7, forget plot]
-    coordinates {(0.149495,3.33333e-17) (7.69381,3.33333e-17) (7.69381,\fmmKirkErrfmmpthetavsz) (0.149495,\fmmKirkErrfmmpthetavsz)}
+    coordinates {(0.138557,3.33333e-17) (7.75913,3.33333e-17) (7.75913,\fmmKirkErrfmmpthetavsz) (0.138557,\fmmKirkErrfmmpthetavsz)}
     \closedcycle;
   \addplot[black!45, densely dotted, line width=1.0pt, forget plot]
-    coordinates {(0.149495,\fmmKirkErrfmmpthetavsz) (7.69381,\fmmKirkErrfmmpthetavsz)};
+    coordinates {(0.138557,\fmmKirkErrfmmpthetavsz) (7.75913,\fmmKirkErrfmmpthetavsz)};
   % naive O(N^2) energy time
   \addplot[black!55, dashed, line width=0.8pt, forget plot]
-    coordinates {(\fmmNaiveTimefmmpthetavsz,3.33333e-17) (\fmmNaiveTimefmmpthetavsz,9.05966e-05)};
+    coordinates {(\fmmNaiveTimefmmpthetavsz,3.33333e-17) (\fmmNaiveTimefmmpthetavsz,3.00787e-05)};
   % Pareto front over the whole sweep
   \addplot[fmmfront, line width=1.6pt, forget plot]
     table[x=time, y=err] {figures/data/fmm_ptheta_1vsz_pareto.dat};

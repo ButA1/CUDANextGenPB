@@ -262,8 +262,10 @@ usage (const char *argv0)
     "  actually used is what lands in the tgt_leaf CSV column.\n"
     "\n"
     "  Measured optima (6VYB + 1VSZ, RTX 3080): src 16, tgt 1024 -- interior on BOTH\n"
-    "  axes (8/32 and 512/4096 are worse). --order past 11 REGRESSES: p=12 is slower\n"
-    "  and less accurate than p=11 (unscaled M2L conditioning), so 11 is the ceiling.\n"
+    "  axes (8/32 and 512/4096 are worse), but measured at p=9 theta=0.3 and never\n"
+    "  re-checked at the p/theta that ended up winning. --order 12 is 1.14-1.28x\n"
+    "  slower than 11 and, at 16/1024, MORE accurate at 12 of 14 measured points --\n"
+    "  it loses on cost, not on conditioning.\n"
     "\n"
     "  SPEC is \"a,b,c\", \"lo:hi\" (step 1) or \"lo:hi:step\", e.g.\n"
     "    --mac 0.4:0.6:0.1 --order 10,11 --leaf 8,16,32 --tleaf 512,1024,2048\n",
