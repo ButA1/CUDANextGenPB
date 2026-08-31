@@ -63,6 +63,13 @@ def classify(row):
     return None
 
 
+def _single_value(rows, col):
+    """The one value column `col` takes across `rows`, or None if it varies."""
+    seen = {(r.get(col) or "").strip() for r in rows}
+    seen.discard("")
+    return seen.pop() if len(seen) == 1 else None
+
+
 def collect(folder, csv_path, metric_col):
     # Filter on the folder column, not just the file. One CSV can hold runs from
     # several test folders -- bench_sweep.py writes wherever -o points, so a sweep
@@ -99,7 +106,8 @@ def collect(folder, csv_path, metric_col):
         return fn(vals) if vals else None
 
     out = {"molecule": molecule, "folder": folder, "configs": {},
-           "ranks": fmm_csv.ranks_of(rows)}
+           "ranks": fmm_csv.ranks_of(rows),
+           "energy_method": _single_value(rows, "energy_method")}
     for key, grp in groups.items():
         times = [float(r[metric_col]) for r in grp if r.get(metric_col)]
         if not times:
@@ -115,6 +123,7 @@ def collect(folder, csv_path, metric_col):
             "solve": stat(grp, "amgx_solve_s"),
             "total": stat(grp, "amgx_total_s"),
             "wall": stat(grp, "wall_s"),
+            "amgx_config": _single_value(grp, "amgx_config"),
         }
     return out if out["configs"] else None
 
@@ -167,7 +176,79 @@ def write_long_dat(path, ds, relative):
                 "nan" if c["iters"] is None else "{:.0f}".format(c["iters"])))
 
 
-def write_ref_tex(path, datasets, metric, relative, nrep, machine_note=""):
+def parse_machine_overrides(pairs):
+    """--machine-override MOLECULE=TEXT, repeatable -- one molecule measured
+    somewhere other than --machine. Returns {molecule: machine text}."""
+    overrides = {}
+    for item in pairs or []:
+        if "=" not in item:
+            raise SystemExit(
+                "--machine-override needs MOLECULE=TEXT, got {!r}".format(item))
+        mol, text = item.split("=", 1)
+        overrides[mol.strip()] = text
+    return overrides
+
+
+def dataset_repeats(ds):
+    """The repeat count shared by every config in `ds`, or None if it varies."""
+    ns = {c["n"] for c in ds["configs"].values()}
+    return ns.pop() if len(ns) == 1 else None
+
+
+def build_caption_notes(datasets, default_machine, overrides, nrep):
+    """\\solverMachine covers only the datasets NOT in `overrides`. A molecule
+    measured on different hardware, with a different repeat count, or with a
+    different AMGX config does not fit that one blanket sentence -- folding it
+    in anyway would misdescribe it, so it gets its own clause in
+    \\solverCaveats instead. The repeat-count check runs over every dataset,
+    not just overridden ones: \\solverRepeats is a single number (the median
+    across all of them), which silently hides a molecule that used a very
+    different count. Also returns the base energy_method (None if even the
+    non-overridden datasets disagree)."""
+    base = [ds for ds in datasets if ds["molecule"] not in overrides]
+
+    base_ranks = {ds["ranks"] for ds in base}
+    ranks = base_ranks.pop() if len(base_ranks) == 1 else None
+    machine_note = fmm_csv.machine_note(default_machine, ranks)
+
+    base_em = {ds["energy_method"] for ds in base}
+    energy_method = base_em.pop() if len(base_em) == 1 else None
+
+    base_cfg = {ds["configs"]["amgxcfg"]["amgx_config"] for ds in base
+                if "amgxcfg" in ds["configs"]}
+    base_cfg = base_cfg.pop() if len(base_cfg) == 1 else None
+
+    clauses = []
+    for ds in datasets:
+        mol = ds["molecule"]
+        bits = []
+        if mol in overrides:
+            bits.append("measured on {} with {} MPI ranks".format(
+                overrides[mol], ds["ranks"] or "an unrecorded number of"))
+        reps = dataset_repeats(ds)
+        if reps is not None and reps != nrep:
+            note = "{} run{} per configuration, not {}".format(
+                reps, "" if reps == 1 else "s", nrep)
+            if reps == 1:
+                note += " (hence no whiskers)"
+            bits.append(note)
+        em = ds["energy_method"]
+        if em is not None and energy_method is not None and em != energy_method:
+            bits.append("\\texttt{{energy\\_method\\,=\\,{}}} instead of {} "
+                        "(read only after the solve stage timed here, so it "
+                        "does not affect this comparison)".format(em, energy_method))
+        cfg = ds["configs"].get("amgxcfg", {}).get("amgx_config")
+        if cfg and base_cfg and cfg != base_cfg:
+            bits.append("AMGX (tuned) using \\texttt{{{}}} instead of \\texttt{{{}}}"
+                        .format(cfg.replace("_", "\\_"), base_cfg.replace("_", "\\_")))
+        if bits:
+            clauses.append("{}: {}.".format(mol, "; ".join(bits)))
+    caveats = (" " + " ".join(clauses)) if clauses else ""
+    return machine_note, energy_method, caveats
+
+
+def write_ref_tex(path, datasets, metric, relative, nrep, machine_note="",
+                   energy_method=None, caveats=""):
     with open(path, "w") as fh:
         fh.write("% generated by scripts/plot_solver_bench.py -- do not edit\n")
         fh.write("\\def\\solverMetric{%s}\n" % METRICS[metric][1])
@@ -176,7 +257,11 @@ def write_ref_tex(path, datasets, metric, relative, nrep, machine_note=""):
                  ("relative to the fastest" if relative else "seconds"))
         fh.write("\\def\\solverMolecules{%s}\n" %
                  ", ".join(ds["molecule"] for ds in datasets))
+        fh.write("\\def\\solverEnergyMethod{%s}\n" %
+                 (energy_method if energy_method is not None
+                  else "\\textbf{[mixed]}"))
         fh.write("\\def\\solverMachine{%s}\n" % machine_note)
+        fh.write("\\def\\solverCaveats{%s}\n" % caveats)
 
 
 FIGURE_TEMPLATE = r"""% ------------------------------------------------------------------------
@@ -241,12 +326,13 @@ SERIES
 \caption[Linear solver comparison]{\textbf{Linear solver comparison on
     \solverMolecules{}.} Median \solverMetric{} time over \solverRepeats{} runs
     per configuration, with whiskers spanning the fastest and slowest of those
-    runs; the small figure above each column is the iteration count. All three
-    configurations use the same discretisation and the same energy path
-    (\texttt{energy\_method\,=\,1}), so the bars differ only in the linear
-    solver. Note that they do not all converge to the same residual --
-    table~\ref{tab:solver-bench} gives the residual each one actually reached,
-    without which the times are not comparable.\solverMachine}
+    runs; the small figure above each column is the iteration count. Every
+    configuration uses the same discretisation and, unless noted below, the
+    same energy path (\texttt{energy\_method\,=\,\solverEnergyMethod}), so the
+    bars differ only in the linear solver. Note that they do not all converge
+    to the same residual -- table~\ref{tab:solver-bench} gives the residual
+    each one actually reached, without which the times are not
+    comparable.\solverMachine\solverCaveats}
 \label{fig:solver-bench}
 \end{figure}
 """
@@ -397,8 +483,9 @@ def write_table(path, datasets, metric, out_tex):
         "accelerator, while the host column is set by the CPU and can dominate "
         "the total. \\emph{rel.} is the stage time relative to the fastest "
         "configuration for that molecule. LIS never touches the GPU, so its "
-        "whole stage is host time.\\solverMachine{} The residuals differ by orders "
-        "of magnitude, so the times are not a like-for-like comparison.}",
+        "whole stage is host time.\\solverMachine{}\\solverCaveats{} The residuals "
+        "differ by orders of magnitude, so the times are not a like-for-like "
+        "comparison.}",
         "\\label{tab:solver-bench}",
         "\\begin{tabular}{llrrrrrrl}",
         "\\toprule",
@@ -453,6 +540,15 @@ def main():
     ap.add_argument("--tag", default="solver_bench",
                     help="basename for the generated files (default: solver_bench)")
     fmm_csv.add_machine_argument(ap)
+    ap.add_argument("--machine-override", action="append", default=None,
+                    metavar="MOLECULE=TEXT",
+                    help="one molecule was measured on different hardware than "
+                         "--machine, e.g. --machine-override H1N1='an H200 node "
+                         "of the TU Berlin HPC'. Repeatable. That molecule's "
+                         "rank count, repeat count, and AMGX config are compared "
+                         "against the rest and any difference is spelled out in "
+                         "its own caption clause instead of folded into the one "
+                         "blanket \\solverMachine sentence.")
     ap.add_argument("--metric", default="solve", choices=sorted(METRICS),
                     help="which stage the columns show (default: solve)")
     ap.add_argument("--csv", default=None,
@@ -500,18 +596,19 @@ def main():
         write_long_dat(dat, datasets[0], args.relative)
     else:
         write_dat(dat, datasets, args.relative)
-    # Every dataset in one figure must share a rank count, or the bars are not
-    # comparable and no caption can rescue them.
-    rank_set = {ds["ranks"] for ds in datasets}
-    ranks = rank_set.pop() if len(rank_set) == 1 else None
+    overrides = parse_machine_overrides(args.machine_override)
+    machine_note, energy_method, caveats = build_caption_notes(
+        datasets, args.machine, overrides, nrep)
     write_ref_tex(reftex, datasets, args.metric, args.relative, nrep,
-                  fmm_csv.machine_note(args.machine, ranks))
+                  machine_note, energy_method, caveats)
     build_figure(args.tag, datasets, args.metric, args.relative, fig)
     write_table(tab, datasets, args.metric, tab)
 
     label = {k: lbl for k, lbl, _, _ in CONFIGS}
     for ds in datasets:
-        print("\n{}  ({} runs per configuration)".format(ds["molecule"], nrep))
+        ds_nrep = dataset_repeats(ds)
+        print("\n{}  ({} runs per configuration)".format(
+            ds["molecule"], ds_nrep if ds_nrep is not None else "mixed"))
         print("  %-16s %9s %8s %7s %10s %10s %11s" % (
             "configuration", "stage s", "spread", "iters", "setup s", "solve s",
             "residual"))

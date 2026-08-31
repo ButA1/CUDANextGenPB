@@ -1,0 +1,78 @@
+% ------------------------------------------------------------------------
+%  sparse_matrix_template memory fix: std::map -> boost::container::flat_map.
+%  Hand-authored from two heaptrack captures (rank 1, 6VYB, 4 MPI ranks, both
+%  using the AMGX solver): profiles/heaptrack.ngpb.rank1.base.zst (std::map)
+%  and profiles/heaptrack.ngpb.rank1.opt.amgx.zst (flat_map).
+%  Rank 1 rather than rank 0: the rank 0 opt.amgx capture is corrupted (all
+%  memory attributed to one frame -- a truncated .zst from an OOM kill during
+%  a later re-run attempt), while rank 1's is intact for both before/after.
+%
+%  TOTALS come from the Summary tab / heaptrack_print "peak heap memory
+%  consumption" (6.62G and 3.72G), NOT from the Top-Down "main" row. Do not
+%  substitute the Top-Down number here: the two captures unwind to different
+%  depths, so they root differently. In base, every stack ends at main, so
+%  Top-Down main (6.6G) ~= the whole process. In opt, the num_local_nodes ->
+%  p8est -> libsc site (813M) unwinds past main into __libc_start_call_main
+%  and roots under _start instead, so Top-Down main (2.8G) omits it while the
+%  process peak is 3.72G. Using both Top-Down numbers would show a 2.4x drop
+%  where the real like-for-like figure is 1.8x.
+%  The assemble_system_matrix bars ARE the Top-Down Peak column; that node
+%  roots through main in both captures, so it is comparable.
+%  See [[project_bimpp_memory]].
+%  Include with \input{figures/bimpp_memory_fix}
+%  Needs \usepackage{pgfplots} in the preamble.
+% ------------------------------------------------------------------------
+\pgfplotsset{compat=1.16}
+
+\definecolor{memtotal}{HTML}{1F77B4}
+\definecolor{memassemble}{HTML}{E8A33D}
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    width=8.6cm, height=6.4cm,
+    bar width=34pt,
+    xmin=-0.6, xmax=1.6,
+    xtick={0,1},
+    xticklabels={\texttt{std::map} (before),\texttt{flat\_map} (after)},
+    xticklabel style={font=\footnotesize, align=center},
+    ymin=0, ymax=7.6,
+    ylabel={peak heap memory, rank 1 [GB]},
+    ylabel style={font=\footnotesize},
+    tick label style={font=\scriptsize},
+    ymajorgrids=true,
+    major grid style={black!12},
+    legend style={
+      at={(0.5,-0.16)}, anchor=north, draw=none,
+      legend columns=2, font=\footnotesize, column sep=1em,
+    },
+]
+  % Overlay, not stack: assemble_system_matrix is a subset of the total, so the
+  % second series is drawn at the same x position (bar shift=0pt) on top of the
+  % first, covering its lower portion. The remaining visible strip of memtotal
+  % above the seam is "everything in main's peak that is not assembly".
+  \addplot+[
+    ybar, bar shift=0pt, fill=memtotal, draw=memtotal!70!black, line width=0.4pt,
+  ] coordinates {(0,6.6) (1,3.7)};
+  \addlegendentry{total peak (process)}
+  \addplot+[
+    ybar, bar shift=0pt, fill=memassemble, draw=memassemble!70!black, line width=0.4pt,
+  ] coordinates {(0,4.4) (1,1.8)};
+  \addlegendentry{\texttt{assemble\_system\_matrix}}
+
+  % Value labels: total at the bar top, assemble at the seam between the two
+  % colors, with a short cap line marking the seam itself.
+  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:0,6.6) {6.6};
+  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:1,3.7) {3.7};
+  \draw[black!55, line width=0.6pt] ([xshift=-17pt]axis cs:0,4.4) -- ([xshift=17pt]axis cs:0,4.4);
+  \draw[black!55, line width=0.6pt] ([xshift=-17pt]axis cs:1,1.8) -- ([xshift=17pt]axis cs:1,1.8);
+  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:0,4.4) {4.4};
+  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:1,1.8) {1.8};
+\end{axis}
+\end{tikzpicture}
+
+\caption[Sparse matrix memory fix]{\textbf{Effect of the \texttt{sparse\_matrix\_template} fix on peak host memory, 6VYB, rank 1.} The process-wide peak heap consumption against the peak attributable to \texttt{assemble\_system\_matrix} alone (a subset of the total, not an additional amount), before and after replacing bimpp's \texttt{std::vector<std::map<int,double>>} with \texttt{boost::container::flat\_map} (Section~\ref{sec:evaluation-experimental-setup-comparing-memory-utilization}). The totals are heaptrack's peak heap memory consumption over the whole run; the assembly figures are the Peak column of its Top-Down view. Both captures use the AMGX solver, measured on the local system (Table~\ref{tab:test-systems}) with 4 MPI ranks.}
+\label{fig:bimpp-memory-fix}
+\end{figure}
