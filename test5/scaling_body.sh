@@ -111,24 +111,66 @@ if [ "$MPI_MODE" = "srun" ]; then
     fi
     echo "driver python: $(python3 -V 2>&1) at $(command -v python3)"
 else
-    # One container, its own mpirun inside it. bench_sweep.py runs in the image too, on the
-    # container's python 3.12.
-    LAUNCH=(--launcher "singularity exec --nv --bind $BASE $SIF")
-    DRIVER=(singularity exec --bind "$BASE" "$SIF" python3)
-    if ! singularity exec --bind "$BASE" "$SIF" test -r "$SCRIPTS/bench_sweep.py"; then
+    # ONE container for everything: bench_sweep.py runs inside it and forks
+    # "mpirun -n N ngpb" inside that SAME instance.
+    #
+    # So LAUNCH is deliberately EMPTY. Prefixing "singularity exec" here, as the first
+    # version did, makes bench_sweep.py call singularity from INSIDE the image, where no
+    # such binary exists -- it does not nest. That is what killed the first attempt at
+    # both 1gpu and 2gpu, ~4 s in:
+    #     FileNotFoundError: [Errno 2] No such file or directory: 'singularity'
+    # raised from run_once's Popen, after the host had already mounted the image twice.
+    #
+    # --nv therefore moves onto the DRIVER: ngpb is now a grandchild of this instance, so
+    # this is the one that has to see the GPUs. Without it every rank falls back to the
+    # CPU path and the "scaling" numbers are silently meaningless.
+    LAUNCH=()
+    DRIVER=(singularity exec --nv --bind "$BASE" "$SIF" python3)
+
+    if ! singularity exec --nv --bind "$BASE" "$SIF" test -r "$SCRIPTS/bench_sweep.py"; then
         echo "ERROR: $SCRIPTS is not visible inside the container" >&2
         exit 1
     fi
+    for prog in mpirun ngpb python3; do
+        if ! singularity exec --nv --bind "$BASE" "$SIF" \
+                sh -c "command -v $prog" >/dev/null 2>&1; then
+            echo "ERROR: '$prog' is not on PATH inside $SIF." >&2
+            echo "       In this mode bench_sweep.py runs inside the image and calls all" >&2
+            echo "       three from there, so none of them can come from the host." >&2
+            exit 1
+        fi
+    done
 fi
+
+# --- Prove the launch line before spending the walltime ------------------------------------
+# Both failures so far were the launch idiom, not the science, and both surfaced only after
+# the job had been queued for a day. This runs the EXACT idiom run_once will use, with
+# hostname in place of ngpb: seconds to run, and it fails here instead of at config 1 of 6.
+echo "=== launch smoke test ==="
+if [ "$MPI_MODE" = "srun" ]; then
+    SMOKE=(srun --mpi=pmix --cpu-bind=none singularity exec --nv --bind "$BASE" "$SIF" hostname)
+else
+    SMOKE=(singularity exec --nv --bind "$BASE" "$SIF" mpirun -n 2 hostname)
+fi
+if ! "${SMOKE[@]}"; then
+    echo "ERROR: the launch idiom itself does not work:" >&2
+    printf '       %s\n' "${SMOKE[*]}" >&2
+    echo "       Nothing below this would have run either. Fix the launch, not the sweep." >&2
+    exit 1
+fi
+echo
 
 # --- The matrix ----------------------------------------------------------------------------
 # --sweeps s is the six-row scaling matrix defined in bench_sweep.py's build_plan:
 #   {naive energy, FMM 0.3/p9 at 8/1024, FMM 0.4/p11 at 16/1024} x {tuned AMGX, default AMGX}
 # The same six rows run at every topology, so speedup is a ratio of matching config_ids.
 echo "=== scaling matrix at $TOPO ==="
+# ${LAUNCH[@]+...}: LAUNCH is empty in mpirun mode, and "${LAUNCH[@]}" on an empty array is
+# an unbound-variable error under `set -u` in bash before 4.4. The compute nodes' bash is
+# not something this script gets to assume.
 "${DRIVER[@]}" "$SCRIPTS/bench_sweep.py" "$RUNDIR" \
     --np "$SLURM_NTASKS" --repeats "$REPEATS" --sweeps s $RESUME \
-    "${LAUNCH[@]}" \
+    ${LAUNCH[@]+"${LAUNCH[@]}"} \
     -o "$RUNDIR/scaling_$TOPO.csv"
 
 echo
