@@ -138,10 +138,13 @@ def pick_fmm_config(groups, ref_pol, accuracy):
     configurations) has no single "the FMM run" to plot. Picking the outright
     fastest would put a bar on the figure that the sweep chapter had already
     rejected on accuracy, and picking by hand would not survive the data
-    changing -- so the same criterion the chapter ranks on selects it here, and
-    the caption says how many configurations it was selected from.
+    changing -- so the same criterion the chapter ranks on selects it here.
+    How many configurations it was selected from is reported to the caller for
+    the FMM parameter section text, not the caption.
 
-    Returns (rows, n_configs, n_ok) or None when nothing qualifies.
+    Returns (rows, n_configs, n_ok) or None when nothing qualifies. The counts
+    are kept on the dataset for prose in the FMM parameter section, not the
+    caption -- see build_caption_notes.
     """
     scored = []
     for key, grp in groups.items():
@@ -505,14 +508,6 @@ def build_caption_notes(datasets, default_machine, overrides, extra_fmm,
                 % (label, hours(dnf_limit_s) if dnf_limit_s else "job",
                    hours(m.get("accounted", 0.0)),
                    hours(floor) if floor else "the remainder"))
-        # Only worth a clause when the criterion actually excluded something. A
-        # folder with two configurations that both qualify was selected on speed
-        # alone, and "the fastest of the 2, of which 2 met the criterion" tells
-        # the reader nothing the configuration line has not already said.
-        if ds.get("n_configs") and ds["n_ok"] < ds["n_configs"]:
-            bits.append(
-                "its FMM bar is the fastest of the %d configurations swept, of "
-                "which %d met the criterion" % (ds["n_configs"], ds["n_ok"]))
         if notes.get(mol):
             bits.append(notes[mol])
         if bits:
@@ -957,6 +952,11 @@ def main():
     for ds in datasets:
         print("\n%s  (reference: %s)" % (ds["molecule"],
                                          ds.get("ref_method") or "none"))
+        if ds.get("n_configs") and ds["n_ok"] < ds["n_configs"]:
+            print("  FMM bar picked as fastest of %d configs swept, %d met "
+                  "the accuracy criterion -- belongs in the FMM parameter "
+                  "section text now, not the caption"
+                  % (ds["n_configs"], ds["n_ok"]))
         print("  %-20s %6s %12s %12s %12s %12s" % (
             "method", "runs", "stage s", "vs CPU", "rel err pol", "rel err ion"))
         cpu = ds["methods"].get("cpu")

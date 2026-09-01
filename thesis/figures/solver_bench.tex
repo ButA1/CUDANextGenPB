@@ -30,7 +30,10 @@
     width=15.0cm, height=6.4cm,
     bar width=10pt,
     enlarge x limits=0.28,
-    ymin=0, ymax=16.9772,
+    ymode=log, log origin y=infty,
+    ymin=0.758298, ymax=18.3354,
+    ytick={1,2,5,10},
+    log ticks with fixed point,
     ylabel={\solverMetric{} time, relative to the fastest},
     ylabel style={font=\footnotesize},
     symbolic x coords={1CCM,6VYB,1vsz,H1N1},
@@ -85,7 +88,7 @@
 \end{tikzpicture}
 
 \caption[Linear solver comparison]{\textbf{Linear solver comparison on
-    \solverMolecules{}.} Median \solverMetric{} time over \solverRepeats{} runs,
+    \solverMolecules{}.} Median \solverMetric{} time on a logarithmic axis,
     whiskers spanning fastest to slowest; the figure above each column is the
     iteration count. The bars differ only in the linear solver, but they do not
     all converge to the same residual -- table~\ref{tab:solver-bench} gives the

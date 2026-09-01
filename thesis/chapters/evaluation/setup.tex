@@ -140,7 +140,7 @@ The versions of the remaining dependencies were kept according to the Dockerfile
 Thankfully, NGPB already prints out the time that each stage took. 
 This is done using two helper macros called TIC() and TOC(), which are portable throughout the code base. 
 Those rough timings are enough to show whether an optimization is faster, since the computation time for the larger molecules is a lot longer than small timer randomness, or other run-to-run-variances.
-For 1CCM though I will use an average of multiple runs.
+Unless a figure or table states otherwise, every timing reported in this chapter is the median of 3 repeated runs. 1CCM's short runtime makes it more susceptible to this noise, so I instead used 10 repeats for it.
 
 For more exact timings in the GPU-specific optimizations, I profiled the CUDA kernels using \texttt{ncu}, which runs them multiple times, eliminating runtime variances.
 Additionally it provides detailed information about their utilization of GPU resources and gives suggestions on how to optimize them. 

@@ -92,15 +92,16 @@ The relative errors were exactly identical.
 
 Although AMGX was set to a lower residual, it did not increase accuracy.
 In fact is worsened the polarization error for the Kirkwood sphere test slightly when compared to the LIS result, but it is still way better than the result from the paper.
+AMGX did genuinely reach a lower residual (1.195268e-09) than LIS (5.921088e-07).
 For FMM I used the accuracy values of LIS.
-For AMGX I accepted the slight loss.
-% TODO make sure this isn't redundant
+For AMGX I accepted the slight loss, as it is clearly very small.
 
 \subsection{Linear Equation Solver}
 \label{sec:evaluation-results-lin-eq-solver}
 
 Figure~\ref{fig:solver-bench} shows the relative speedup achieved by AMGX for all molecules.
 Despite being set to a much smaller residual, the default configuration for AMGX manages to beat LIS at every sample size on the local system.
+For 1VSZ and 6VYB, the speedup was 10x, while for 1CCM it was much smaller.
 The tuned AMGX configuration runs faster than the default one, also at every sample size.
 
 One interesting observation I made is that despite having more than 4x the atoms, 1VSZ's solve was a bit quicker than 6VYB's across the board.
@@ -136,7 +137,7 @@ This demonstrates that having very cheap iterations can still make up for the ha
 \input{figures/solver_bench.tex}
 \input{figures/solver_bench_table.tex}
 
-I then compared the AMGX solve time for 6VYB for four different topologies: the local system, a one cluster node with a single A100 GPU, one with dual A100 GPUs and two nodes with one A100 each, shown in Figure~\ref{fig:amgx_scaling_6vyb}.
+I then compared the AMGX solve time for 6VYB for four different topologies: the local system, a one cluster node with a single A100 GPU, one with dual A100 GPUs and two nodes with one A100 each, shown in Figure~\ref{fig:amgx_scaling_6vyb} and Table~\ref{tab:amgx_scaling_6vyb}.
 I omitted the runtime for LIS on the A100 cluster node, since it ran much slower due to their old CPUs.
 The CPU of the H200 is much better, making it a much fairer comparison.
 The goal was to see how well AMGX scales across multiple nodes, and GPUs.
@@ -152,6 +153,7 @@ This is very likely due to communication overhead, which is much lower an a sing
 There the tuned AMGX performed much better than the single GPU node.
 Surprisingly, the default configuration did not suffer as much, although it was barely any faster than one single GPU node.
 This suggests that AMG preconditioning is more communication-intensive than even a multitude of cheap iterations.
+Despite this, the tuned AMGX config was faster on two nodes than the default configuration.
 
 \input{figures/amgx_scaling_6vyb}
 \input{figures/amgx_scaling_6vyb_table}
@@ -259,12 +261,13 @@ At this point I need to clarify that Salmon \& Warren are not opposed to theoret
 For my local machine the measured best configurations for 6VYB (test1) and 1VSZ (test2) can be seen in Table~\ref{tab:fmm_ptheta_6vyb-pareto} and \ref{tab:fmm_ptheta_1vsz-pareto}.
 For the stated accuracy goal of a potential energy relative error of less than 1.5e-10, the most efficient config for 6VYB was $P=11$, $\theta=0.4$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
 For 1VSZ the most efficient config was $P=7$, $\theta=0.3$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 512$.
+I was unable to find a configuration for 1CCM that beat native, so I settled for the best one from a sweep of 140 configurations, which was $P=6$, $\theta=0.5$, $n_{leaf} = 256$.
+Note that the leaf sizes for it are still fused, as split leaf configurations were not faster in this case.
 
 \input{figures/fmm_ptheta_6vyb.tex}
 \input{figures/fmm_ptheta_6vyb_table.tex}
 \input{figures/fmm_ptheta_1vsz.tex}
 \input{figures/fmm_ptheta_1vsz_table.tex}
-
 
 \subsection{Energy Calculation}
 \label{sec:evaluation-results-energy-calculation}

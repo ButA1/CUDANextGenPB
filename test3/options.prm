@@ -21,7 +21,7 @@ calc_coulombic = 1
 [../]
 
 [algorithm]
-linear_solver       = amgx
+linear_solver       = lis
 energy_method       = 2
 fmm_mac             = 0.4
 fmm_multipole_order = 11

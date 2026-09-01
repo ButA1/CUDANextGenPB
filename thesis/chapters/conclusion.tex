@@ -2,6 +2,18 @@
 \label{sec:conclusion}
 
 \section{Linear Solver}
+\label{sec:conclusion-linear-solver}
 
-On a system with a single GPU, AMGX has presented itself as the perfect fix for NGPB. It outperformed LIS at every problem size.
+On a system with a single GPU, AMGX has presented itself as the perfect fix for NGPB. It outperformed LIS especially at larger problem sizes, yielding up to a 10x performance uplift.
 I found that my (sub-)gather approach was much more memory efficient that the methods described in the admittedly very outdated AMGX Reference.
+It allowed larger molecules like 6VYB to fit in the 10GB of VRAM of an RTX 3080.
+However, this mechanism is done on the host side, and in case of a slow CPU, may result in a higher overall time for the linear solver stage.
+I scaled well with better hardware, and even across multiple GPUs on a single cluster node.
+When it came to two nodes however, the communication overhead either negated any performance benefits or even degraded performance.
+This depended on the choice of preconditioner, as the performance degradation occurred with the AMG preconditioning.
+
+\section{Energy Calculation}
+\label{sec:conclusion-energy-calculation}
+
+The naive kernel brought a massive speedup over the original CPU implementation of the energy calculation.
+For small problems, the naive implementation beat the much more sophisticated FMM 

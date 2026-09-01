@@ -232,11 +232,6 @@ def build_caption_notes(datasets, default_machine, overrides, nrep):
             if reps == 1:
                 note += " (hence no whiskers)"
             bits.append(note)
-        em = ds["energy_method"]
-        if em is not None and energy_method is not None and em != energy_method:
-            bits.append("\\texttt{{energy\\_method\\,=\\,{}}} instead of {} "
-                        "(read only after the solve stage timed here, so it "
-                        "does not affect this comparison)".format(em, energy_method))
         cfg = ds["configs"].get("amgxcfg", {}).get("amgx_config")
         if cfg and base_cfg and cfg != base_cfg:
             bits.append("AMGX (tuned) using \\texttt{{{}}} instead of \\texttt{{{}}}"
@@ -294,7 +289,7 @@ COLORDEFS
     width=WIDTH, height=6.4cm,
     bar width=BARWIDTH,
     enlarge x limits=ENLARGE,
-    ymin=0, ymax=YMAX,
+    YRANGE
     ylabel={YLABEL},
     ylabel style={font=\footnotesize},
     AXISX
@@ -324,7 +319,7 @@ SERIES
 \end{tikzpicture}
 
 \caption[Linear solver comparison]{\textbf{Linear solver comparison on
-    \solverMolecules{}.} Median \solverMetric{} time over \solverRepeats{} runs,
+    \solverMolecules{}.} Median \solverMetric{} time over \solverRepeats{} runsAXISNOTE,
     whiskers spanning fastest to slowest; the figure above each column is the
     iteration count. The bars differ only in the linear solver, but they do not
     all converge to the same residual -- table~\ref{tab:solver-bench} gives the
@@ -363,7 +358,7 @@ SERIES_ONE_TEMPLATE = r"""  \addplot+[
 """
 
 
-def build_figure(tag, datasets, metric, relative, out_path):
+def build_figure(tag, datasets, metric, relative, out_path, log_scale=False):
     colordefs = "\n".join(
         "\\definecolor{%s}{HTML}{%s}" % (name, hexv)
         for _, _, name, hexv in CONFIGS
@@ -373,12 +368,33 @@ def build_figure(tag, datasets, metric, relative, out_path):
                     if any(k in ds["configs"] for ds in datasets)]
 
     # Headroom for the iteration label sitting above the top whisker.
-    tops = []
+    tops, bottoms = [], []
     for ds in datasets:
         vals = [c["med"] for c in ds["configs"].values()]
         scale = min(vals) if (relative and vals) else 1.0
         tops += [c["max"] / scale for c in ds["configs"].values()]
-    ymax = "{:.6g}".format(max(tops) * 1.14)
+        bottoms += [c["min"] / scale for c in ds["configs"].values()]
+    ymax = max(tops) * 1.14
+
+    if log_scale:
+        # log origin y=infty is what makes ybar draw down to ymin rather than to
+        # 1, which is where pgfplots puts the base of a log-axis bar by default.
+        # The configs here rarely span a full decade, so bare powers of ten would
+        # leave only one or two ticks on the axis -- a 1-2-5 ladder fills it in.
+        ymin = min(bottoms) / 1.3
+        ymax *= 1.08
+        lo_dec, hi_dec = math.floor(math.log10(ymin)), math.ceil(math.log10(ymax))
+        yticks = [m * 10 ** e for e in range(lo_dec, hi_dec + 1) for m in (1, 2, 5)
+                  if ymin <= m * 10 ** e <= ymax]
+        yrange = ("ymode=log, log origin y=infty,\n"
+                  "    ymin={:.6g}, ymax={:.6g},\n"
+                  "    ytick={{{}}},\n"
+                  "    log ticks with fixed point,").format(
+                      ymin, ymax, ",".join("{:.6g}".format(t) for t in yticks))
+        axisnote = " on a logarithmic axis"
+    else:
+        yrange = "ymin=0, ymax={:.6g},".format(ymax)
+        axisnote = ""
 
     if single:
         labels = {k: lbl for k, lbl, _, _ in CONFIGS}
@@ -424,13 +440,14 @@ def build_figure(tag, datasets, metric, relative, out_path):
             .replace("SERIES", series)
             .replace("AXISX", axis_x)
             .replace("LEGENDSTYLE", legend)
+            .replace("YRANGE", yrange)
+            .replace("AXISNOTE", axisnote)
             # BARWIDTH before WIDTH: the latter is a substring of the former
             .replace("BARWIDTH", bar_width)
             .replace("WIDTH", width)
             .replace("ENLARGE", enlarge)
             .replace("CAPSIZE", cap)
             .replace("NEARSHIFT", "5pt")
-            .replace("YMAX", ymax)
             .replace("YLABEL", ylabel)
             .replace("TAG", tag))
 
@@ -552,6 +569,10 @@ def main():
     ap.add_argument("--relative", action="store_true",
                     help="plot each molecule relative to its fastest configuration "
                          "instead of absolute seconds")
+    ap.add_argument("--log", action="store_true",
+                    help="plot the y axis on a logarithmic scale instead of "
+                         "linear -- useful when the slowest configuration is an "
+                         "order of magnitude or more above the fastest")
     args = ap.parse_args()
 
     metric_col = METRICS[args.metric][0]
@@ -595,7 +616,7 @@ def main():
         datasets, args.machine, overrides, nrep)
     write_ref_tex(reftex, datasets, args.metric, args.relative, nrep,
                   machine_note, energy_method, caveats)
-    build_figure(args.tag, datasets, args.metric, args.relative, fig)
+    build_figure(args.tag, datasets, args.metric, args.relative, fig, args.log)
     write_table(tab, datasets, args.metric, tab)
 
     label = {k: lbl for k, lbl, _, _ in CONFIGS}
