@@ -324,14 +324,11 @@ SERIES
 \end{tikzpicture}
 
 \caption[Linear solver comparison]{\textbf{Linear solver comparison on
-    \solverMolecules{}.} Median \solverMetric{} time over \solverRepeats{} runs
-    per configuration, with whiskers spanning the fastest and slowest of those
-    runs; the small figure above each column is the iteration count. Every
-    configuration uses the same discretisation and, unless noted below, the
-    same energy path (\texttt{energy\_method\,=\,\solverEnergyMethod}), so the
-    bars differ only in the linear solver. Note that they do not all converge
-    to the same residual -- table~\ref{tab:solver-bench} gives the residual
-    each one actually reached, without which the times are not
+    \solverMolecules{}.} Median \solverMetric{} time over \solverRepeats{} runs,
+    whiskers spanning fastest to slowest; the figure above each column is the
+    iteration count. The bars differ only in the linear solver, but they do not
+    all converge to the same residual -- table~\ref{tab:solver-bench} gives the
+    residual each one reached, without which the times are not
     comparable.\solverMachine\solverCaveats}
 \label{fig:solver-bench}
 \end{figure}
@@ -474,18 +471,15 @@ def write_table(path, datasets, metric, out_tex):
         # matches the other generated tables.
         "\\footnotesize",
         "\\caption[Linear solver comparison]{\\textbf{Linear solver comparison.} "
-        "Median over \\solverRepeats{} runs per configuration. \\emph{stage} is "
-        "the whole \\solverMetric{}, split into the part AMGX spends on the GPU "
-        "(its own \\emph{setup} and \\emph{solve} timers) and the \\emph{host} "
-        "remainder that is left over -- assembly, host--device transfer and the "
-        "surrounding CPU work. The split matters because the two respond to "
-        "different hardware: only the GPU columns benefit from a faster "
-        "accelerator, while the host column is set by the CPU and can dominate "
-        "the total. \\emph{rel.} is the stage time relative to the fastest "
-        "configuration for that molecule. LIS never touches the GPU, so its "
-        "whole stage is host time.\\solverMachine{}\\solverCaveats{} The residuals "
-        "differ by orders of magnitude, so the times are not a like-for-like "
-        "comparison.}",
+        "Median over \\solverRepeats{} runs. \\emph{stage} is the whole "
+        "\\solverMetric{}, split into the part AMGX spends on the GPU (its own "
+        "\\emph{setup} and \\emph{solve} timers) and the \\emph{host} remainder "
+        "-- assembly, host--device transfer and the surrounding CPU work, which "
+        "no faster accelerator touches and which can dominate the total. "
+        "\\emph{rel.} is the stage time relative to the fastest configuration "
+        "for that molecule. LIS never touches the GPU, so its whole stage is "
+        "host time.\\solverMachine{}\\solverCaveats{} The residuals differ by "
+        "orders of magnitude, so the times are not like-for-like.}",
         "\\label{tab:solver-bench}",
         "\\begin{tabular}{llrrrrrrl}",
         "\\toprule",

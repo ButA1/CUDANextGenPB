@@ -1,0 +1,327 @@
+\section{Results}
+\label{sec:evaluation-results}
+
+In this section I first touch on the improvements to the host-side optimizations to establish the speedup, which both the baseline and the CUDA optimization benefit from.
+Next I will show the comparison between LIS and AMGX, as well as the tuned configuration for the latter, on both the local machine and the cluster.
+The energy calculation results are a lot more intricate, particularly due to my FMM implementation having different parameters.
+It also lead to the discovery, that due to NGPB evaluating the molecular atoms against the surface, having a shared leaf size for both trees was actually detrimental.
+
+\subsection{Create Markers}
+\label{sec:evaluation-results-create-markers}
+
+\subsection{BIMPP}
+\label{sec:evaluation-results-bimpp}
+
+\subsubsection{sparse\_matrix\_template}
+
+% ------------------------------------------------------------------------
+%  NOTE (Claude): figure + numbers only, per the other results subsections.
+%
+%  Heaptrack, 6VYB, rank 1, both captures on the AMGX solver, local system,
+%  before/after swapping bimpp's sparse_matrix_template storage from
+%  std::vector<std::map<int,double>> to boost::container::flat_map
+%  (see [[project_bimpp_memory]] in memory):
+%      process peak heap:            6.6 GB -> 3.7 GB   (1.8x)
+%      assemble_system_matrix peak:  4.4 GB -> 1.8 GB   (2.4x)
+%  assemble_system_matrix is a SUBSET of the total, not additive -- the
+%  figure draws it as an overlay, not a stacked sum.
+%  The totals are the Summary tab's "peak heap memory consumption", NOT the
+%  Top-Down "main" row. Top-Down main reads 6.6 GB / 2.8 GB, which would show
+%  2.4x, but that is an artifact: the opt build unwinds one frame deeper, so
+%  its num_local_nodes -> p8est -> libsc allocations (813 MB) root under
+%  _start instead of main and drop out of main's subtree. The base build's
+%  stacks all end at main, so nothing drops out there. 6.6 GB really is ~the
+%  whole process in base; 2.8 GB is not, in opt.
+%  Source: profiles/heaptrack.ngpb.rank1.base.zst (std::map) and
+%  profiles/heaptrack.ngpb.rank1.opt.amgx.zst (flat_map). Rank 1, not rank 0:
+%  the rank 0 opt.amgx capture is corrupted (truncated by an OOM kill during a
+%  later re-run attempt), rank 1's is intact for both -- also conveniently
+%  same-solver throughout, so no LIS/AMGX caveat is needed here.
+%  Note the opt run's energy stage is the CPU path and the base run's is
+%  energy_cuda_fast, so the opt recording runs ~12min vs ~5min; this does not
+%  touch either number, as the CPU energy tail is flat at ~1.3 GB and the peak
+%  in both runs falls in the assembly/solve region.
+%  Gotcha worth a sentence if you want it: flat_map was briefly catastrophic
+%  when combined with a per-row .reserve(32) left over from an earlier change;
+%  removing that reserve was part of this fix.
+%
+%  OPEN PROBLEM -- the two captures are NOT the same problem size. The opt
+%  captures run a mesh ~13.5% smaller than the base ones. Measured five
+%  independent ways, all landing on the same factor:
+%      largest single p8est alloc  393.44 MB -> 339.53 MB   (0.863)
+%      create_markers_fast allocs   132.15M  -> 114.00M     (0.863)
+%      create_density_map allocs    131.81M  -> 113.65M     (0.862)
+%      num_local_nodes peak         939.5 MB -> 813.3 MB    (0.866)
+%      total alloc calls (rank 0)   440.7M   -> 381.5M      (0.866)
+%  Identical on rank 0 and rank 1, so it is not a partitioning shift, and the
+%  6VYB.pqr is byte-identical across the window, so it is not the molecule.
+%  Committed options.prm has perfil1=0.95/perfil2=0.2/scale=2.0 unchanged
+%  Apr 19 -> May 7, so the likeliest cause is a hand-edit of the working-tree
+%  options.prm at capture time (the solver line demonstrably differed from the
+%  committed value in both runs).
+%  Consequence: BOTH bars carry that ~0.86 factor on top of the container
+%  swap, so neither multiplier is a clean like-for-like. The qualitative
+%  result is safe -- a 13.5% mesh difference cannot produce a 2.4x drop in
+%  assembly -- but the exact numbers are not defensible as stated. Either
+%  caveat this in the text, or re-capture both on one mesh (blocked: heaptrack
+%  now OOMs on 6VYB, see the journalctl OOM kills of heaptrack_inter).
+% ------------------------------------------------------------------------
+
+Figure~\ref{fig:bimpp-memory-fix} shows the reduction of the memory consumption on rank 1 for 6VYB (test1).
+As expected, the move from \snakecase{std::map} to \snakecase{boost::container::flat\_map} lead to a drastic reduction of the host memory usage during \snakecase{assemble\_system\_matrix}.
+The remaining memory utilization shrank from 2.2GB to 1.9GB.
+This difference cannot be explained by the data structure change, could be the cause of a slight configuration mismatch.
+Unfortunately, I was not able to repeat the tests, as Heaptrack started to run into a weird Out-Of-Memory issues, which do not occur when NGPB runs on its own.
+The exact cause remains unknown.
+
+This change had no impact on accuracy.
+% TODO well what about the 
+
+\input{figures/bimpp_memory_fix.tex}
+
+\subsubsection{bim3a\_solution\_with\_ghosts}
+
+\subsection{Baseline}
+
+% TODO pick either perfil 2 to be the same more than twice of perfil 1
+
+Although running AMGX together with the original implementation on the test 3 didn't lower the error at all.
+
+\subsection{Linear Equation Solver}
+\label{sec:evaluation-results-lin-eq-solver}
+
+Despite being set to a much smaller residual, the default configuration for AMGX manages to beat LIS at every sample size, and for every test system.
+The tuned AMGX configuration runs faster than the default one, also at every sample size.
+
+Figure~\ref{fig:solver-bench} shows the relative speedup achieved by AMGX for all molecules.
+One interesting observation I made is that despite having more than 4x the atoms, 1VSZ's solve was a bit quicker than 6VYB's across the board.
+Upon inspection the number of quadrants and nodes for each molecule, 6VYB's grid had 28008707 nodes and 28294120 quadrants, while 1VSZ had 15879325 nodes and 16073576 quadrants.
+The number nodes equate to the dimension of the solution vector of the linear equation, which explains why 1VSZ's solve time is quicker.
+This implies that the number of atoms is not the only factor that predicts the size of the linear system.
+I suspect the geometric complexity plays a role here, since 6VYB's shape is quite irregular, and 1VSZ's shape is icosahedral.
+Figure~\ref{fig:molecule-shapes} shows the shapes of both molecules.
+
+\begin{figure}[!htb]
+\centering
+\begin{subfigure}[b]{0.47\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/shape_6vyb.jpeg}
+    \caption{6VYB}
+    \label{fig:shape-6vyb}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.47\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/shape_1vsz.jpeg}
+    \caption{6CGV}
+    \label{fig:shape-1vsz}
+\end{subfigure}
+\caption[Molecular shapes of 6VYB and 1VSZ]{Cartoon renderings of the biological assemblies, colored by chain. \textbf{Left:} 6VYB's irregular, elongated spike trimer. \textbf{Right:} the icosahedral capsid of 1VSZ, shown via its current PDB entry 6CGV, since 1VSZ itself is obsolete. Renderings from the RCSB PDB.}
+\label{fig:molecule-shapes}
+\end{figure}
+
+The number of iterations are shown on top of the columns. Even though the default ``CG-Jacobi-Block'' needs consistently a lot more iterations than both LIS and the tuned configuration (in cases of 6VYB and 1VSZ 10x as many than tuned), it was still much quicker than LIS, and only marginally slower than the tuned configuration.
+This demonstrates that having very cheap iterations can still make up for the having to do a lot of them.
+% TODO here is where multigpu might be better, since it needs fewer iterations -> fewer global reductions
+% TODO mention how AMGX is bottlenecked by the CPU on the cluster
+
+\input{figures/solver_bench.tex}
+\input{figures/solver_bench_table.tex}
+
+Switching from the local system to a single cluster node with one A100 GPU actually did not yield much lower times for 6VYB (test 1 vs test 5).
+I omitted the runtime for LIS on the cluster, since it ran much slower due to their old CPUs.
+% TODO say by how much
+Running LIS on my local machine gives it the best opportunity.
+Even two A100s managed to only be 1 second faster.
+This clearly demonstrates the strong scaling wall of Krylov methods.
+It is still surprising that the untamed GA100 chip of the A100 did not manage to beat its cut-down sibling GA102 of the RTX 3080 by all that much, despite the lack of FP64 performance of the latter.
+
+\input{figures/amgx_scaling_6vyb}
+\input{figures/amgx_scaling_6vyb_table}
+
+\subsection{FMM Parameters}
+
+The FMM has multiple parameters, which I needed to balance against each other to find the optimum, those being the order of the multipole expansion $P$, the MAC parameter $\theta$ and the number of particles inside one leaf $n_{leaf}$.
+I made four sweeps of $P$ and $\theta$ for values between 6 to 10 and 0.2 to 0.8 for 6VYB (test1) and 1VSZ (test2) on my local machine.
+
+FMM was slower than the naive kernel for 1CCM, no matter which configuration I used, which is why I did not consider it for the parameter choice.
+This molecule consists of only 642 atoms, at which point the overhead of FMM is simply too expensive.
+I've plotted their speed against their relative error compared to the naive $O(N^2)$ GPU sum over the same inputs, taken from an average of 3 runs,
+which can be seen in Figure~\ref{fig:fmm_presplit_6vyb} and \ref{fig:fmm_presplit_1vsz}.
+In those figures and in every later sweep figure, color is the multipole order $P$ and the points along each line are the MAC parameter $\theta$, rising from $0.2$ at the accurate end to $0.8$.
+Grey marks the Pareto front over the whole sweep, and the dashed vertical line the naive path's own time.
+
+% ------------------------------------------------------------------------
+%
+%  Regenerated with (from the repository root):
+%    M='the local system (Table~\ref{tab:test-systems})'
+%    K=1.246641e-10
+%    python3 scripts/plot_fmm_sweep.py test1 --csv test1/fmm_sweep_6VYB_presplit.csv \
+%        --tag fmm_presplit_6vyb --molecule 6VYB --natoms 44495 \
+%        --kirkwood-err $K --machine "$M"
+%    python3 scripts/plot_fmm_sweep.py test2 --csv test2/fmm_sweep.csv \
+%        --tag fmm_presplit_1vsz --molecule 1VSZ --natoms 14299 \
+%        --kirkwood-err $K --machine "$M"
+%    python3 scripts/plot_fmm_sweep.py test1 --csv test1/ptheta.csv \
+%        --tag fmm_ptheta_6vyb --molecule 6VYB --natoms 44495 \
+%        --kirkwood-err $K --machine "$M"
+%    python3 scripts/plot_fmm_sweep.py test2 --csv test2/confirm_16_512.csv \
+%        --tag fmm_ptheta_1vsz --molecule 1VSZ --natoms 14299 \
+%        --kirkwood-err $K --machine "$M"
+%  Add --stock-csv test<N>/bench_runs.csv to print the reproducibility numbers
+% ------------------------------------------------------------------------
+
+\input{figures/fmm_presplit_6vyb.tex}
+\input{figures/fmm_presplit_1vsz.tex}
+
+Since it was my goal to achieve a relative error of the polarization energy of 1.5e-10 or lower, two configurations for test1 seem to be reaching that goal while being the fastest: $P = 9$, $\theta = 0.3$, $n_{leaf} = 64$ and $P = 10$, $\theta = 0.4$, $n_{leaf} = 256$.
+Profiling both configurations using \snakecase{ncu} revealed that each configurations are quick for very different reasons.
+The \snakecase{l2p_p2p_kernel} ran much quicker with $P = 9$, $\theta = 0.3$, $n_{leaf} = 64$ while \snakecase{m2l_accumulate_kernel} was much quicker with $P = 10$, $\theta = 0.4$, $n_{leaf} = 256$.
+The underlying reason is that the source tree containing the atoms and the target tree containing the surface points have wildly different sizes.
+At a grid of scale of 2, the surface points far outnumber the number of atoms in the molecule, and they are also much denser.
+Clustering both trees with the same leaf count causes wildly different geometric leaf sizes.
+M2L cost tracks with the total box-pair computed by the DTT, which were dominated by the number of box nodes of the much denser target tree.
+Increasing the number of particles per leaf reduced that number, making M2L faster.
+However, raising the number of particles per leaf also increased the radii used in the MAC test (see Figure~\ref{fig:fmm-mac}).
+This meant it would fail more often, inflating the number of direct P2P interactions.
+Considering two best settings sat a $n_{leaf}$ of 64 and 256, but not 128 showed that this relationship was a U-shaped curve, with no optimum in between.
+The solution was to split $n_{leaf}$ into source tree leaf counts $n_{leaf,src}$ and target tree leaf counts $n_{leaf,tgt}$.
+This allowed me to reduce $n_{leaf,src}$ while increasing $n_{leaf,tgt}$.
+Setting them to 64 and 256 respectively at $P = 10$, $\theta = 0.4$ slashed the time in half!
+
+Next I tried to find the optima for both values.
+As seen in Figures~\ref{fig:leaf_sweep_6vyb} and \ref{fig:leaf_sweep_1vsz} the optimal values of $n_{leaf,src}$ and $n_{leaf,tgt}$ diverged into different directions.
+It also shows that they differ for both molecules, which is probably due to their different shapes.
+I initially assumed that the ideal counts would exactly where the geometric leaf sizes of both tree would be equal, but further testing demonstrated that the optima shifted with different $P$ and $\theta$.
+This can be explained by the cost of P2P and M2L not being equal.
+The balance shifts towards P2P when the cost of M2L increases through rasing of $P$.
+I demonstrated this effect for 6VYB in the left diagram of the Figure~\ref{fig:leaf_optimum_shift_6vyb}, where the optimal $n_{leaf,src}$ rises monotonically with the order of $P$ (4, 4, 8, 8, 16, 16 for $P$ 6..11).
+Meanwhile $\theta$ has a much weaker secondary effect, flattening the the curve as it increases but not relocating the optimum.
+Over $\theta = 0.3$ to $0.6$ the optimum does not move at all.
+
+\input{figures/leaf_sweep_6vyb.tex}
+\input{figures/leaf_sweep_1vsz.tex}
+
+\input{figures/leaf_optimum_shift_6vyb.tex}
+\input{figures/leaf_optimum_shift_6vyb_table.tex}
+
+This also means that this balances is shifted once again on the cluster, where the cost of P2P is greatly reduced, thanks to higher FP64 performance.
+The left diagrams of Figures~\ref{fig:platform_shift_1vsz} and \ref{fig:platform_shift_6vyb} both show this effect though an increase in optimal $n_{leaf,src}$, which increases the number of P2P calculations through the two mechanism that explained above.
+On top of it all, the number of ranks also influence the balance.
+Each rank holds an exact copy of the source tree, but their target tree only is built from the particles of the domain region owned by the rank.
+Even though regions are not equally populated, this still roughly equates to the number of particles being divided by the number of ranks, acting like a multiplier on the $n_{leaf,tgt}$.
+This can be clearly seen in the right diagram of Figure~\ref{fig:platform_shift_6vyb}, showing a decrease in the optimal $n_{leaf,tgt}$.
+Though the same cannot be objectively said about 1VSZ, it is clear from the curve that the A100-16 rank curve is almost flat between 512 and 1024, while the A100-4 rank curve has much more clear minima.
+
+In terms of accuracy: the rank 4 results from the A100 and the RTX 3080 are within a $10^{-12}$ relative error.
+An increase in ranks had the tendency to decrease the median error slightly, but this was only observed across 62\%-67\% of all runs.
+I will refrain from calling this a general trend, but rather fluctuations attributed to the observations made in \ref{sec:evaluation-experimental-setup-mpi-ranks}.
+
+\input{figures/platform_shift_6vyb.tex}
+\input{figures/platform_shift_6vyb_table.tex}
+\input{figures/platform_shift_1vsz.tex}
+
+Despite the multitude of variables, the general direction for searching optima is clear, and considering the accuracy target, the mission now became a search for the fastest configuration that still satisfies it.
+I converged towards a local optimum through successive sweeps of the best configuration.
+
+One discovery I made while searching was that accuracy did not always monotonically increase with $P$.
+As an example: for 1VSZ and $\theta = 0.3$, $n_{leaf,src} = 16$, $n_{leaf,tgt} = 512$ the relative error went 8.0e-09, 4.1e-11, 6.8e-10, 1.2e-12, 7.7e-12, 1.6e-12, 3.0e-13 for $P = 6..12$.
+The relative error became worse going from $P = 7$ to $P = 8$.
+This necessitated the sweep across all $P$ every time I converged on a new optimum.
+Nevertheless it is not unexpected.
+The Cheng-Greengard-Rokhlin give an upper bound on a multipole converted to a local expansion with Theorem 2.4 of \cite{cheng1999fastadaptive}, and it roughly decays with $(\text{seperation ratio})^{(P+1)}$ scaled by the sum of the absolute charges.
+However three things made decide against striving towards it.
+Since the atoms carry both negative and positive charges, their net charge may be much lower than the sum of their absolutes.
+This is something Salmon \& Warren also state in \cite{salmon1994skeletons} \textit{``...the monopole contribution of a cell may be vanishingly small due to charge cancellation...''}.
+Second, this boundary makes no judgement on speed, just accuracy, and Salmon \& Warren have also shown that a few percent of accuracy may cost about 30 times as much computation.
+Lastly, it does not mean that the error for a singular result will be exactly on that boundary, or that it will also decrease monotonically with $P$.
+At this point I need to clarify that Salmon \& Warren are not opposed to theoretical bounds.
+% TODO decide whether to include the θ/(2−θ) rate
+
+For my local machine the measured best configurations for 6VYB (test1) and 1VSZ (test2) can be seen in Table~\ref{tab:fmm_ptheta_6vyb-pareto} and \ref{tab:fmm_ptheta_1vsz-pareto}.
+For the stated accuracy goal of a potential energy relative error of less than 1.5e-10, the most efficient config for 6VYB was $P=11$, $\theta=0.4$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
+For 1VSZ the most efficient config was $P=7$, $\theta=0.3$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 512$.
+
+\input{figures/fmm_ptheta_6vyb.tex}
+\input{figures/fmm_ptheta_6vyb_table.tex}
+\input{figures/fmm_ptheta_1vsz.tex}
+\input{figures/fmm_ptheta_1vsz_table.tex}
+
+
+\subsection{Energy Calculation}
+\label{sec:evaluation-results-energy-calculation}
+
+% ------------------------------------------------------------------------
+%
+%  Regenerated with (from the repository root):
+%    python3 scripts/plot_energy_methods.py test0 test1 test2 \
+%        --accuracy 1.246641e-10 \
+%        --extra 'H1N1:cpu=test7/h1n1-0-1884559.out' \
+%        --extra 'H1N1:naive=test7/h1n1-1-1884560.out' \
+%        --extra 'H1N1:fmm=test7/h1n1-2n-1883766.out' \
+%        --extra-fmm 'H1N1=$P = 10$, $\theta = 0.4$, $n_{leaf} = 256$' \
+%        --dnf-limit 4 \
+%        --machine 'the local system (Table~\ref{tab:test-systems})' \
+%        --machine-override 'H1N1=four H200 GPUs of the TU Berlin HPC (Table~\ref{tab:test-systems})' \
+%        --note '1CCM=swept before the source/target leaf split, so both trees used one leaf size' \
+%        --note 'H1N1=the FMM run was spread over two nodes and the naive run over one, but both produced the same surface and potential, their flux charges agreeing to $2.2\times10^{-12}$'
+%
+%  test0 (1CCM) holds the whole 140-configuration grid in sweep B rather than
+%  one chosen configuration, so --accuracy is what selects its bar: the fastest
+%  configuration whose polarization error against the CPU path is at or under
+%  the criterion (43 of the 140 qualify; the winner is P=6, theta=0.5,
+%  n_leaf=256 at 0.056 s). Without --accuracy the script refuses to guess.
+%
+%  NOTE (Claude): why the FMM bar is h1n1-2n-1883766.out and not
+%  h1n1-1883984.out, which ran the same configuration for 7 s less.
+%
+%  The two disagree on the energies by 8.7e-6, but that difference is NOT the
+%  FMM. It is upstream of the energy stage entirely:
+%
+%    run                   flux charge [e]        pol [kT]
+%    2n FMM   1883766      -22168.18257365155     -128501527.1121173
+%    naive    1884560      -22168.18257360203     -128501527.1117011
+%    1n FMM   1883984      -22168.45045434719     -128502648.7816411
+%
+%  Flux charge does not involve the FMM -- it is the surface integral of the
+%  flux -- and 1883984 differs from the other two by 1.2e-5 on it while those
+%  two agree to 2.2e-12. Diffing NanoShaper's own <<INFO>> output, every
+%  parameter matches across all three (same grid 1011, same self-intersection
+%  grid 64), but 1883984's ray-tracing packet sizes differ: packet 8 is 730006
+%  against 729890, packet 29 605178 against 605188, packet 60 751556 against
+%  751500, packet 61 763012 against 763054. So NanoShaper built a slightly
+%  different surface, and the energies inherited it.
+%
+%  Not a configuration difference: both energy stages are within 3% of each
+%  other (242.8 s vs 235.2 s) and P=10 vs P=11 alone costs 1.14-1.28x. Cause of
+%  the surface change unknown -- it is not a clean container-swap split (job
+%  order is 1883766, 1883984, 1884560, and the MIDDLE one is the odd one out)
+%  and not thread count (1883984 and 1884560 both ran 8 ranks x 8; 1883766 ran
+%  8 ranks x 16 and matches 1884560). NanoShaper nondeterminism at 64 threads
+%  is the surviving candidate; the diagnostic is to run one configuration twice
+%  on one node and diff the "Unpacking rays packet" lines.
+%
+%  Consequence for the figure: 1883766 and 1884560 share a surface and a
+%  potential, so the 13.0x FMM-over-naive number and the 3.2e-12 error are a
+%  matched comparison despite the two runs using different launches. 1883984
+%  cannot be compared against that naive run at all. 3.2e-12 is not an
+%  implausibly good FMM result either -- it is 4.2e-4 kT absolute against
+%  6VYB's 2.3e-6 kT, i.e. ~180x the absolute error for ~325x the atoms; the
+%  relative figure is small only because |E_pol| here is 2808x larger.
+%
+%  Added 2026-09-01 by
+%    python3 scripts/bench_sweep.py test2 --sweeps b -r 3 --resume --no-reference
+%  with options.prm at 0.3/7/16/512. --resume matches the existing methods 0
+%  and 1 by config_id and skips them; the method-2 id embeds the fmm_* values,
+%  so only the new configuration ran.
+%
+%  This also puts a number on phase 1 of the energy stage, the part fmm_replay
+%  does not measure: pipeline 1.0658 s against replay 0.9983 s at the same
+%  configuration, so ~0.07 s of collection on 1VSZ (~0.31 s on 6VYB). That gap
+%  is why a replay time cannot be plotted next to a CPU or naive bar.
+% ------------------------------------------------------------------------
+
+
+\input{figures/energy_methods.tex}
+\input{figures/energy_methods_table.tex}
+

@@ -17,6 +17,8 @@
 \begin{tikzpicture}
 \begin{axis}[
     ybar,
+    % 15cm against the 16.03cm textwidth of the 12pt/2.5cm page. Measured, not
+    % assumed: 15.4 still fits, 13.6 gains nothing.
     width=15.0cm, height=7.4cm,
     bar width=13pt,
     enlarge x limits=0.30,
@@ -98,12 +100,10 @@
 
 \caption[Energy stage cost by method]{\textbf{Cost of the energy stage on
     \energyMolecules{}.} Median wall time of the \texttt{Compute energy} stage
-    over \energyRepeats{} runs, on a logarithmic axis, with whiskers spanning
-    the fastest and slowest of those runs; the number above each bar is that
-    median in seconds. The three bars are the stock CPU path
-    (\texttt{energy\_method\,=\,0}), the naive $O(NM)$ GPU sum
-    (\texttt{\,=\,1}) and the FMM (\texttt{\,=\,2}), run on the same
-    discretisation so that they differ only in the energy path.\energyFmmConfig
-    \energyMachine\energyCaveats}
+    over \energyRepeats{} runs on a logarithmic axis, whiskers spanning fastest
+    to slowest; the number above each bar is that median in seconds. The bars
+    are the stock CPU path (\texttt{energy\_method\,=\,0}), the naive $O(NM)$
+    GPU sum (\texttt{\,=\,1}) and the FMM (\texttt{\,=\,2}), on the same
+    discretisation.\energyFmmConfig\energyMachine\energyCaveats}
 \label{fig:energy-methods}
 \end{figure}

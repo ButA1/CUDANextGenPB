@@ -151,11 +151,10 @@ PANELS
 
 \caption[FMM leaf sizes swept independently]{\textbf{The two FMM tree leaf sizes
     on \leafMolecule{} (\leafNatoms{} atoms), swept independently at
-    $\theta = \leafMac{}$ and $P = \leafOrder{}$.} Left: median energy-calculation time
-    over \leafRepeats{} repeats against the \emph{source} (atom) tree leaf size,
-    one line per target leaf size. Right: the same against the \emph{target}
-    tree leaf size, one line per source leaf size. Both axes are powers of two.
-    The fastest configuration is \leafBest{}.\leafNaiveNote\leafMachine}
+    $\theta = \leafMac{}$ and $P = \leafOrder{}$.} \leafRepeats{}-repeat median
+    times. \emph{Left:} against the \emph{source} (atom) leaf size, one line per
+    target leaf size. \emph{Right:} against the \emph{target} (surface) leaf
+    size. Fastest: \leafBest{}.\leafNaiveNote\leafMachine}
 \label{fig:TAG}
 \end{figure}
 """

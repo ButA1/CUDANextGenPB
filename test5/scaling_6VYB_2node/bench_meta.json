@@ -1,0 +1,13 @@
+{
+  "host": "gpu026",
+  "started": "2026-08-31T08:44:15+00:00",
+  "folder": "/beegfs/home/users/l/leirex/test5/scaling_6VYB_2node",
+  "molecule": "6VYB.pqr",
+  "amgx_config": "amgx_pcgf_amg_block_jacobi.json",
+  "np": 16,
+  "repeats": 3,
+  "sweeps": "s",
+  "gpus": [
+    "NVIDIA A100-PCIE-40GB, 40960 MiB, 595.45.04"
+  ]
+}

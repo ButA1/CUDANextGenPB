@@ -164,14 +164,12 @@ PANELS
 \ref{shiftlegendthetaSFX}
 
 \caption[Source-leaf sweeps against $P$ and $\theta$]{\textbf{The source leaf
-    size on \shiftMolecule{} (\shiftNatoms{} atoms), swept against multipole order
-    and against $\theta$, with the target leaf held at
-    $n_{leaf,tgt} = \shiftTgt{}$.} Times are the \shiftRepeats{}-repeat median of
-    the energy calculation; open circles mark each line's minimum.
-    \emph{Left:} one line per multipole order, at $\theta = \shiftMac{}$.
-    \emph{Right:} one line per $\theta$, at $P = \shiftOrder{}$, each normalised
-    to its own minimum so the shapes stay comparable across a fourfold range in
-    absolute time. Both axes are powers of two.\shiftMachine}
+    size on \shiftMolecule{} (\shiftNatoms{} atoms), swept against $P$ and
+    against $\theta$, with $n_{leaf,tgt} = \shiftTgt{}$.} \shiftRepeats{}-repeat
+    medians; open circles mark each line's minimum. \emph{Left:} one line per
+    multipole order, at $\theta = \shiftMac{}$. \emph{Right:} one line per
+    $\theta$, at $P = \shiftOrder{}$, each normalised to its own minimum so the
+    shapes stay comparable.\shiftMachine}
 \label{fig:TAG}
 \end{figure}
 """
@@ -226,9 +224,9 @@ TABLE_TEMPLATE = r"""% ---------------------------------------------------------
 \footnotesize
 \caption[Fastest source leaf against $P$ and $\theta$]{\textbf{The fastest source
     leaf size on \shiftMolecule{}, target leaf \shiftTgt{}.} Left block: against
-    multipole order, at $\theta = \shiftMac{}$. Right block: against $\theta$, at
-    $P = \shiftOrder{}$. \emph{margin} is how much slower the runner-up source
-    leaf size is.\shiftMachine}
+    $P$, at $\theta = \shiftMac{}$. Right block: against $\theta$, at
+    $P = \shiftOrder{}$. \emph{margin} is how much slower the runner-up
+    is.\shiftMachine}
 \label{tab:TAG}
 \begin{tabular}{rrrr@{\hskip 2em}rrrr}
 \toprule

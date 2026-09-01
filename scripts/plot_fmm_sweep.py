@@ -150,9 +150,8 @@ def kirkwood_clause(err):
     """
     if err is None:
         return ""
-    return (" The horizontal line marks the relative error stock NextGenPB "
-            "reaches in this quantity on the analytical Kirkwood sphere, %s."
-            % sci(err))
+    return (" The horizontal line is stock NextGenPB's own error on the "
+            "Kirkwood sphere, %s." % sci(err))
 
 
 def panel_clause(npanels):
@@ -277,14 +276,9 @@ PANELS
 \ref{LEGENDNAME}
 
 \caption[FMM parameter sweep: accuracy against work]{\textbf{FMM accuracy against
-    work on \fmmMolecule{} (\fmmNatoms{} atoms).} Horizontal axis: median
-    energy-calculation time over \fmmRepeats{} repeats. Vertical axis: relative
-    error in the \fmmMetric{} against the naive $O(N^2)$ GPU sum over the same
-    inputs.\fmmPanelClause{} Colour is the multipole order $P$; the points along
-    each line are the multipole acceptance criterion $\theta$, rising from $0.2$
-    at the accurate end to $0.8$. Grey marks the Pareto front over the whole
-    sweep and the dashed vertical line the naive path's own
-    time.\fmmKirkClause\fmmMachine\fmmSubsetNote}
+    work on \fmmMolecule{} (\fmmNatoms{} atoms).} Median energy-calculation time
+    over \fmmRepeats{} repeats against relative error in the
+    \fmmMetric{}.\fmmPanelClause\fmmKirkClause\fmmMachine\fmmSubsetNote}
 \label{fig:TAG}
 \end{figure}
 """
@@ -449,9 +443,9 @@ def write_table(path, points, metric, naive_t, naive_e, kirkwood_err, top=3,
     rows = sorted(ok, key=lambda d: d["time"])[:top]
 
     if kirkwood_err:
-        criterion = ("A configuration qualifies when its relative error stays "
-                     "at or below stock NextGenPB's own error on the analytical "
-                     "Kirkwood sphere, %s" % sci(kirkwood_err))
+        criterion = ("A configuration qualifies when its relative error is at "
+                     "or below stock NextGenPB's own on the Kirkwood sphere, %s"
+                     % sci(kirkwood_err))
         qualified = " %d of the %d configurations in the sweep qualify." % (
             len(ok), len(points))
     else:
@@ -463,10 +457,9 @@ def write_table(path, points, metric, naive_t, naive_e, kirkwood_err, top=3,
            "\\begin{table}[!htb]\n\\centering\n",
            "\\caption[Fastest FMM configurations meeting the accuracy criterion]"
            "{\\textbf{The %d fastest FMM configurations on \\fmmMolecule{} that "
-           "meet the accuracy criterion.} %s; the error is measured in the "
-           "\\fmmMetric{} against the naive $O(N^2)$ GPU sum over the same "
-           "inputs, and the speed-up is against that same path "
-           "(\\fmmNaiveTime\\,s).%s Taken from figure~\\ref{fig:TAG}."
+           "meet the accuracy criterion.} %s. Error in the \\fmmMetric{} and "
+           "speed-up are both against the naive path "
+           "(\\fmmNaiveTime\\,s).%s From figure~\\ref{fig:TAG}."
            "\\fmmMachine}\n" % (len(rows), criterion, qualified),
            "\\label{tab:TAG-pareto}\n",
            "\\begin{tabular}{rrrrrrr}\n\\toprule\n",

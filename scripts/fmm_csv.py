@@ -305,13 +305,33 @@ def stock_floor(bench_csv, replay_csv=None, metric_col="energy_pol"):
     return out
 
 
-def machine_note(machine, ranks):
-    r"""The "measured on X with N ranks" sentence every figure caption carries.
+# The setup the evaluation chapter states once, in "Test Systems" and "MPI
+# Rank". A figure measured at these says nothing about them.
+SETUP_SENTINEL = "setup"
+SETUP_RANKS = "4"
 
-    A reviewer asked for it on every figure, so it is built in one place and the
-    plotters only supply the machine name. `ranks` comes from the CSV, never from
-    the caller, so it cannot disagree with the data it labels.
+
+def machine_note(machine, ranks):
+    r"""The "measured on X with N ranks" sentence, or nothing at the default.
+
+    It used to be on every caption, which put ten identical copies of one
+    sentence in one chapter. Section 6.1 already states the machine and the rank
+    count, so `--machine setup` now emits nothing and the clause is reserved for
+    figures that actually deviate -- a cluster run, a figure spanning several
+    platforms, a non-default rank count. A deviating rank count is still stated
+    even under the sentinel, so suppressing the machine can never silently
+    mislabel the data.
+
+    Omitting --machine entirely remains an error made visible in the caption
+    rather than a silent omission; that is a different thing from opting out.
+
+    `ranks` comes from the CSV, never from the caller, so it cannot disagree
+    with the data it labels.
     """
+    if machine == SETUP_SENTINEL:
+        if ranks and str(ranks) != SETUP_RANKS:
+            return " Measured with %s MPI ranks." % ranks
+        return ""
     where = machine or "\\textbf{[machine not recorded]}"
     if ranks:
         return " Measured on %s with %s MPI ranks." % (where, ranks)
@@ -326,9 +346,12 @@ def add_machine_argument(ap):
                          "the caption, e.g. \"the local system "
                          "(Table~\\ref{tab:test-systems})\" or \"an A100 node of "
                          "the TU Berlin HPC\". The rank count is read from the "
-                         "CSV and appended automatically. Omitting this puts a "
-                         "visible [machine not recorded] in the caption rather "
-                         "than quietly leaving it out.")
+                         "CSV and appended automatically. Pass \"setup\" for "
+                         "data captured at the setup section's own machine and "
+                         "rank count, which emits no sentence at all (a "
+                         "deviating rank count is still stated). Omitting this "
+                         "puts a visible [machine not recorded] in the caption "
+                         "rather than quietly leaving it out.")
 
 
 def ranks_of(rows):

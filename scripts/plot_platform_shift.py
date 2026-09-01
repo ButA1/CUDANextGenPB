@@ -161,15 +161,14 @@ PANELS
 
 \caption[Which platform change moves which leaf axis]{\textbf{The two leaf axes
     on \platMolecule{} (\platNatoms{} atoms) under a change of GPU and a change
-    of rank count, at $\theta = \platMac{}$ and $P = \platOrder{}$.} Each line is
-    the \platRepeats{}-repeat median normalised to its own minimum, so the three
-    configurations can be compared by shape across a threefold range in absolute
-    time; open circles mark the minima. \emph{Left:} the source leaf axis.
-    \emph{Right:} the target leaf axis. Each line is sliced through its own
-    configuration's grid-wide optimum, given in the legend, rather than through a
-    single shared value: the two knobs trade against each other, so a slice taken
-    at one platform's optimum falls on another's flat region. The first two
-    series differ only in the GPU, the last two only in the rank
+    of rank count, at $\theta = \platMac{}$ and $P = \platOrder{}$.}
+    \platRepeats{}-repeat medians, each line normalised to its own minimum so
+    the shapes stay comparable; open circles mark the minima. \emph{Left:} the
+    source leaf axis. \emph{Right:} the target leaf axis. Each line is sliced
+    through its own configuration's grid-wide optimum, given in the legend,
+    rather than a single shared value: the two knobs trade against each other,
+    so a slice at one platform's optimum falls on another's flat region. The
+    first two series differ only in the GPU, the last two only in the rank
     count.\platMachine}
 \label{fig:TAG}
 \end{figure}

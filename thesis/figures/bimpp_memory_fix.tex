@@ -73,6 +73,6 @@
 \end{axis}
 \end{tikzpicture}
 
-\caption[Sparse matrix memory fix]{\textbf{Effect of the \texttt{sparse\_matrix\_template} fix on peak host memory, 6VYB, rank 1.} The process-wide peak heap consumption against the peak attributable to \texttt{assemble\_system\_matrix} alone (a subset of the total, not an additional amount), before and after replacing bimpp's \texttt{std::vector<std::map<int,double>>} with \texttt{boost::container::flat\_map} (Section~\ref{sec:evaluation-experimental-setup-comparing-memory-utilization}). The totals are heaptrack's peak heap memory consumption over the whole run; the assembly figures are the Peak column of its Top-Down view. Both captures use the AMGX solver, measured on the local system (Table~\ref{tab:test-systems}) with 4 MPI ranks.}
+\caption[Sparse matrix memory fix]{\textbf{Effect of the \texttt{sparse\_matrix\_template} fix on peak host memory, 6VYB, rank 1.} The process-wide peak heap consumption against the peak attributable to \snakecase{assemble\_system\_matrix} (Section~\ref{sec:evaluation-experimental-setup-comparing-memory-utilization}). The totals are heaptrack's peak heap memory consumption over the whole run; the assembly figures are the Peak column of its Top-Down view. Both captures use the AMGX solver, measured on the local system (Table~\ref{tab:test-systems}).}
 \label{fig:bimpp-memory-fix}
 \end{figure}

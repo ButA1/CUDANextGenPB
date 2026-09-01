@@ -85,13 +85,11 @@
 \end{tikzpicture}
 
 \caption[Linear solver comparison]{\textbf{Linear solver comparison on
-    \solverMolecules{}.} Median \solverMetric{} time over \solverRepeats{} runs
-    per configuration, with whiskers spanning the fastest and slowest of those
-    runs; the small figure above each column is the iteration count. Every
-    configuration uses the same discretisation, so the
-    bars differ only in the linear solver. Note that they do not all converge
-    to the same residual -- table~\ref{tab:solver-bench} gives the residual
-    each one actually reached, without which the times are not
+    \solverMolecules{}.} Median \solverMetric{} time over \solverRepeats{} runs,
+    whiskers spanning fastest to slowest; the figure above each column is the
+    iteration count. The bars differ only in the linear solver, but they do not
+    all converge to the same residual -- table~\ref{tab:solver-bench} gives the
+    residual each one reached, without which the times are not
     comparable.\solverMachine\solverCaveats}
 \label{fig:solver-bench}
 \end{figure}
