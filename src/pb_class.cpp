@@ -2484,7 +2484,6 @@ poisson_boltzmann::lis_compute_electric_potential (ray_cache_t & ray_cache)
 
   if (size > 1)
     bim3a_solution_with_ghosts (tmsh, *phi, replace_op);
-
 }
 
 

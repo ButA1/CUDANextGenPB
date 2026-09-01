@@ -22,8 +22,9 @@ calc_coulombic = 1
 
 [algorithm]
 linear_solver       = amgx
-energy_method       = 1
-fmm_mac             = 0.4
-fmm_multipole_order = 10
-fmm_leaf_size       = 256
+energy_method       = 2
+fmm_mac             = 0.3
+fmm_multipole_order = 7
+fmm_leaf_size       = 16
+fmm_target_leaf_size = 1024
 [../]

@@ -76,17 +76,11 @@
 \ref{amgxlegendamgxscalingvyb}
 
 \caption[AMGX scaling across GPUs and topologies]{\textbf{AMGX setup and solve
-    time on \amgxMoleculeamgxscalingvyb{} as the GPU, the rank count and the GPU topology are
-    changed one at a time.} Median over at least \amgxRepeatsamgxscalingvyb{} runs per bar,
-    from AMGX's own timers rather than the wall clock; the figure above each bar
-    is its total relative to \amgxRefamgxscalingvyb{}. Adjacent pairs differ in one variable:
-    GPU, then rank count, then number of GPUs, then whether the second GPU sits
-    in the same node. \emph{Left:} the tuned configuration \amgxTunedNameamgxscalingvyb{},
-    \amgxTunedItersamgxscalingvyb{} iterations. \emph{Right:} AMGX's default,
-    \amgxDefaultItersamgxscalingvyb{} iterations, on its own y scale. The rank-count pair is
-    the control that lets the 4-rank local bars stand beside the 16-rank cluster
-    bars: on one GPU the matrix is gathered onto that GPU whatever the rank
-    count. Table~\ref{tab:amgx_scaling_6vyb} sets these times against the full
-    \texttt{t\_solve} stage, of which AMGX is only a part.}
+    time on \amgxMoleculeamgxscalingvyb{} over five GPU configurations.} Median over at least
+    \amgxRepeatsamgxscalingvyb{} runs per bar, from AMGX's own timers. The figure above each
+    bar is its total relative to \amgxRefamgxscalingvyb{}. \emph{Left:} the tuned
+    configuration \amgxTunedNameamgxscalingvyb{}, \amgxTunedItersamgxscalingvyb{} iterations.
+    \emph{Right:} AMGX's default, \amgxDefaultItersamgxscalingvyb{} iterations, on its own
+    $y$ scale.}
 \label{fig:amgx_scaling_6vyb}
 \end{figure}

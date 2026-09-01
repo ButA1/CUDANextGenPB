@@ -162,7 +162,10 @@ echo
 
 # --- The matrix ----------------------------------------------------------------------------
 # --sweeps s is the six-row scaling matrix defined in bench_sweep.py's build_plan:
-#   {naive energy, FMM 0.3/p9 at 8/1024, FMM 0.4/p11 at 16/1024} x {tuned AMGX, default AMGX}
+#   {naive energy, FMM 0.3/p9 at 16/512, FMM 0.4/p11 at 32/1024} x {tuned AMGX, default AMGX}
+# (The leaf pairs above are the 16-RANK CLUSTER optima, not the 4-rank local ones. This line
+#  previously read 8/1024 and 16/1024, which is neither what build_plan sets nor what the CSVs
+#  recorded -- the authoritative list is bench_sweep.py's "s" branch and the table above it.)
 # The same six rows run at every topology, so speedup is a ratio of matching config_ids.
 echo "=== scaling matrix at $TOPO ==="
 # ${LAUNCH[@]+...}: LAUNCH is empty in mpirun mode, and "${LAUNCH[@]}" on an empty array is

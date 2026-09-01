@@ -1,23 +1,28 @@
 % ------------------------------------------------------------------------
 %  sparse_matrix_template memory fix: std::map -> boost::container::flat_map.
-%  Hand-authored from two heaptrack captures (rank 1, 6VYB, 4 MPI ranks, both
-%  using the AMGX solver): profiles/heaptrack.ngpb.rank1.base.zst (std::map)
-%  and profiles/heaptrack.ngpb.rank1.opt.amgx.zst (flat_map).
-%  Rank 1 rather than rank 0: the rank 0 opt.amgx capture is corrupted (all
-%  memory attributed to one frame -- a truncated .zst from an OOM kill during
-%  a later re-run attempt), while rank 1's is intact for both before/after.
+%  Hand-authored from the 2026-09-01 matched pair (rank 1, 6VYB, 4 MPI ranks,
+%  AMGX): test1/profiles/ngpb.rank1.zst (std::map, captured 17:38 against a
+%  reinstalled base bimpp) and the cook of the 13:43 capture (flat_map).
+%  Same config, VERIFIED -- not assumed. The container-independent mesh proxies
+%  are identical digit for digit across the pair:
+%      num_local_nodes  813.29M over 726488 calls   (both)
+%      create_density_map    84882360 calls         (both)
+%  and the whole 7.69M difference in total allocation count is accounted for by
+%  the 7.71M difference at the assembly container site, to within 20k of 599M.
+%  The superseded pair (base.zst / opt.amgx.zst, Apr+May) was NOT same-config:
+%  those proxies differed by 13.5%, which inflated the drop. Do not go back.
 %
-%  TOTALS come from the Summary tab / heaptrack_print "peak heap memory
-%  consumption" (6.62G and 3.72G), NOT from the Top-Down "main" row. Do not
-%  substitute the Top-Down number here: the two captures unwind to different
-%  depths, so they root differently. In base, every stack ends at main, so
-%  Top-Down main (6.6G) ~= the whole process. In opt, the num_local_nodes ->
-%  p8est -> libsc site (813M) unwinds past main into __libc_start_call_main
-%  and roots under _start instead, so Top-Down main (2.8G) omits it while the
-%  process peak is 3.72G. Using both Top-Down numbers would show a 2.4x drop
-%  where the real like-for-like figure is 1.8x.
-%  The assemble_system_matrix bars ARE the Top-Down Peak column; that node
-%  roots through main in both captures, so it is comparable.
+%  TOTALS are heaptrack_print / Summary "peak heap memory consumption", NOT the
+%  Top-Down "main" row. Top-Down main is not the process peak -- the tree has
+%  several roots (main, _start, __clone3) and merged-node peaks are documented
+%  as "not correct"; captures can also unwind to different depths and root the
+%  same allocation differently, which silently drops it from main's subtree.
+%  ASSEMBLY bars sum the peak consumers heaptrack_print reports under
+%  --filter-bt-function assemble_system_matrix. Two sites dominate:
+%      entry storage      2.40G -> 1.02G   (RB-tree nodes -> flat vectors)
+%      row-handle array   1.34G -> 672.21M (one alloc; 48B -> 24B per row)
+%  everything else is under 60MB. This inherits the merged-peak caveat (maxima
+%  at different instants), unlike the totals, which are exact.
 %  See [[project_bimpp_memory]].
 %  Include with \input{figures/bimpp_memory_fix}
 %  Needs \usepackage{pgfplots} in the preamble.
@@ -38,7 +43,7 @@
     xtick={0,1},
     xticklabels={\texttt{std::map} (before),\texttt{flat\_map} (after)},
     xticklabel style={font=\footnotesize, align=center},
-    ymin=0, ymax=7.6,
+    ymin=0, ymax=6.8,
     ylabel={peak heap memory, rank 1 [GB]},
     ylabel style={font=\footnotesize},
     tick label style={font=\scriptsize},
@@ -55,24 +60,24 @@
   % above the seam is "everything in main's peak that is not assembly".
   \addplot+[
     ybar, bar shift=0pt, fill=memtotal, draw=memtotal!70!black, line width=0.4pt,
-  ] coordinates {(0,6.6) (1,3.7)};
+  ] coordinates {(0,5.84) (1,3.79)};
   \addlegendentry{total peak (process)}
   \addplot+[
     ybar, bar shift=0pt, fill=memassemble, draw=memassemble!70!black, line width=0.4pt,
-  ] coordinates {(0,4.4) (1,1.8)};
+  ] coordinates {(0,3.81) (1,1.77)};
   \addlegendentry{\texttt{assemble\_system\_matrix}}
 
   % Value labels: total at the bar top, assemble at the seam between the two
   % colors, with a short cap line marking the seam itself.
-  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:0,6.6) {6.6};
-  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:1,3.7) {3.7};
-  \draw[black!55, line width=0.6pt] ([xshift=-17pt]axis cs:0,4.4) -- ([xshift=17pt]axis cs:0,4.4);
-  \draw[black!55, line width=0.6pt] ([xshift=-17pt]axis cs:1,1.8) -- ([xshift=17pt]axis cs:1,1.8);
-  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:0,4.4) {4.4};
-  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:1,1.8) {1.8};
+  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:0,5.84) {5.84};
+  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:1,3.79) {3.79};
+  \draw[black!55, line width=0.6pt] ([xshift=-17pt]axis cs:0,3.81) -- ([xshift=17pt]axis cs:0,3.81);
+  \draw[black!55, line width=0.6pt] ([xshift=-17pt]axis cs:1,1.77) -- ([xshift=17pt]axis cs:1,1.77);
+  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:0,3.81) {3.81};
+  \node[font=\scriptsize, anchor=south, yshift=1pt] at (axis cs:1,1.77) {1.77};
 \end{axis}
 \end{tikzpicture}
 
-\caption[Sparse matrix memory fix]{\textbf{Effect of the \texttt{sparse\_matrix\_template} fix on peak host memory, 6VYB, rank 1.} The process-wide peak heap consumption against the peak attributable to \snakecase{assemble\_system\_matrix} (Section~\ref{sec:evaluation-experimental-setup-comparing-memory-utilization}). The totals are heaptrack's peak heap memory consumption over the whole run; the assembly figures are the Peak column of its Top-Down view. Both captures use the AMGX solver, measured on the local system (Table~\ref{tab:test-systems}).}
+\caption[Sparse matrix memory fix]{\textbf{Effect of the \texttt{sparse\_matrix\_template} fix on peak host memory, 6VYB, rank 1.} The process-wide peak heap consumption against the peak attributable to \snakecase{assemble\_system\_matrix} (Section~\ref{sec:evaluation-experimental-setup-comparing-memory-utilization}). The totals are heaptrack's peak heap memory consumption over the whole run; the assembly figures sum its allocation sites. Both captures use the AMGX solver, measured on the local system (Table~\ref{tab:test-systems}).}
 \label{fig:bimpp-memory-fix}
 \end{figure}

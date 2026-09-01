@@ -4,7 +4,7 @@
 \centering
 \footnotesize
 \setlength{\tabcolsep}{5pt}
-\caption[Energy stage cost by method]{\textbf{Cost and accuracy of the energy stage by method.} Median over \energyRepeats{} runs; \emph{spread} is half the fastest-to-slowest range as a percentage of that median. \emph{vs.\ CPU} and \emph{vs.\ naive} are the speed-ups over those two paths. The relative errors are against \energyReference{}, and are the quantities the FMM parameter sweep (Section~\ref{sec:evaluation-results-energy-calculation}) was ranked on.\energyFmmConfig\energyMachine\energyCaveats}
+\caption[Energy stage cost by method]{\textbf{Cost and accuracy of the energy stage by method.} Median over \energyRepeatsenergymethods{} runs; \emph{spread} is half the fastest-to-slowest range as a percentage of that median. \emph{vs.\ CPU} and \emph{vs.\ naive} are the speed-ups over those two paths. The relative errors are against \energyReferenceenergymethods{}, and are the quantities the FMM parameter sweep (Section~\ref{sec:evaluation-results-energy-calculation}) was ranked on.\energyFmmConfigenergymethods\energyMachineenergymethods\energyCaveatsenergymethods}
 \label{tab:energy-methods}
 \begin{tabular}{llrrrrrrr}
 \toprule
@@ -23,10 +23,6 @@ molecule & method & ranks & stage [s] & spread & vs.\ CPU & vs.\ naive & polariz
 1VSZ & CPU & 4 & 124.6 & $\pm$0.3\% & 1.0$\times$ & 0.041$\times$ & -- & -- \\
  & naive GPU & 4 & 5.062 & $\pm$1.3\% & 24.6$\times$ & 1.0$\times$ & $2.94\times10^{-13}$ & $6.00\times10^{-12}$ \\
  & FMM & 4 & 1.066 & $\pm$0.3\% & 117$\times$ & 4.7$\times$ & $4.26\times10^{-11}$ & $5.64\times10^{-8}$ \\
-\midrule
-H1N1 & CPU & 8 & $>3\,h$ & DNF & -- & -- & -- & -- \\
- & naive GPU & 8 & 3163 & -- & -- & 1.0$\times$ & -- & -- \\
- & FMM & 8 & 242.8 & -- & -- & 13.0$\times$ & $3.24\times10^{-12}$ & $3.89\times10^{-12}$ \\
 \bottomrule
 \end{tabular}
 \end{table}

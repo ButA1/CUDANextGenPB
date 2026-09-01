@@ -1,0 +1,33 @@
+% ------------------------------------------------------------------------
+%  Baseline (host, triangulation-fix) accuracy on the two analytical test
+%  systems, next to the values printed in the NGPB paper.
+%  "NGPB paper" rows are Table~\ref{tab:ngpb-error-magnitudes} (relative error
+%  magnitudes only, no sign given). "baseline (LIS/AMGX)" rows are relative
+%  error against the exact analytical reference
+%  (Table~\ref{tab:ngpb-analytical-values}), from the user's own test3/test4
+%  runs (config: Table~\ref{tab:test-cases}) with linear_solver set to lis and
+%  amgx respectively, signed as reported -- the 30-sphere polarization runs
+%  came back negative.
+%  Hand-authored, no backing log file (console output, not captured to disk).
+%  Include with \input{figures/baseline_accuracy_table}
+%  Needs \usepackage{booktabs}.
+% ------------------------------------------------------------------------
+\begin{table}[!htb]
+\centering
+\footnotesize
+\caption[Baseline vs.\ NGPB analytical accuracy]{\textbf{Relative error against the exact analytical reference (Table~\ref{tab:ngpb-analytical-values}), baseline vs.\ NGPB paper.} \emph{NGPB paper} reproduces Table~\ref{tab:ngpb-error-magnitudes}; \emph{baseline (LIS/AMGX)} is my own run of the same test system (Table~\ref{tab:test-cases}) with each linear solver.}
+\label{tab:baseline-accuracy}
+\begin{tabular}{llrrr}
+\toprule
+system & source & polarization & ionic & total \\
+\midrule
+Kirkwood sphere & NGPB paper & $7.38\times10^{-10}$ & $3.39\times10^{-2}$ & $1.72\times10^{-4}$ \\
+ & baseline (LIS) & $1.246641\times10^{-10}$ & $3.358548\times10^{-2}$ & $1.702569\times10^{-4}$ \\
+ & baseline (AMGX) & $1.456175\times10^{-10}$ & $3.358548\times10^{-2}$ & $1.702569\times10^{-4}$ \\
+\midrule
+30-sphere & NGPB paper & $4.16\times10^{-5}$ & $1.39\times10^{-2}$ & $7.46\times10^{-4}$ \\
+ & baseline (LIS) & $-7.037554\times10^{-5}$ & $1.355291\times10^{-2}$ & $5.866853\times10^{-4}$ \\
+ & baseline (AMGX) & $-7.037566\times10^{-5}$ & $1.355334\times10^{-2}$ & $5.867130\times10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}

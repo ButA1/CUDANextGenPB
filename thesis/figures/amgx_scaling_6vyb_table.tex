@@ -6,14 +6,13 @@
 \begin{table}[!htb]
 \centering
 \footnotesize
+% Eight columns is 6pt over a 16cm text block at the default 6pt tabcolsep.
+\setlength{\tabcolsep}{4.5pt}
 \caption[AMGX scaling against the whole solve stage]{\textbf{The numbers behind
-    figure~\ref{fig:amgx_scaling_6vyb}, set against the solve stage they sit inside.}
-    \emph{AMGX} is setup${}+{}$solve from AMGX's own timers and is what the
-    figure draws; \emph{rest} is \texttt{t\_solve} minus that, i.e. the
-    assembly-to-solver handoff, which is not on the GPU and does not scale.
-    It is the larger of the two in every \texttt{amgx\_pcgf\_amg\_block\_jacobi} row, so a speedup on \emph{AMGX} is not a speedup on the stage. \emph{spread} is the widest repeat-to-repeat variation among the
-    runs pooled into that row; a bracketed second figure excludes the job's
-    first AMGX call, a cold start that the median already rejects.}
+    figure~\ref{fig:amgx_scaling_6vyb}.} \emph{AMGX} is setup${}+{}$solve from AMGX's own
+    timers; \emph{rest} is \texttt{t\_solve} minus that. \emph{spread} is the
+    widest repeat-to-repeat variation in the row; a bracketed figure excludes
+    the job's first AMGX call.}
 \label{tab:amgx_scaling_6vyb}
 \begin{tabular}{lrrrrrrr}
 \toprule

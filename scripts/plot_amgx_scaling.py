@@ -211,18 +211,12 @@ PANELS
 \ref{amgxlegendSFX}
 
 \caption[AMGX scaling across GPUs and topologies]{\textbf{AMGX setup and solve
-    time on \amgxMolecule{} as the GPU, the rank count and the GPU topology are
-    changed one at a time.} Median over at least \amgxRepeats{} runs per bar,
-    from AMGX's own timers rather than the wall clock; the figure above each bar
-    is its total relative to \amgxRef{}. Adjacent pairs differ in one variable:
-    GPU, then rank count, then number of GPUs, then whether the second GPU sits
-    in the same node. \emph{Left:} the tuned configuration \amgxTunedName{},
-    \amgxTunedIters{} iterations. \emph{Right:} AMGX's default,
-    \amgxDefaultIters{} iterations, on its own y scale. The rank-count pair is
-    the control that lets the 4-rank local bars stand beside the 16-rank cluster
-    bars: on one GPU the matrix is gathered onto that GPU whatever the rank
-    count. Table~\ref{tab:TAG} sets these times against the full
-    \texttt{t\_solve} stage, of which AMGX is only a part.}
+    time on \amgxMolecule{} over five GPU configurations.} Median over at least
+    \amgxRepeats{} runs per bar, from AMGX's own timers. The figure above each
+    bar is its total relative to \amgxRef{}. \emph{Left:} the tuned
+    configuration \amgxTunedName{}, \amgxTunedIters{} iterations.
+    \emph{Right:} AMGX's default, \amgxDefaultIters{} iterations, on its own
+    $y$ scale.}
 \label{fig:TAG}
 \end{figure}
 """
@@ -253,14 +247,13 @@ TABLE_TEMPLATE = r"""% ---------------------------------------------------------
 \begin{table}[!htb]
 \centering
 \footnotesize
+% Eight columns is 6pt over a 16cm text block at the default 6pt tabcolsep.
+\setlength{\tabcolsep}{4.5pt}
 \caption[AMGX scaling against the whole solve stage]{\textbf{The numbers behind
-    figure~\ref{fig:TAG}, set against the solve stage they sit inside.}
-    \emph{AMGX} is setup${}+{}$solve from AMGX's own timers and is what the
-    figure draws; \emph{rest} is \texttt{t\_solve} minus that, i.e. the
-    assembly-to-solver handoff, which is not on the GPU and does not scale.
-    RESTCLAIM \emph{spread} is the widest repeat-to-repeat variation among the
-    runs pooled into that row; a bracketed second figure excludes the job's
-    first AMGX call, a cold start that the median already rejects.}
+    figure~\ref{fig:TAG}.} \emph{AMGX} is setup${}+{}$solve from AMGX's own
+    timers; \emph{rest} is \texttt{t\_solve} minus that. \emph{spread} is the
+    widest repeat-to-repeat variation in the row; a bracketed figure excludes
+    the job's first AMGX call.}
 \label{tab:TAG}
 \begin{tabular}{lrrrrrrr}
 \toprule
@@ -443,21 +436,8 @@ def main():
                            "%.0f\\%% (%.0f\\%%)" % (100 * s["spread"],
                                                     100 * s["warm_spread"]),
                            rest))
-    # The reason the table exists is that `rest` dominates, so the claim is
-    # checked against the numbers rather than written into the template: if a
-    # future dataset stops supporting it, the sentence goes rather than lying.
-    tuned_rest = [(st[tuned]["tsolve"] - st[tuned]["total"], st[tuned]["total"])
-                  for _, _, st, _ in loaded if st[tuned]["tsolve"] is not None]
-    if tuned_rest and all(r > a for r, a in tuned_rest):
-        claim = ("It is the larger of the two in every "
-                 "\\texttt{%s} row, so a speedup on \\emph{AMGX} is not a "
-                 "speedup on the stage." % texify(tuned or "default"))
-    else:
-        claim = "A speedup on \\emph{AMGX} is therefore not a speedup on the stage."
     with open(tab, "w") as fh:
-        fh.write(localise(TABLE_TEMPLATE
-                          .replace("RESTCLAIM", claim)
-                          .replace("ROWS", "".join(rows)), args.tag))
+        fh.write(localise(TABLE_TEMPLATE.replace("ROWS", "".join(rows)), args.tag))
 
     print("reference series: [%d] %s\n" % (ref, loaded[ref][0].replace("|", ", ")))
     for cfg in configs:

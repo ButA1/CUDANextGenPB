@@ -120,6 +120,18 @@ The naive kernels are surprisingly useful on workstation GPUs, which are not hel
 For gaming GPUs, mixed precision is a very good option if some loss of accuracy is acceptable.
 FMM represents a middle ground, which at certain settings achieves 0 additional error increase over NGPB's default error level, while being significantly faster on gaming GPUs than the naive kernels.
 
+\subsection{Triangulation Fix}
+\label{sec:implementation-energy-calculation-triangulation-fix}
+
+I identified that the original code was computing \snakecase{normal_intersections} multiple times per quadrant edge.
+Since the surfaces of marching cubes and NanoShaper should be nigh identical, the quadrant's edges for which the \snakecase{normal_intersections} are computed should always be the edges of those quadrants, which are located at the surface $\Gamma$, so I precomputed them.
+
+It is at this point that I noticed that marching cubes and NanoShaper do unfortunately sometimes disagree, leading \snakecase{normal_intersections} to return a default value without writing to the passed normal pointer at all.
+Worse yet, this stale normal pointer then gets used in the calculation of the ionic energy.
+After conversing with one of the authors of NGPB, we decided that the best course of action is to drop a surface triangle if one of its normals could not be determined.
+For this I modified \texttt{normal\_intersection} to return \texttt{true} if it had found an intersection and \texttt{false} otherwise.
+As this occurrence is very rare, it did not affect the speed, and even the accuracy in many cases.
+
 \subsection{Naive Implementation}
 \label{sec:implementation-energy-calculation-naive-kernels}
 
@@ -156,15 +168,6 @@ This dropped the total time by another 25\%.
 \newline
 On the CPU side: 
 Since the polarization and ionic kernels both need the same charge and atom arrays as the Coulomb kernel, I've reused their device pointers, but the speedup of that was miniscule.
-
-Lastly, I identified that the original code was computing \snakecase{normal_intersections} multiple times per quadrant edge.
-Since the surfaces of marching cubes and NanoShaper should be nigh identical, the quadrant's edges for which the \snakecase{normal_intersections} are computed should always be the edges of those quadrants, which are located at the surface $\Gamma$, so I precomputed them.
-
-It is at this point that I noticed that marching cubes and NanoShaper do unfortunately sometimes disagree, leading \snakecase{normal_intersections} to return a default value without writing to the passed normal pointer at all.
-Worse yet, this stale normal pointer then gets used in the calculation of the ionic energy.
-After conversing with one of the authors of NGPB, we decided that the best course of action is to drop a surface triangle if one of its normals could not be determined.
-For this I modified \texttt{normal\_intersection} to return \texttt{true} if it had found an intersection and \texttt{false} otherwise.
-As this occurrence is very rare, it did not affect the speed, and even the accuracy in many cases.
 
 % TODO pseudo code could be nice, but its also really trivial
 % prof hasn't complained, I guess it is just trivial enough
