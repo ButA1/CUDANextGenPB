@@ -91,11 +91,9 @@ The relative errors were exactly identical.
 \input{figures/baseline_accuracy_table}
 
 Although AMGX was set to a lower residual, it did not increase accuracy.
-The relative error increased slightly to 
-
-I accepted the improvements from the host-side optimization into the baseline.
-The removed the necessity to swap between different BIMPP builds.
-Also the focus of this thesis is on the CUDA optimizations, not on the host side.
+In fact is worsened the polarization error for the Kirkwood sphere test slightly when compared to the LIS result, but it is still way better than the result from the paper.
+For FMM I used the accuracy values of LIS.
+For AMGX I accepted the slight loss.
 % TODO make sure this isn't redundant
 
 \subsection{Linear Equation Solver}
