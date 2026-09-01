@@ -375,7 +375,7 @@ The target tree is built twice, once for the point-discrete, and once for the tr
 The flow of a single construction cycle can be seen in Figure~\ref{fig:fmm-g3}
 The LBVH path from the source tree builder is reused almost entirely.
 The only difference is the \snakecase{reorder_geom_kernel}, which only reorders the atoms geometrically, as the target tree carries no charges, and also records the original caller's permutation, so the results scatter back to that layout.
-Just like in the source tree, the box and frontier nodes are marked, and a dense slot map for them is created.
+Analogous to the the source tree, the box and frontier nodes are marked, and a dense slot map for them is created.
 The downward sweep is level-synchronous, so to filter out nodes that do not carry local expansions, it creates a per-level L2L worklist in the form of a CSR, keyed by tree level.
 It does this using a counting sort.
 \snakecase{l2l_count_kernel} counts the near sources of each target, an exclusive scan turns those counts into the CSR row offsets, and \snakecase{l2l_scatter_kernel} writes each pair's source leaf into its target's row.
@@ -435,10 +435,9 @@ Since each write to the local moments is distinct, no atomics are needed at this
 
 \subsubsection{7. Fused Evaluation}
 
-% TODO don't forget the block level stride
 Finally, the near-field and far-field contributions are evaluated on the targets, as can be seen in Figure~\ref{fig:fmm-g7}.
-Both the P2P and L2P evaluations are rolled into a single kernel \snakecase{l2p_p2p_kernel} launched per block for every box target leaf, with every thread handling at most one atom.
-So the target position is loaded once and both contributions are summed in registers.
+Both the P2P and L2P evaluations are rolled into a single kernel \snakecase{l2p_p2p_kernel} launched per block for every box target leaf, with each thread striding over the leaf's target points \texttt{blockDim.x} at a time, so a thread may own more than one target, since leaf capacity is no longer tied to the block width.
+So each target position is loaded once and both contributions are summed in registers.
 \snakecase{launch_l2p_p2p} handles the compile-time $P$ selection, just like in the downward pass.
 It takes in both the result of the downward pass and the CSR-sorted P2P pairs.
 The P2P pairs are processed by the device function \snakecase{fmm_drain_p2p}, which performs the direct summation over all particles according to the kernels of the original equations Eq.~\eqref{eq:polarization-energy} and Eq.~\eqref{eq:ionic-energy-discrete}.

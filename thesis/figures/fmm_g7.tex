@@ -18,7 +18,7 @@
 
 \node[g, anchor=north west] (v1) at ([yshift=-3mm]v0.south west) {%
   \fmmH{\texttt{l2p\_p2p\_kernel<FIELD,P>}}
-  \fmmK{1 block / target \textbf{box leaf}, 1 thread / target point}{--- grid $=$ \texttt{n\_leaves}, 256 threads / block}
+  \fmmK{1 block / target \textbf{box leaf}, threads stride over its points}{--- grid $=$ \texttt{n\_leaves}, block $=\min(\lceil\text{leaf}/32\rceil{\cdot}32,\,256)$}
   \fmmK{fmm\_drain\_p2p<FIELD>}{--- near field, over this leaf's CSR row}
   \fmmK{l2p\_contract<P,T>}{--- far field; \texttt{T=dual} gives $\nabla\Phi$ by forward-mode AD}
   \fmmK{scatter through d\_orig}{--- back into the caller's point order}};
