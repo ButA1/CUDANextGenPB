@@ -29,52 +29,6 @@ Using git I could quickly switch between the official version and my own if need
 
 \subsubsection{sparse\_matrix\_template}
 
-% ------------------------------------------------------------------------
-%  NOTE (Claude): figure + numbers only, per the other results subsections.
-%
-%  Heaptrack, 6VYB, rank 1, both captures on the LIS solver (verified by
-%  filtering each profile for lis_/amgx_compute_electric_potential -- the
-%  earlier "AMGX" label was carried over from the superseded files' names and
-%  was wrong), local system,
-%  before/after swapping bimpp's sparse_matrix_template storage from
-%  std::vector<std::map<int,double>> to boost::container::flat_map
-%  (see [[project_bimpp_memory]] in memory):
-%      process peak heap:            5.84 GB -> 3.79 GB   (1.54x)
-%      assemble_system_matrix peak:  3.81 GB -> 1.77 GB   (2.15x)
-%  assemble_system_matrix is a SUBSET of the total, not additive -- the
-%  figure draws it as an overlay, not a stacked sum.
-%  Two allocation sites make up nearly all of the assembly figure:
-%      entry storage      2.40G -> 1.02G   (RB-tree nodes -> flat vectors)
-%      row-handle array   1.34G -> 672.21M (one alloc; 48B -> 24B per row)
-%  i.e. the swap shrinks the per-entry storage AND the outer vector of row
-%  handles, independently. Everything else under assembly is below 60MB.
-%  Source: test1/profiles/ngpb.rank1.zst (std::map, captured 2026-09-01 17:38
-%  against a reinstalled base bimpp) and the cook of the 13:43 capture
-%  (flat_map). Raw captures via run_heaptrack.sh -r + scripts/cook_heaptrack.sh.
-%
-%  SAME CONFIG -- verified, not assumed. The container-independent mesh proxies
-%  are identical digit for digit:
-%      num_local_nodes    813.29M over 726488 calls   (both)
-%      create_density_map      84882360 calls         (both)
-%  and the entire 7.69M difference in total allocation count is accounted for
-%  by the 7.71M difference at the assembly container site (agreeing to within
-%  20k of 599M), i.e. the container is the only thing that changed.
-%  This replaces an earlier pair (base.zst / opt.amgx.zst) that was NOT
-%  same-config -- its mesh proxies differed by 13.5%, inflating the drop to
-%  1.8x / 2.4x. Do not reuse those files.
-%
-%  The totals are heaptrack_print / Summary "peak heap memory consumption",
-%  NOT the Top-Down "main" row: that tree has several roots (main, _start,
-%  __clone3), merged-node peaks are documented as "not correct", and captures
-%  can unwind to different depths and root the same allocation differently.
-%  The assembly figures sum the peak consumers under
-%  --filter-bt-function assemble_system_matrix, so they inherit that
-%  merged-peak caveat; the totals do not.
-%  Gotcha worth a sentence if you want it: flat_map was briefly catastrophic
-%  when combined with a per-row .reserve(32) left over from an earlier change;
-%  removing that reserve was part of this fix.
-% ------------------------------------------------------------------------
-
 Figure~\ref{fig:bimpp-memory-fix} shows the reduction of the memory consumption on rank 1 for 6VYB (test1).
 The move from \snakecase{std::map} to \snakecase{boost::container::flat\_map} lead to a 2.14x reduction of the host memory usage during \snakecase{assemble\_system\_matrix}, which was better than the predicted 2x reduction.
 Upon closer inspection, the swap shrinks the per-entry storage \textit{and} the outer vector of row handles, independently.
@@ -318,17 +272,22 @@ The naive kernel also brought a massive speedup over the CPU path as well, rangi
 \input{figures/energy_methods.tex}
 \input{figures/energy_methods_table.tex}
 
-Analogous to the linear solver comparison, I ran 6VYB, 1VSZ, as well as H1N1 on the cluster, which can be seen in Figure~\ref{fig:energy-methods-cluster} and Table~\ref{tab:energy-methods-cluster}.
-6VYB and 1VSZ were run on a single A100 node, while H1N1 was run on two H200 nodes, that have two GPUs each.
+Analogous to the linear solver comparison, I ran 6VYB, 1VSZ, as well as H1N1 on the cluster, which can be seen in Figure~\ref{fig:energy-methods-cluster}.
+6VYB and 1VSZ were run on a single A100 node.
+The LIS and naive kernel figures for H1N1 were recorded on a single node with 4 H200 GPUs, while the FMM was run on two H200 nodes, that have two GPUs each.
+This was due to my single node FMM run being contaminated somehow.
 Also, due to time constraints and long queue times, the FMM runs were not using the most optimal configurations.
-Now running on a workstation GPU, the naive kernels are not FP64 bound anymore, and the gap between them and FMM, which existed on the local machine, basically disappears for 1VSZ and 6VYB.
+For 6VYB and 1VSZ, I used a configuration of $P = 9, \theta = 0.3, n_{leaf,src} = 16, n_{leaf,tgt} = 1024$, while for H1N1 I used $P = 10, \theta = 0.4, n_{leaf} = 256$.
+Now running on a workstation GPU, the naive kernels are not FP64 bound anymore, resulting in insane gains of 286x and 321x for 6VYB and 1VSZ respectively, as seen in Table~\ref{tab:energy-methods-cluster}.
+This really showcases how well GPUs can boost performance through sheer strength.
+The gap between the naive kernels and FMM, which existed on the local machine, basically disappears.
 1VSZ is now slightly faster using the naive kernels, while 6VYB is slightly faster using FMM.
 
-Nevertheless, the gap reappears on H1N1, where FMM once again shows a massive speedup over the naive kernel, despite it using an old pre-split leaf-count configuration of $P = 10, \theta = 0.4, n_{leaf} 256$.
-The three results demonstrate again how FMM pays an upfront cost, that gets pays off massively once the problem becomes compute-bound.
+Nevertheless, the gap reappears on H1N1, where FMM once again shows a massive speedup over the naive kernel, despite it using an old pre-split leaf-count configuration.
+The three results demonstrate again how FMM pays an upfront cost, that pays off massively once the problem becomes compute-bound.
 I have to point out that I didn't manage to capture the CPU time for H1N1, which ran out of time within its 12-hour slot, of which the other stages only used 49 minutes.
-Even a conservative estimate of 11 hours would mean the naive kernels --- having taken 52 minutes --- are at least 12.5x faster, which really showcases how well GPUs can boost performance through sheer strength.
-Given that the speedup of the naive kernel for 1VSZ and 6YVB on the node A100 was 321x and 286x, I could have been that the CPU implementation would have taken multiple weeks to finish.
+Even a conservative estimate of 11 hours would mean the naive kernels --- having taken 52 minutes --- are at least 12.5x faster.
+Given that the speedup of the naive kernel for 1VSZ and 6YVB on the node A100 was roughly around 300x, I could have been that the CPU implementation would have taken multiple weeks to finish.
 To be fair, the low rank count of just 8, which I had to pick due to memory constraints, would have definitely hurt the CPU performance as well.
 Due to the lack of a CPU reference, I had to compare accuracy of the FMM with the naive kernel.
 Given that the naive kernel is the exact math, not an approximation, this should be perfectly fine comparison, which can be seen in Table~\ref{tab:energy-methods-cluster}.
@@ -367,9 +326,6 @@ In case of FMM, it is scales even better than the one dual GPU node.
 %        --dnf-limit 12 \
 %        --machine 'an A100 node of the TU Berlin HPC (Table~\ref{tab:test-systems})' \
 %        --machine-override 'H1N1=four H200 GPUs of the TU Berlin HPC (Table~\ref{tab:test-systems})' \
-%        --note 'H1N1=the FMM run was spread over two nodes and the naive run over one, but both produced the same surface and potential, their flux charges agreeing to $2.2\times10^{-12}$'
-
-
 % ------------------------------------------------------------------------
 %
 %  Regenerated with (from the repository root):
@@ -381,102 +337,21 @@ In case of FMM, it is scales even better than the one dual GPU node.
 %        "A100|2 GPUs|2 nodes=test5/scaling_6VYB_2node/scaling_2node.csv" \
 %        --tag energy_scaling_6vyb
 %
-%  Same five columns and the same x axis as figures/amgx_scaling_6vyb, so the
-%  two can be read against each other.
-%
-%  NOTE (Claude): the numbers, so you do not have to dig through the CSVs.
-%  Delete this block once the paragraph is written.
-%
-%  t_energy medians (s), pooled over both linear solvers -- the solve finishes
-%  before the energy stage starts, so it cannot reach it:
-%
-%                        RTX3080/4r   A100/4r   A100/16r   2 GPU   2 node
-%      FMM                   3.30       ----       1.49     1.27     1.19
-%      naive O(NM)          24.67       2.73       1.81     1.34     1.29
-%      CPU                    422       1015        545      540      482
-%      pipeline                96        208         89       85       85
-%
-%  1. It scales monotonically and does NOT invert across nodes -- the opposite
-%     of the AMG configuration in sec:evaluation-results-lin-eq-solver, which
-%     drops to 0.61x on two nodes. Two nodes is the FASTEST column in both GPU
-%     rows: naive 1.81 -> 1.34 -> 1.29 (1.40x), FMM 1.49 -> 1.27 -> 1.19
-%     (1.25x). The stage is per-rank work with a single reduction at the end,
-%     so the 6.10 us inter-node latency in tab:mpi-latency-table never bites.
-%     The gains are sub-linear because the host-side collection phase inside
-%     t_energy does not shrink with the GPU count.
-%  4. t_energy IS contaminated by the CPU -- it is one TOC around the whole
-%     stage, and phase 1 (collect_energy_inputs_fast, pb_class.cpp:3732, the
-%     host-side border_quad loop that gathers the flux points and surface
-%     triangles) is inside it and does not shrink with GPU count. But it does
-%     NOT invalidate the three A100 columns: they all run np=16 on the same
-%     mesh and the same partition, so phase 1 is the SAME constant in all
-%     three. Every A100-to-A100 difference in the figure is therefore already
-%     pure GPU time, and every A100-to-A100 ratio is a LOWER BOUND on the true
-%     GPU ratio -- subtracting a common positive offset from both sides can
-%     only increase it. Writing P for that offset, the 1 GPU -> 2 nodes ratio:
-%
-%         P [s]      0      0.2     0.4     0.6
-%         naive    1.40    1.47    1.58    1.75
-%         FMM      1.25    1.30    1.38    1.51
-%
-%     So the figure understates the GPU scaling; it never overstates it.
-%     What phase 1 DOES break is the two 4-rank columns against the 16-rank
-%     ones, where the rank count and the host both change. Do not read those
-%     two steps as GPU speedups.
-%
-%     P has not been measured on the cluster -- bench_sweep.py kept only the
-%     energy_method=0 REF log per folder, so there is no finer stdout to mine,
-%     and no cluster run was made with energy_dump set. It IS measurable
-%     locally right now, both methods at once, since the dump and the binary
-%     already exist:
-%       mpirun -n 4 src/fmm_replay test1/fmm_inputs \
-%           --mac 0.4 --order 11 --leaf 16 --tleaf 1024 --repeats 3 \
-%           --csv /tmp/phase2_6vyb.csv
-%     phase 1 = t_energy - replay total, and the FMM and naive rows must give
-%     the same P. That pins the local 4-rank column only.
-%
-%  5. THE TWO CLUSTER FIGURES DISAGREE ON 6VYB's FMM TIME, and both are right.
-%     They come from different sweeps, which ran different leaf pairs:
-%
-%       Fig energy-methods-cluster   0.3 / p9  / 16/1024   1.440 s
-%       Fig energy-scaling-6vyb      0.4 / p11 / 32/1024   1.486 s   (1 GPU)
-%
-%     Same molecule, same 16 ranks, same A100 -- 3% apart purely because of the
-%     configuration. Each table states its own, so neither figure is wrong, but
-%     a reader flipping between them sees two "FMM on an A100" numbers. Worth
-%     one sentence, or pick one sweep for both figures and regenerate.
-%
-%     The leaf pairs are deliberate, not stale: sweep "s" hardcodes them
-%     (bench_sweep.py, the "s" branch) and the table above it records the full
-%     4x6 grid they came from. They are the 16-RANK CLUSTER optima, which are
-%     NOT the 4-rank local ones -- the target points are distributed across
-%     ranks while the atom tree is replicated, so the rank count moves the
-%     optimum. The local 8/1024 pair measures 2.9% slower on the cluster.
-%     The scaling folders' own options.prm is misleading here: it says
-%     fmm_multipole_order = 10 and carries no leaf keys at all. It is inert --
-%     sweep "s" sets all four fmm_* keys per row, so those prm values never
-%     applied. The CSV columns are the authoritative record of what ran.
-%
-%  Two caveats the figure and table show rather than hide:
-%    - No FMM run exists at 4 ranks on the A100, so that bar is drawn as a
-%      marked gap. Nothing was interpolated.
-%    - The local FMM bar is n_leaf,src=16 where the cluster used 32 (same
-%      theta=0.4, P=11, n_leaf,tgt=1024). Hence the config column in the table.
-%
-%  Both panels are logarithmic: the naive panel spans 19x on its own, which is
-%  the 3080's FP64 rate rather than the topology, and on a linear axis the four
-%  A100 bars collapse into stubs. figures/energy_methods is log for the same
-%  reason.
 % ------------------------------------------------------------------------
 
 \subsection{Total Time}
 \label{evaluation-results-total-time}
 
 Lastly I want to showcase the speedup to the total time of the entire NGPB pipeline running on the local system.
-The CPU baseline was measures including the host-side optimizations.
+The CPU baseline was measured using LIS and the CPU energy calculation, and also included the host-side optimizations.
 The setting for the CUDA-enabled steps where picked from the best configurations of the previous results for the local system.
 That means all optimized runs used AMGX with the tuned configuration.
 For 1CCM I used the naive kernel, while for 6VYB and 1VSZ I used the best measured configurations found in \ref{sec:evaluation-results-fmm-parameters}.
+
+This comparison really highlights how impactful my optimizations were for 6VYB and 1VSZ.
+6VYB's total went from almost 10 minutes to roughly 1,2 minutes, a speedup of 7.94x.
+Unfortunately, the speedup for 1CCM is barely noticeable, despite using the much quicker naive kernels.
+This result shows that the more complex the molecule, the bigger the pay-off becomes.
 
 \input{figures/total_time}
 \input{figures/total_time_table}
@@ -484,9 +359,4 @@ For 1CCM I used the naive kernel, while for 6VYB and 1VSZ I used the best measur
 %
 %  Regenerated with (from the repository root):
 %    python3 scripts/plot_total_time.py
-%
-%  Unlike the other figures in this chapter this one does not come from a
-%  bench_sweep.py bench_runs.csv -- these runs were made after those sweeps and
-%  the raw per-run times live in figures/data/total_time_runs.csv, which is the
-%  script's input. Edit that file, not the generated .dat/.tex.
 % ------------------------------------------------------------------------

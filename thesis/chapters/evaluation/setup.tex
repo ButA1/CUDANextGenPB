@@ -145,6 +145,21 @@ This is done using two helper macros called TIC() and TOC(), which are portable 
 Those rough timings are enough to show whether an optimization is faster, since the computation time for the larger molecules is a lot longer than small timer randomness, or other run-to-run-variances.
 Unless a figure or table states otherwise, every timing reported in this chapter is the median of 3 repeated runs. 1CCM's short runtime makes it more susceptible to this noise, so I instead used 10 repeats for it.
 
+% NOTE (Claude): several tables/captions elsewhere (e.g. tab:energy_scaling_6vyb)
+% refer to two derived quantities, "t_energy" and "t_report_total_s", by their
+% CSV column name only -- nowhere is it said what they measure. Suggest
+% defining them once, here, e.g.:
+%   "Two derived quantities recur in the tables below. t_energy is the timer
+%   around the 'Compute energy' TOC() label alone, i.e. just the call into the
+%   selected energy algorithm (FMM, naive O(NM), or CPU), bounded by an
+%   MPI_Barrier on either side. t_report_total_s is the sum of every TOC()
+%   timer NGPB reports for a run -- mesh generation, surface construction,
+%   grid building, matrix assembly, the linear solve, energy, and any
+%   potential/epsilon export -- and is distinct from the external wall-clock
+%   time of the whole process, which also includes startup/shutdown overhead
+%   the TIC()/TOC() pairs don't cover."
+% Delete this comment once folded into your own wording.
+
 For more exact timings in the GPU-specific optimizations, I profiled the CUDA kernels using \texttt{ncu}, which runs them multiple times, eliminating runtime variances.
 Additionally it provides detailed information about their utilization of GPU resources and gives suggestions on how to optimize them. 
 I was able to simply wrap it around the \texttt{mpirun} command. 

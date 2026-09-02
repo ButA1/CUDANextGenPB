@@ -492,22 +492,12 @@ def build_caption_notes(datasets, default_machine, overrides, extra_fmm,
         reps = {m["n"] for m in ds["methods"].values() if not m["dnf"]}
         reps = reps.pop() if len(reps) == 1 else None
         if reps is not None and reps != nrep:
-            bits.append("%d run%s per method, not %d%s" % (
-                reps, "" if reps == 1 else "s", nrep,
-                " (hence no whiskers)" if reps == 1 else ""))
-        for key, m in ds["methods"].items():
-            if not m["dnf"]:
-                continue
-            label = dict((k, lbl) for k, _, lbl, _, _ in METHODS)[key]
-            floor = m.get("floor")
-            bits.append(
-                "the %s run did not finish -- it was killed by the %s job "
-                "limit with the energy stage still running, and the stages it "
-                "did report account for only %s of that, so its bar is a lower "
-                "bound of over %s and is drawn clipped at the top of the axis"
-                % (label, hours(dnf_limit_s) if dnf_limit_s else "job",
-                   hours(m.get("accounted", 0.0)),
-                   hours(floor) if floor else "the remainder"))
+            bits.append("%d run%s per method, not %d" % (
+                reps, "" if reps == 1 else "s", nrep))
+        # A DNF bar's clipping and lower bound are self-explanatory from the
+        # plot's own DNF arrow annotation; the hours-accounted-for arithmetic
+        # belongs in the prose discussing that run, not repeated in every
+        # caption that happens to include it.
         if notes.get(mol):
             bits.append(notes[mol])
         if bits:
@@ -627,9 +617,8 @@ DNFMARKS
 
 \caption[Energy stage cost by method]{\textbf{Cost of the energy stage on
     \energyMolecules{}.} Median wall time of the energy calculation stage on a
-    logarithmic axis; the number above each bar is that median in seconds. The
-    bars are the stock CPU path, the naive $O(NM)$ GPU sum and the
-    FMM, on the same discretisation.\energyMachine\energyCaveats}
+    logarithmic axis; the number above each bar is that median in
+    seconds.\energyMachine\energyCaveats}
 \label{fig:REFLABEL}
 \end{figure}
 """

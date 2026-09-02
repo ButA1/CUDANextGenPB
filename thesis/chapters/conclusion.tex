@@ -1,19 +1,19 @@
 \chapter{Conclusion}
 \label{sec:conclusion}
 
-In this thesis I demonstrated the speedup to NextGenPB, a FEM-based linear PBE solver, using Nvidia's CUDA API, making a project that was already focused on computational efficiency even faster, by taking advantage of the high-performance parallel compute capability of GPUs.
+In this thesis I demonstrated the speedup of NextGenPB, a FEM-based linear PBE solver, using Nvidia's CUDA API, making a project that was already focused on computational efficiency even faster, by taking advantage of the high-performance parallel compute capability of GPUs.
 The CUDA optimizations were applied to the most computationally expensive steps of NextGenPB, which were the solving of the linear equation and the energy calculation.
 The optimizations have been woven seamlessly into the base version, without the disruption of the normal operation.
-The can be enabled and configured through the same PRM files, that NextGenPB already uses.
+They can be enabled and configured through the same PRM files that NextGenPB already uses.
 
 For the linear solve, I used Nvidia's AMGX library for iterative linear solvers, enabling the LPBE to be solved on one or more GPUs.
 The energy calculation consisted of pairwise particle interactions, which are more typical of BEM-based methods.
 Here I implemented naive kernels for the individual energy terms computed by NextGenPB. 
-It is suitable for computing the energy for smaller molecules, which are not bound by the compute capability of the hardware.
-For medium and large molecules like 6VYB and H1N1, I also implemented a FFM, based on a linear bounding volume hierarchy and dual-tree-traversal, using spherical harmonics.
-It provided a massive uplift over the naive kernels in compute bound situations.
+It is suitable for computing the energy for smaller molecules, which do not exhaust the compute capability of the hardware.
+For medium and large molecules like 6VYB and H1N1, I also implemented an FMM, based on a linear bounding volume hierarchy and dual-tree-traversal, using spherical harmonics.
+It provided a strong uplift over the naive kernels in compute-bound situations.
 These optimizations make it possible to compute the electrostatic potential of the H1N1 capsid on just a single node of the TU HPC.
-It also completely inverts the optimization priority of the entire  NextGenPB-pipeline, which is not burdened by the other steps.
+It also completely inverts the optimization priority of the entire NextGenPB pipeline, which is now burdened by the other steps.
 However, those would involve optimizing other libraries rather than NextGenPB itself.
 
 \section{Linear Solver}
@@ -21,17 +21,17 @@ However, those would involve optimizing other libraries rather than NextGenPB it
 
 On a system with a single GPU, AMGX has presented itself as the perfect fix for NextGenPB. 
 It outperformed LIS especially at larger problem sizes, yielding up to a 10x performance uplift.
-I found that my (sub-)gather approach was much more memory efficient that the methods described in the admittedly very outdated AMGX Reference.
+I found that my (sub-)gather approach was much more memory efficient than the methods described in the admittedly very outdated AMGX Reference.
 It allowed larger molecules like 6VYB to fit in the 10GB of VRAM of an RTX 3080.
 However, this mechanism is done on the host side, which took longer than the actual solve on the cluster.
 How much of that host time was genuinely due to the gathering remained unclear.
 
 I developed two configurations. 
-One was tuned for memory efficiency using preconditioned CG with Block-Jacobi preconditioning, which despite needing a lot of iterations, still managed to be quite fast.
+One was tuned for memory efficiency using preconditioned CG with Block-Jacobi preconditioning, which, despite needing a lot of iterations, still managed to be quite fast.
 I have selected it to be the default AMGX configuration.
-Another one used AMG preconditioning, reducing the number iterations drastically, but increasing their cost.
-This configuration managed to be even quicker than the default one.
-To allow for future performance tuning, I added a \snakecase{amgx_config} parameter to the PRM file, which accepts the path no any arbitrary AMGX configuration.
+Another one used AMG preconditioning, reducing the number of iterations drastically, but increasing their cost.
+This configuration was even quicker than the default one.
+To allow for future performance tuning, I added a \snakecase{amgx_config} parameter to the PRM file, which accepts the path to any arbitrary AMGX configuration.
 
 It scaled well with better hardware, and across multiple GPUs on a single cluster node.
 When it came to two nodes however, the communication overhead either negated any performance benefits or even degraded performance.
@@ -42,33 +42,33 @@ This depended on the choice of preconditioner, as the degradation occurred with 
 
 The naive kernel brought a massive speedup over the original CPU implementation of the energy calculation, ranging from 7.7x up to 24.6x using an RTX 3080.
 The speedup increased even further to around 300x on an A100.
-When it is not held back by the FP64 performance of the hardware, it managed to outperform the much more sophisticated FMM
+When it is not held back by the FP64 performance of the hardware, it outperformed the much more sophisticated FMM.
 Such was the case for 1CCM on the RTX 3080, and even 1VSZ on the A100, though these took less than a second in both cases.
-Nevertheless, once the compute-bound set in on the FMM brought massive performance gains.
-For 6VYB running on the RTX 3080 it decreased the time by 7.5x compared to the naive kernel, and 127x compared to the CPU. 
+Nevertheless, once the compute-bound regime set in, the FMM brought huge performance gains.
+For 6VYB running on the RTX 3080, it decreased the time by 7.5x compared to the naive kernel, and 127x compared to the CPU.
 It also managed a 13x time reduction for H1N1 capsid running four H200 GPUs, all while honoring the baseline accuracy that NextGenPB inherently provides.
-This makes a mixed precision approach obsolete, which would compromise the accuracy target.
+This makes a mixed-precision approach obsolete, which would compromise the accuracy target.
 
 Both the naive kernels and FMM scale monotonically on more nodes and GPUs, since they are unaffected by communication latency and bandwidth.
-One positive side effect the optimizations brought is that NextGenPB can now be used on fewer nodes to compute the PBE for medium sized and even large molecules, coincidentally reducing queue times.
+One positive side effect the optimizations brought is that NextGenPB can now be used on fewer nodes to compute the PBE for medium-sized and even large molecules, coincidentally reducing queue times.
 
-One important discovery was the separation of the tree leaf size, as number and density of source- and target particles in case of NextGenPB was wildly different.
+One important discovery was the separation of the tree leaf size, as number and density of source- and target particles in the case of NextGenPB were wildly different.
 Before, I used a single leaf size for both trees, which resulted in very different geometric leaf sizes.
-The idea ratio between the source- and target tree leaf sizes was not a perfect 50\%, being offset by various factors, and making the search for a generally optimal configuration difficult.
+The ideal ratio between the source- and target tree leaf sizes was not a perfect 50\%, being offset by various factors, and making the search for a generally optimal configuration difficult.
 I recommend the settings of $P = 11, \theta = 0.4, n_{leaf,src} = 16, n_{leaf,tgt} = 1024$ for gaming/semi-professional GPUs, and $P = 9, \theta = 0.3, n_{leaf,src} = 32, n_{leaf,tgt} = 1024$ for workstation GPUs.
 
-\section{Host Side optimizations}
+\section{Host-Side Optimizations}
 
-Although not the main focus on the thesis, I also made a handful of host-size optimizations, which improved memory efficiency and speed.
-Most of these were made to one of NextGenPB's main dependencies BIMPP.
-Particularly the ghost value exchange was sped up massively, reducing the time taken for the construction of the equation's right-hand-side to 10\% of its original time.
+Although not the main focus of the thesis, I also made a handful of host-side optimizations, which improved memory efficiency and speed.
+Most of these were made to one of NextGenPB's main dependency BIMPP.
+Particularly, the ghost value exchange was sped up massively, reducing the time taken for the construction of the equation's right-hand side to 10\% of its original time.
 
 \section{Outlook}
 
 I believe that further major optimizations to the linear solve and the energy calculation are not necessary.
 In order for the entire NextGenPB pipeline to take advantage of the GPU, its libraries need to be adapted, particularly NanoShaper, p4est and BIMPP.
-A branch of NanoShaper with GPU support exist in the official repo, although in an unknown state; presumably unfinished, as there is no release for it.
+A branch of NanoShaper with GPU support exists in the official repo, although in an unknown state; presumably unfinished, as there is no release for it.
 Supposedly there also exists a way to use p4est on the GPU, although it is not official.
 BIMPP is already in need of major optimizations, both in terms of performance, as well as memory.
 The memory scaling issue is a known problem, and is one of the main factors prohibiting NextGenPB from running on systems with low RAM capacity.
-Additionally, the authors of NextGenPB made it clear that they intent to move onto solving the non-linear PBE, so it remains to be seen how much the architecture of NextGenPB would change.
+Additionally, the authors of NextGenPB made it clear that they intend to move on to solving the non-linear PBE, so it remains to be seen how much the architecture of NextGenPB would change.
