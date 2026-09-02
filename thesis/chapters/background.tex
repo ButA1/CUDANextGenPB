@@ -1,11 +1,11 @@
 \chapter{Background}
 \label{sec:background}
 
-In this chapter I want to cover the scientific as well as the technical background. 
-I will first start with an introduction to the Poisson Boltzmann Equation and its linearization.
+In this chapter, I want to cover the scientific as well as the technical background. 
+I will first start with an introduction to the Poisson-Boltzmann equation and its linearization.
 Then I will give an overview of MPI and CUDA before going over Sparse Matrices and Linear Solvers.
 
-\section{Poisson Boltzmann Equation}
+\section{Poisson-Boltzmann Equation}
 \label{sec:background-poisson-boltzmann-equation}
 
 The PBE is an important mathematical model for describing electrostatic interactions at the molecular level. 
@@ -16,7 +16,7 @@ A dielectric medium is an electrical insulator that becomes polarized in respons
 As an example, the PBE can be used to calculate the electrostatic potential around a viral protein solvated in an aqueous electrolyte.
 
 I will start out explaining the PBE in the same way the authors of NextGenPB \cite{diflorio2025nextgenpb} did, by defining the bounded domain $D$.
-It consists of the molecule $\Omega_m$, the solvent domain $\Omega_s$ and the interface or surface between both subdomains $\Gamma$.
+It consists of the molecule $\Omega_m$, the solvent domain $\Omega_s$, and the interface or surface between both subdomains $\Gamma$.
 The latter is formed by modeling the atoms of the molecule as spheres, which may overlap, as can be seen in Figure~\ref{fig:domain-schematic}.
 \begin{figure}[htbp]
     \centering
@@ -24,7 +24,7 @@ The latter is formed by modeling the atoms of the molecule as spheres, which may
     \caption[Mathematical model of a solvated biomolecule]{Mathematical model of a solvated biomolecule: interior (molecule) domain $\Omega_m$, exterior (solvent) domain $\Omega_s$, and the interface $\Gamma$ (solvent excluded surface) separating them, all enclosed within the bounded domain $D$. Own illustration.}
     \label{fig:domain-schematic}
 \end{figure}
-The ability for a medium to be polarized is measured through the dielectric permittivity $\varepsilon_{r}$, which is typically given relative to the vacuum permittivity $\varepsilon_0$. 
+The ability of a medium to be polarized is measured through the dielectric permittivity $\varepsilon_{r}$, which is typically given relative to the vacuum permittivity $\varepsilon_0$. 
 The change in dielectric permittivity between the molecule and solvent can be modeled as a step function:
 \begin{equation}
     \varepsilon(\mathbf{r}) =
@@ -35,7 +35,7 @@ The change in dielectric permittivity between the molecule and solvent can be mo
     \qquad \mathbf{r} \in D
     \label{eq:dielectric-step-function}
 \end{equation}
-where and $\varepsilon_{r,m}$ and $\varepsilon_{r,s}$ are the relative permittivities (also called the dielectric constants) of the molecule and solvent.
+where $\varepsilon_{r,m}$ and $\varepsilon_{r,s}$ are the relative permittivities (also called the dielectric constants) of the molecule and solvent.
 
 In its basic form, the PBE essentially says that the divergence of the gradient of the electrostatic potential $\phi(\mathbf{r})$ within the molecule and the solvent is equal to the negative of the total charge density arising from the fixed molecular charges $\rho_m$ and the mobile ions in the solvent, $\rho_s$:
 \begin{equation}
@@ -48,18 +48,18 @@ Multiplied with the permittivity, it becomes the electric flux density (also cal
 Taking the divergence of it directly yields the charge density, per Gauss's law.
 To summarize: wherever the electric flux density diverges, the charge density is high, and vice versa.
 
-The charge density in the molecule is represented of fixed charges, that are $N$ point charges $q_i$ at position $\mathbf{r}_i$:
+The charge density in the molecule consists of $N$ fixed point charges $q_i$ at positions $\mathbf{r}_i$:
 \begin{equation}
     \rho_m(\mathbf{r}) = \sum_{i=1}^N q_i \delta(\mathbf{r} - \mathbf{r}_i)
     \label{eq:charge-density-molecule}
 \end{equation}
-The nonlinearity arises because these local concentrations depends exponentially on the electrostatic potential through the Boltzmann distribution.
-The charge density of the solvent consists of the valence and bulk ions concentrations, $z_j$ and $\rho_j^b$, of $J$ different ionic species multiplied by the Boltzmann weight:
+The charge density of the solvent consists of the valences and bulk concentrations of the ions, $z_j$ and $\rho_j^b$, of $J$ different ionic species multiplied by the Boltzmann weight:
 \begin{equation}
     \rho_s(\mathbf{r}) = \sum_{j=1}^J e z_j \rho_j^b \exp\left[-\frac{e z_j \phi(\mathbf{r})}{K_b T}\right] \chi_{\Omega_s}(\mathbf{r})
     \label{eq:charge-density-solvent}
 \end{equation}
-$K_b$ is the Boltzmann constant, $T$ is the temperature and $\chi_{\Omega_s}$ is a characteristic function, which equals 1 when $r \in \Omega_s$ and is otherwise 0.
+$K_b$ is the Boltzmann constant, $T$ is the temperature, and $\chi_{\Omega_s}$ is a characteristic function, which equals 1 when $r \in \Omega_s$ and is otherwise 0.
+The nonlinearity arises because these local concentrations depend exponentially on the electrostatic potential through the Boltzmann distribution.
 Putting it all together yields the full PBE:
 \begin{equation}
     \nabla \cdot \left( \varepsilon(\mathbf{r}) \nabla \phi(\mathbf{r}) \right) = - \sum_{i=1}^N q_i \delta(\mathbf{r} - \mathbf{r}_i) - \sum_{j=1}^J e z_j \rho_j^b \exp\left[-\frac{e z_j \phi(\mathbf{r})}{K_b T}\right] \chi_{\Omega_s}(\mathbf{r})
@@ -91,21 +91,21 @@ There are two main types of solvers: the grid-based or finite element methods (F
 
 FEM discretize the entire domain and thus do not need to reformulate the PBE, nor are they restricted to the LPBE.
 They necessarily compute the electrostatic potential for the entire domain $D$, and not just on the surface.
-Naturally their ability to capture the surface depends on the resolution of the grid, measured in Ångström.
-Increase in accuracy is also non-monotonic due to grid-position artifacts.
+Naturally, their ability to capture the surface depends on the resolution of the grid, measured in Ångström.
+The increase in accuracy is also non-monotonic due to grid-position artifacts.
 Using a uniform grid is often wasteful as high resolution is not needed in the solvent domain $\Omega_s$.
 For this reason, these solvers employ de-refinement of the grid to capture the surface $\Gamma$ and the molecule domain $\Omega_m$, while keeping resource utilization as low as possible.
 Their linear equation contains a sparse matrix, which is a differential operator.
 The far-field boundary condition is often satisfied approximately.
 
-BEM reformulate the LPBE as boundary integral at the surface $\Gamma$ by applying Green's identities \cite{juffer1991electric}, which reformulate a volume integral into a surface integral, and discretize over that.
+BEM reformulate the LPBE as a boundary integral at the surface $\Gamma$ by applying Green's identities \cite{juffer1991electric}, which reformulate a volume integral into a surface integral, and discretize over that.
 Thus they can only compute the electrostatic potential at the surface $\Gamma$, but they also reduce the memory utilization when compared to FEM.
 They are also forced to use the LPBE, since the reformulation depends on it.
 Their accuracy, which depends on the number of triangles used to discretize the surface, increases monotonically.
 They solve a linear system with a dense matrix, which is an integral operator.
 The far-field boundary condition is exactly satisfied at spatial infinity.
 
-Solvers need to avoid the so-called self-energy singularity, which is an artifact of the point charge model, where the electrostatic potential explodes when it is evaluated at the position of the charge.
+Solvers need to avoid the so-called self-energy singularity, which is an artifact of the point-charge model, where the electrostatic potential explodes when it is evaluated at the position of the charge.
 The potential field generated by a point charge $q$ can be calculated using the Coulomb potential Eq.~\eqref{eq:coulomb-potential}.
 Looking at that formula, one can identify the problem: if $\mathbf{r}_i$ in the $\mathbf{r} - \mathbf{r}_i$ term equals $\mathbf{r}$, the divisor drops to 0 and the potential diverges to infinity.
 \begin{equation}
@@ -115,43 +115,43 @@ Looking at that formula, one can identify the problem: if $\mathbf{r}_i$ in the 
 BEM avoid it intrinsically, since they only evaluate the potential at the surface.
 FEM need to come up with different ways of getting around it.
 Many implementations simply run the simulation twice with different parameters to compute the ``grid energies'' and use them to cancel out the self-energies.
-Another way is to replace the point charge model with finite-width Gaussians.
-NextGenPB employs a new strategy that computes each electrostatic contribution individually, each avoiding the self-energy singularity.
+Another way is to replace the point-charge model with finite-width Gaussians.
+NextGenPB employs a new strategy that computes each electrostatic contribution individually, thereby avoiding the self-energy singularity.
 
 \section{Message Passing Interface}
 \label{sec:background-mpi}
 
 MPI is an API standard for data communication between processes, available for multiple different programming languages \cite{mpi_forum_standard}.
 It is not a single library.
-Rather it has many different versions and implementations of standard specifications set by the MPI Forum, which is an open consortium of vendors, researchers, and national labs.
-It is conceptualized for clusters with multiple compute nodes, and distributed memory architectures, but it is very flexible and works with all kinds of different architectures, even heterogeneous ones.
+Rather, it has many different versions and implementations of standard specifications set by the MPI Forum, which is an open consortium of vendors, researchers, and national labs.
+It is conceptualized for clusters with multiple compute nodes and distributed-memory architectures, but it is very flexible and works with all kinds of different architectures, even heterogeneous ones.
 On a single machine, it can still provide quasi-multicore parallelization, though each rank's memory is still treated as separate.
-For this use case another API called OpenMP is the better choice \cite{openmp_spec}.
+For this use case, another API called OpenMP is the better choice \cite{openmp_spec}.
 
 Programs utilizing MPI need to be compiled with the language-appropriate compiler.
 In the case of C++ this is either \texttt{mpiCC} or \texttt{mpicxx}.
 Running these programs also requires the use of the \texttt{mpirun} or \texttt{mpiexec} command.
 Processes are called ranks, and their number can be specified by passing the \texttt{-n} flag when launching a program.
 The total number of ranks is called the ``world size''.
-In a cluster, multiple ranks can run on each node in the same sense as the single machine environment.
+In a cluster, multiple ranks can run on each node in the same sense as in the single-machine environment.
 Communication between them is done through specialized functions and types provided by an MPI library.
 
 \section{CUDA}
 \label{sec:background-cuda}
 
-At this point it is common knowledge that GPUs offer many more, albeit less capable, compute units than CPUs.
-Intended for rendering 3D graphics, GPUs are specialized in handling many vector and matrix operations in parallel.
+At this point, it is common knowledge that GPUs offer many more, albeit less capable, compute units than CPUs.
+Intended for rendering 3D graphics, GPUs specialize in handling many vector and matrix operations in parallel.
 Nvidia's CUDA API was born out of the desire to leverage the highly parallel architecture for applications outside of graphics rendering.
 Stanford researcher Ian Buck exploited graphics APIs to do scientific math calculations, before being picked up by Nvidia in 2004 to work on what would become CUDA \cite{nemire2015gpuevolution}.
 However, it was not just the software that changed.
 GPU architectures themselves changed as well to handle general-purpose compute rather than focusing solely on graphics.
-After its introduction in 2007, CUDA quickly became an important part of Nvidia's business strategy, as it became dominant in the space of massively-parallel computing.
+After its introduction in 2007, CUDA quickly became an important part of Nvidia's business strategy, as it became dominant in the space of massively parallel computing.
 
 It is important to point out that CUDA is a proprietary API, which only works with Nvidia's GPUs.
-Luckily this applies to both gaming (or consumer grade) and workstation GPUs, although there are slight differences.
+Luckily, this applies to both gaming (or consumer-grade) and workstation GPUs, although there are slight differences.
 General-purpose GPU computing is not a silver bullet.
 A problem needs to be parallelizable to really take advantage of the architecture.
-Strictly sequential problems, and those that are very limited in how much they can be parallelized, are still better served on the CPU. 
+Strictly sequential problems and those that are very limited in how much they can be parallelized are still better served on the CPU. 
 
 \subsection{GPU Architecture}
 \label{sec:background-cuda-gpu-architecture}
@@ -162,17 +162,17 @@ The Ampere GPU architecture \cite{nvidia_ampere_ga102_whitepaper} is organized i
 SMs (Figure~\ref{fig:ga10x-sm}) are then partitioned into processing blocks, each containing multiple CUDA cores, and a register file.
 Each SM also has one L1-Cache and FP64 units, which are absent from the diagram.
 
-Even among the same architecture generation the number of FP64 units varies drastically between chips intended for workstations and those intended for gaming.
+Even among the same architecture generation, the number of FP64 units varies drastically between chips intended for workstations and those intended for gaming.
 While the GA102 chip intended for gaming only has two FP64 units per SM, the ``full scale'' GA100 chip, the compute-focused sibling chip within the same Ampere generation, features 32.
-This results in a FP32 to FP64 performance ratio of 2:1 on GA100.
-The GA102 features double the amount of FP32 cores, which does mean its FP32 performance is higher than GA100, but also exacerbates the performance ratio even further to 64:1.
+This results in an FP32-to-FP64 performance ratio of 2:1 on GA100.
+The GA102 features double the number of FP32 cores, which does mean its FP32 performance is higher than that of the GA100, but also exacerbates the performance ratio even further to 64:1.
 This is a cost-saving measure, as video games, unlike scientific applications, rarely need FP64 operations.
 However, Nvidia also markets GPUs like the RTX Pro series as workstation GPUs, even though they are based on the gaming chip, and thus have the same cut-down FP64 performance.
 
 Video memory, or VRAM, is absent from the GPU chip, instead being placed around it on the PCB and connected through the memory controllers.
-Ordered by descending transfer speed, the hierarchy of the memory is as follows: First comes the register file of the processing blocks, then the L1-Cache of the SM, then the L2-Cache and finally the VRAM.
+Ordered by descending transfer speed, the hierarchy of the memory is as follows: First comes the register file of the processing blocks, then the L1-Cache of the SM, then the L2-Cache, and finally the VRAM.
 
-From the standpoint of the CUDA API, the architecture appears slightly differently.
+From the standpoint of the CUDA API, the architecture appears slightly different.
 The L2-Cache and VRAM become opaque, and are treated as one ``global memory''.
 The SM is abstracted as a ``block'' and its L1-Cache as the ``shared memory''.
 
@@ -194,7 +194,7 @@ The SM is abstracted as a ``block'' and its L1-Cache as the ``shared memory''.
 \subsection{Basic Code Structure}
 \label{sec:background-cuda-basic-code-structure}
 
-In the context of the API the CPU and GPU are referred to as the host and the device.
+In the context of the API, the CPU and GPU are referred to as the host and the device.
 The API allows users to write custom programs called kernels, which are launched on one or more devices.
 Device memory is separate from the host memory.
 Due to this, host data cannot be directly passed to the kernels, and kernels cannot return values directly, so data needs to be copied back and forth between them.
@@ -203,7 +203,7 @@ The basic flow of a CUDA program is typically structured like this \cite{nvidia_
     \item Allocation of device memory, both for input and output
     \item Copying of host memory into the allocated device input memory
     \item Launching of the kernel
-    \item Copying of the device output memory
+    \item Copying of the device output memory back to the host
 \end{itemize}
 Data in the allocated device memory lives primarily in the global memory.
 Kernels are launched as a number of threads per block, with all blocks in total forming the grid.
@@ -218,13 +218,13 @@ The host code is compiled using the C++ compiler, while the device code is compi
 Though CUDA and MPI each use their own compilers, combining CUDA with MPI is possible with a couple of extra steps.
 A guide on the RWTH web page \cite{rwth_cuda} details that one needs to compile the CUDA source files to object files using \texttt{nvcc} first, before linking them during the compilation of the remaining code with \texttt{mpicxx}.
 The necessary CUDA libraries need to be linked as well.
-This not only enables parallelism on the CPU side, but also scaling across multiple compute nodes, unlocking the power of GPU enabled computer clusters.
+This not only enables parallelism on the CPU side, but also scaling across multiple compute nodes, unlocking the power of GPU-enabled computer clusters.
 % omitting OpenMP because its not relevant to my thesis
 
 \subsection{Library Ecosystem}
 \label{sec:background-cuda-libraries}
 
-Nvidia offers a whole suite of libraries based on CUDA, from optimized low-level templates, to high-level implementations.
+Nvidia offers a whole suite of libraries based on CUDA, from optimized low-level templates to high-level implementations.
 Many of those come packaged with the CUDA toolset, and do not have to be installed separately.
 While using those does not require writing custom kernels for the functionality they cover, it does not eliminate the need to write custom kernels outright.
 % TODO dunno kinda ran out of steam here
@@ -233,15 +233,15 @@ While using those does not require writing custom kernels for the functionality 
 \label{sec:background-cuda-performance-evaluation}
 
 GPUs have essentially two major performance limits, those being the compute and memory throughput.
-People often think of theoretical peak performance as just the compute throughput in the measure of floating point operations per second, or $FLOP/s$, but performance can only be realized if the data can be supplied fast enough to saturate it.
+People often think of theoretical peak performance as just the compute throughput in the measure of floating-point operations per second, or $FLOP/s$, but performance can only be realized if the data can be supplied fast enough to saturate it.
 This is the memory throughput and it is measured in $Bytes/s$.
-When plotting both metrics against each other, it forms the ``roofline model'' seen in Figure~\ref{fig:roofline-model}, which symbolizes the limit on the theoretical performance.
+Plotting both metrics against each other yields the ``roofline model'' seen in Figure~\ref{fig:roofline-model}, which symbolizes the limit on the theoretical performance.
 The exact values of the diagram vary with the capability of the GPU, but the shape always stays the same.
-Kernels always lie underneath the roofline and its position gives us an indication of how well optimized it is, and what its main limit is.
-Kernels to the left of the ridge are bound by memory-throughput, while kernels to the right are bound by the compute-throughput.
+A kernel always lies underneath the roofline, and its position gives us an indication of how well optimized it is and what its main limit is.
+Kernels to the left of the ridge are bound by memory throughput, while kernels to the right are bound by compute throughput.
 The closer a kernel is to the roofline, the more optimized it is.
 
-The roofline, as well as many more performance metrics, can be easily evaluated thanks to Nsight Compute software (NCU), Nvidia's own profiler.
+The roofline, as well as many more performance metrics, can be easily evaluated thanks to the Nsight Compute software (NCU), Nvidia's own profiler.
 To record a profile, one must simply run the application through the \texttt{ncu} command line tool.
 It automatically recognizes the CUDA kernels, but there are also options to flag which kernels should be profiled inside the code.
 The profiles can then be inspected in the GUI application.
@@ -256,7 +256,7 @@ The profiles can then be inspected in the GUI application.
 \section{Sparse Matrices}
 \label{sec:background-sparse-matrices}
 
-Oftentimes matrices describing 2D or 3D systems have many zero-entries in them.
+Oftentimes matrices describing 2D or 3D systems have many zero entries in them.
 In a dense matrix all of the values are stored, meaning those zeroes contribute to the memory footprint.
 This severely limits the matrix size that could realistically be computed.
 Sparse matrices mitigate this problem by storing only non-zero values.
@@ -266,7 +266,7 @@ One easily modifiable type is the dictionary of keys (DOK), which stores the non
 Entries missing from the dictionary are implicitly considered 0.
 Since they are implemented using hash tables or maps, they have some amount of memory overhead, and the way they store their values is inefficient for matrix multiplications.
 
-Conversely, the Compressed Sparse Row format utilizes 3 arrays: column indices and values with the length of the non-zero-values (NNZ), and row offsets with the length equal to the number of rows plus one.
+Conversely, the Compressed Sparse Row format utilizes 3 arrays: column indices and values with length equal to the number of non-zero values (NNZ), and row offsets with length equal to the number of rows plus one.
 Figure~\ref{fig:csr-format} shows an example of a small $4\times4$ sparse matrix and its corresponding CSR representation.
 The \texttt{values} array stores the non-zero entries in row-major order, and \snakecase{col_idx} stores the column each of those entries belongs to.
 \snakecase{row_offsets} then stores, for each row, the index into \texttt{values}/\snakecase{col_idx} at which that row's entries begin, with a final trailing entry equal to NNZ so that the length of any row can be computed as \snakecase{row_offsets[i+1] - row_offsets[i]}.
@@ -283,15 +283,15 @@ Since \snakecase{row_offsets} depends on the number of values per row, it needs 
 \section{Linear Equation Solvers}
 \label{sec:background-linear-eq-solvers}
 
-In this section I want to go over the different types of methods for solving linear equations in the form of $Ax = b$, where $A$ is a square matrix, and $x$ and $b$ are vectors.
-$b$ is commonly referred to as the right-hand side (RHS), which is known, as well as the matrix $A$.
+In this section, I want to go over the different types of methods for solving linear equations in the form of $Ax = b$, where $A$ is a square matrix, and $x$ and $b$ are vectors.
+$b$ is commonly referred to as the right-hand side (RHS); it is known, as is the matrix $A$.
 The solvers compute the vector $x$.
 
 \subsection{Direct Solvers}
 \label{sec:background-linear-eq-solvers-direct-solvers}
 
 One main type of solver is the direct solver.
-They compute the exact solution in a predictable sequence of steps.
+Direct solvers compute the exact solution in a predictable sequence of steps.
 They utilize methods like LU- or Cholesky decomposition to break the matrix $A$ down into triangular matrix components in order to simplify the computation.
 
 They have one very big downside though: high memory usage.
@@ -303,15 +303,15 @@ Direct solvers are mainly used for smaller or medium-sized problems.
 \label{sec:background-linear-eq-solvers-iterative-solvers}
 
 The other main type of solver is the iterative solver.
-Their basic idea is to start with an approximation and converge toward the solution with each iteration, until the desired accuracy or residual error is reached.
+The basic idea of iterative solvers is to start with an approximation and converge toward the solution with each iteration, until the desired accuracy or residual error is reached.
 
 In exact arithmetic, accuracy does not depend on the choice of iterative solver --- it only influences the number of iterations needed. In finite precision this loosens somewhat, since some methods are more susceptible to rounding-error accumulation than others \cite{saad2003iterative}.
 Naturally their performance is governed by the number of iterations needed multiplied by the time each iteration takes.
-Although they do not provide an exact solution like the direct solvers, they utilize a lot less memory, needing little more, or with some methods, no extra memory other than the original matrix itself.
+Although they do not provide an exact solution like the direct solvers, they utilize a lot less memory, needing little or --- with some methods --- no extra memory beyond the original matrix itself.
 
 \subsubsection{Krylov Methods}
 
-The largest family of iterative solver methods is the so-called Krylov methods, which use the name-giving Krylov subspace to approximate the solution \cite{anzt2015gpukrylov}.
+The largest family of iterative solver methods comprises the so-called Krylov methods, which use the name-giving Krylov subspace to approximate the solution \cite{anzt2015gpukrylov}.
 With a starting vector $x_0$ they compute the initial residual $r_0$ with:
 \begin{equation}
     r_0 = b - A x_0
@@ -323,9 +323,8 @@ This is written using the \emph{span} of that set of vectors, which denotes the 
     \mathcal{K}_i(A, r_0) = \mathrm{span}\{r_0, A r_0, A^2 r_0, \dots, A^{i-1} r_0\}
     \label{eq:krylov-subspace}
 \end{equation}
-Within this subspace, they look for a vector $z_i$ that is added to the previous guess $x_i$.
-This is then used to compute the next guess $x_{i+1}$.
-It continues these steps until $r_i$ is equal to or less than the target residual.
+Within this subspace, they look for a vector $z_i$ that is added to the previous guess $x_i$, resulting in the next guess $x_{i+1}$.
+They continue these steps until $r_i$ is equal to or less than the target residual.
 It is proven that outside of rounding errors, this method terminates in a finite number of steps \cite{saad2003iterative}.
 
 Two of the most well-known Krylov methods are conjugate gradient (CG) and generalized minimal residual (GMRES).
@@ -334,13 +333,13 @@ Luckily, the differential operators of FEM solvers fall exactly into that catego
 GMRES works on general systems, but produces greater memory overhead, because it needs to store the Arnoldi basis.
 The memory overhead can be reduced through restart parameters.
 
-Traditional Krylov methods suffer from a strong-scaling wall, due to a global reduction step present at either the construction of the Krylov space, or computation of $z_i$.
+Traditional Krylov methods suffer from a strong-scaling wall, due to a global reduction step present at either the construction of the Krylov space or the computation of $z_i$.
 For this purpose there exist so-called ``communication-avoiding'' Krylov methods \cite{hoemmen2010communication, cornelis2018pipelined}.
 
 \subsubsection{Jacobi Method}
 
 One well-known, non-Krylov method is the Jacobi method.
-It starts out by decomposing the matrix $A$ into a diagonal matrix $D$, a lower triangular matrix $L$ and an upper triangular matrix $U$.
+It starts out by decomposing the matrix $A$ into a diagonal matrix $D$, a lower triangular matrix $L$, and an upper triangular matrix $U$.
 \begin{equation}
     A = D + L + U
     \label{eq:jacobi-decomp}
@@ -368,5 +367,5 @@ The basic idea is essentially to bring the matrix $M^{-1}A$ closer to the identi
 It is the ``ideal'' matrix to strive toward, since it converges immediately.
 For example in Krylov methods, the initial residual would be $r_0=b-Ix_0=b-x_0=b$ assuming that the initial guess $x_0$ is 0.
 The subsequent Krylov space would collapse into $\mathrm{span}\{r_0\} = \mathrm{span}\{b\} = b$, which is the final solution.
-Interestingly enough, the perfect preconditioner in theory would be the $A$ itself, since $AA^{-1}=I$.
+Interestingly enough, the perfect preconditioner in theory would be $A$ itself, since $AA^{-1}=I$.
 Unfortunately, computing its inversion would be just as hard as computing the system using no preconditioner at all.

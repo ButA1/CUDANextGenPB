@@ -2,6 +2,21 @@
 
 \chapter*{Zusammenfassung}
 
-% TODO: Deutsche Zusammenfassung kommt hier hin.
+NextGenPB ist ein Finite-Elemente-basierter Löser für die lineare Poisson-Boltzmann-Gleichung mit Fokus auf Recheneffizienz, der auf das Hochleistungsrechnen ausgerichtet ist, GPUs jedoch bislang nicht nutzt, um die Leistung noch weiter zu steigern.
+In dieser Arbeit habe ich verschiedene Techniken eingesetzt, um ihn mit Nvidias CUDA-API zu beschleunigen.
+Der Schwerpunkt lag auf der Lösung des linearen Gleichungssystems sowie auf der Energieberechnung.
+Einige zusätzliche hostseitige Optimierungen verringerten die Gesamtlaufzeit weiter und verbesserten zugleich die Speichereffizienz.
+
+Für das lineare Gleichungssystem habe ich Nvidias Löser-Bibliothek AMGX mit großem Erfolg eingesetzt und dabei Beschleunigungen von bis zu 10x erreicht.
+Ich habe zwei Konfigurationen erstellt, eine mit Fokus auf Speichereffizienz und eine mit Fokus auf Geschwindigkeit; beide übertrafen LIS bei Weitem.
+Dabei zeigte sich, dass AMGX über mehrere GPUs innerhalb eines Knotens gut skaliert, nicht jedoch über mehrere Knoten hinweg, wo der Kommunikationsaufwand die Gewinne zunichtemachte oder sogar umkehrte.
+
+Für die Energieberechnung habe ich eine naive Implementierung und eine schnelle Multipolmethode entwickelt.
+Die naive Implementierung brachte für die Energieberechnung des Moleküls 1VSZ eine enorme Beschleunigung von 24,6x auf einer RTX 3080 und von 321x auf einer A100.
+Darüber hinaus bot die schnelle Multipolmethode für compute-gebundene Probleme eine noch größere Beschleunigung und steigerte den Faktor auf der RTX 3080 auf 117x, wobei die ursprüngliche Genauigkeit von NextGenPB erhalten blieb.
+Zwar verliert die schnelle Multipolmethode ihren Vorteil bei nicht compute-gebundenen Problemen, dies betrifft jedoch nur Probleme, die ohnehin sehr wenig Zeit benötigen.
+
+Diese Optimierungen machten es möglich, das gesamte H1N1-Kapsid auf einem einzelnen Knoten mit 4 H200-GPUs in unter einer Stunde zu berechnen.
+Sie ermöglichen es zudem, mittelgroße Probleme mit weniger Clusterknoten zu berechnen.
 
 \end{otherlanguage}
