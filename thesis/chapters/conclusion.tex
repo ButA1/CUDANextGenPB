@@ -61,3 +61,13 @@ I recommend the settings of $P = 11, \theta = 0.4, n_{leaf,src} = 16, n_{leaf,tg
 Although not the main focus on the thesis, I also made a handful of host-size optimizations, which improved memory efficiency and speed.
 Most of these were made to one of NextGenPB's main dependencies BIMPP.
 Particularly the ghost value exchange was sped up massively, reducing the time taken for the construction of the equation's right-hand-side to 10\% of its original time.
+
+\section{Outlook}
+
+I believe that further major optimizations to the linear solve and the energy calculation are not necessary.
+In order for the entire NextGenPB pipeline to take advantage of the GPU, its libraries need to be adapted, particularly NanoShaper, p4est and BIMPP.
+A branch of NanoShaper with GPU support exist in the official repo, although in an unknown state; presumably unfinished, as there is no release for it.
+Supposedly there also exists a way to use p4est on the GPU, although it is not official.
+BIMPP is already in need of major optimizations, both in terms of performance, as well as memory.
+The memory scaling issue is a known problem, and is one of the main factors prohibiting NextGenPB from running on systems with low RAM capacity.
+Additionally, the authors of NextGenPB made it clear that they intent to move onto solving the non-linear PBE, so it remains to be seen how much the architecture of NextGenPB would change.

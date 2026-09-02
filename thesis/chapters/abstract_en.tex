@@ -5,11 +5,14 @@ In this thesis I used various techniques to accelerate it using Nvidia's CUDA AP
 The focus laid on the solve of the linear equation, as well as the energy calculation.
 A few additional host-side optimizations decreased the overall time even further, as well as improving memory efficiency.
 
-For the linear equation I used Nvidia's AMGX linear solver library with great effect.
+For the linear equation I used Nvidia's AMGX linear solver library with great effect, achieving speedups of up to 10x.
 I created two configurations, one focused on memory efficiency, and the other on speed, which massively outperformed LIS.
 I found that AMGX scales well across multiple GPUs on a single node but not across multiple nodes, where the communication overhead nullified or even worsened the performance.
 
 For the energy calculation I created a naive implementation and a fast multipole method.
-While the naive implementation already brought a large speedup, fast multipole method offered even greater speedup for compute-bound problems, all while maintaining the original accuracy of NextGenPB.
-However for non-compute-bound problems, the fast multipole method loses its advantage.
+The naive implementation brought a huge speedup of 24.6x on an RTX 3080 and 321x on an A100 for the energy calculation of the 1VSZ molecule.
+On top of that fast multipole method offered even greater speedup for compute-bound problems, improving the speedup on the RTX 3080 to 117x, all while maintaining the original accuracy of NextGenPB.
+Even though the fast multipole method loses its advantage for non-compute-bound problems, these only applies to problems that take very little time to begin with.
 
+These optimizations made it possible to compute the entire H1N1 capsid on a single node with 4 H200 GPUs in under one hour.
+They also make it possible to compute medium sizes problems using fewer cluster nodes.
