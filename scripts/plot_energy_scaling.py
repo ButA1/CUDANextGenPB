@@ -289,8 +289,8 @@ PANELS
 
 \caption[Energy-stage scaling across GPUs and topologies]{\textbf{Energy-stage
     time on \energyScalingMolecule{} over five GPU configurations.} Median over
-    at least \energyScalingRepeats{} runs per bar, from the \texttt{t\_energy}
-    stage timer. The figure above each bar is its time relative to
+    at least \energyScalingRepeats{} runs per bar, from the energy stage's own
+    timer. The figure above each bar is its time relative to
     \energyScalingRef{}. The two panels have their own $y$ scales.\energyScalingGap{}}
 \label{fig:TAG}
 \end{figure}
@@ -320,10 +320,10 @@ TABLE_TEMPLATE = r"""% ---------------------------------------------------------
 \footnotesize
 \setlength{\tabcolsep}{4.5pt}
 \caption[Energy-stage scaling against the whole pipeline]{\textbf{The numbers
-    behind figure~\ref{fig:TAG}.} \emph{energy} is the \texttt{t\_energy} stage
-    timer, \emph{pipeline} is \texttt{t\_report\_total\_s}, the sum of every
-    reported stage, and \emph{share} is the first as a fraction of the second.
-    \emph{spread} is the widest repeat-to-repeat variation in the row.}
+    behind figure~\ref{fig:TAG}.} \emph{energy} is the stage time,
+    \emph{pipeline} is the total pipeline time as reported by NGPB, and
+    \emph{share} is the first as a fraction of the second. \emph{spread} is
+    the widest repeat-to-repeat variation in the row.}
 \label{tab:TAG}
 \begin{tabular}{llrrrrr}
 \toprule

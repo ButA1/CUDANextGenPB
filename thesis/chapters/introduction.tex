@@ -11,6 +11,10 @@ Next Generation Poisson Bolzmann (NGPB) (3) is a newly developed linear PBE, ada
 It provides accuracy comparable to MIBPB (3), at greater speed than DelPhi (4), enabling researchers to calculate problems at unprecedented scale while maintaining a high degree of accuracy. 
 It lends itself well for high-performance-architectures (HPA), which is already partially realized through the Message Pipeline Interface (MPI), which enables parallelism on Central Processing Units (CPUs) and CPU clusters. 
 On the other hand, Graphics Processing Units (GPUs) have long since been used for massively parallel computations, outside the domain of computer graphics. 
-It is reasonable to assume that, in the case of NGPB, utilizing HPAs with greater amounts of cores, such as GPUs could yield even greater speeds, enabling researchers to compute even greater problem sizes.
+NGPB does not feature any GPU support yet, missing out on large performance gains, enabling researchers to compute even greater problem sizes, and existing problem sizes at much lower time cost.
 
-Nvidia dominates the high-performance-architecture space with their proprietary CUDA API.
+Particularly the linear solve and the energy calculation, which consist of numerous particle interactions are great candidates for GPU acceleration.
+Boundary element methods have already been optimized this way to great effect \cite{}.
+
+Nvidia dominated the high-performance-architecture space since the introduction of their proprietary CUDA API.
+Its enjoys a rich ecosystem of libraries, like the AMGX linear solver library, which looks like the perfect ready-made fit for NGPB.
