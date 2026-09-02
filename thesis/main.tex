@@ -1,0 +1,104 @@
+\documentclass[12pt,a4paper]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstdefinestyle{bashstyle}{
+    language=bash,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{teal},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    tabsize=4,
+    showstringspaces=false,
+}
+
+% Dynamic bibliography: entries come from references.bib.
+% Add new sources there and cite them with \cite{key} anywhere in the text.
+\usepackage[backend=biber,style=numeric,sorting=none]{biblatex}
+\addbibresource{references.bib}
+
+% ---- Title page fields: edit these ----
+\newcommand{\thesistitle}{Your Thesis Title Here}
+\newcommand{\thesisauthor}{Your Name}
+\newcommand{\thesisdegree}{Master of Science}
+\newcommand{\thesisdate}{\today}
+% ----------------------------------------
+
+\begin{document}
+
+% ============================================================
+% TITLE PAGE
+% ============================================================
+\begin{titlepage}
+    \centering
+
+    % --- TU logo placeholder ---
+    % Replace this framed box with:
+    %   \includegraphics[width=4cm]{tu_logo}
+    % once you have the actual logo file (e.g. tu_logo.pdf/.png)
+    % placed in this same directory.
+    \fbox{\parbox[c][4cm][c]{4cm}{\centering\itshape TU logo\\placeholder}}
+
+    \vspace{1.5cm}
+    {\large Technische Universität Berlin\par}
+    \vspace{0.5cm}
+    {\large Faculty Name\par}
+    \vspace{2cm}
+
+    {\Huge\bfseries \thesistitle\par}
+    \vspace{2cm}
+
+    {\Large \thesisauthor\par}
+    \vspace{1cm}
+
+    {\large Thesis submitted in partial fulfillment of the requirements\\
+    for the degree of \thesisdegree\par}
+    \vspace{2cm}
+
+    {\large \thesisdate\par}
+
+    \vfill
+\end{titlepage}
+
+% ============================================================
+% TABLE OF CONTENTS (regenerates automatically on each compile)
+% ============================================================
+\tableofcontents
+\newpage
+
+% ============================================================
+% CONTENT
+% Copy the section/subsection block below to add more.
+% ============================================================
+
+\input{chapters/introduction}
+
+\input{chapters/background}
+
+\input{chapters/ngpb.tex}
+
+\input{chapters/implementation}
+
+\input{chapters/evaluation}
+
+% ============================================================
+% BIBLIOGRAPHY (dynamic — reads from references.bib)
+% ============================================================
+\printbibliography
+
+\end{document}

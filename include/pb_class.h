@@ -37,6 +37,7 @@ const double p4esttol = 1 / std::pow (2, P8EST_QMAXLEVEL);
 #include <memory>
 
 #include "raytracer.h"
+#include "gpu_topology.h"
 #include <nanoshaper.h>
 
 
@@ -144,8 +145,18 @@ struct
   //algorithm:
   std::string linear_solver_name;
   std::string linear_solver_options;
+  std::string amgx_config_file;   // path to AMGX config file; empty = built-in default
+  int energy_method = 0;          // 0 = CPU, 1 = naive GPU kernel, 2 = FMM
+  double fmm_mac = 0.4;           // FMM opening angle (multipole acceptance criterion)
+  int fmm_multipole_order = 6;    // FMM multipole truncation order (1..FMM_MAX_P)
+  int fmm_leaf_size = 16;         // FMM max atoms per terminal cluster (P2P cutoff). Measured
+                                  // optimum on 6VYB: 8 and 32 are both slower (test1/sweep2.csv).
+  int fmm_target_leaf_size = 1024;// FMM max points per target leaf; 0 = follow fmm_leaf_size.
+                                  // Measured best of {128,256,512,1024}: fastest and most accurate.
+  int fmm_ionic_target_leaf_size = 0;  // override for the ionic target tree; 0 = fmm_target_leaf_size
 
   MPI_Comm mpicomm;
+  gpu_topology gpu_topo;   // set once in main() via setup_gpu_topology (multi-GPU binding/dispatch)
   tmesh_3d tmsh;
 
   std::string optionsfilename;
@@ -717,6 +728,9 @@ struct
   create_markers (ray_cache_t & ray_cache);
 
   void
+  create_markers_fast (ray_cache_t & ray_cache);
+
+  void
   export_tmesh (ray_cache_t & ray_cache);
 
   void
@@ -729,7 +743,7 @@ struct
   export_p4est ();
 
   void
-  assemple_system_matrix (ray_cache_t & ray_cache);
+  assemble_system_matrix (ray_cache_t & ray_cache);
 
   void
   create_density_map (ray_cache_t & ray_cache);
@@ -739,6 +753,15 @@ struct
 
   void
   lis_compute_electric_potential (ray_cache_t & ray_cache);
+
+  void
+  amgx_compute_electric_potential (ray_cache_t & ray_cache);
+
+  // Multi-GPU AMGX: sub-gather each GPU-group's CSR to its leader, then run a
+  // distributed AMGX solve across the group leaders (one rank per GPU). Selected
+  // automatically when gpu_topo.total_gpus > 1. See src/amgx_solver.cu.
+  void
+  amgx_compute_electric_potential_dist (ray_cache_t & ray_cache);
 
   int
   classifyCube (tmesh_3d::quadrant_iterator& quadrant,double isolevel);
@@ -762,6 +785,12 @@ struct
   energy_fast (ray_cache_t & ray_cache);
 
   void
+  energy_cuda_fast (ray_cache_t & ray_cache);
+
+  void
+  energy_cuda (ray_cache_t & ray_cache);
+
+  void
   write_potential_on_surface (ray_cache_t & ray_cache);
 
   double
@@ -780,7 +809,7 @@ struct
   cube_fraction_intersection (tmesh_3d::quadrant_iterator& quadrant,
                               const ray_cache_t & ray_cache);
 
-  void
+  bool
   normal_intersection (tmesh_3d::quadrant_iterator& quadrant,
                        const ray_cache_t & ray_cache,
                        int edge, std::array<double,3> &norm,double &frac);

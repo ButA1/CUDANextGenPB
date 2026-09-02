@@ -1,6 +1,12 @@
 CXX=mpicxx
 
+NVCC=nvcc
+
 CXXFLAGS= -std=c++17 -ggdb -O0
+
+NVCCFLAGS= -arch=native -Xptxas -v
+
+MPI_COMPILE_FLAGS=$(shell $(CXX) --showme:compile)
 
 CPPFLAGS=-I/opt/octave_file_io/1.0.91/include/ \
 -I/opt/nanoshaper/src \
@@ -13,12 +19,14 @@ LDFLAGS=-L/opt/octave_file_io/1.0.91/lib \
 -L/opt/local/lib \
 -L/opt/nanoshaper/build_lib\
 -L/opt/bimpp_ngpb/lib \
+-L/lib/x86_64-linux-gnu \
 -Wl,-rpath,/opt/nanoshaper/build_lib \
 -Wl,-rpath,/opt/bimpp_ngpb/lib  \
--Wl,-rpath,/opt/octave_file_io/1.0.91/lib
+-Wl,-rpath,/opt/octave_file_io/1.0.91/lib \
+-Wl,-rpath,/lib/x86_64-linux-gnu
 
 LIBS=-lNanoShaper -lbim -lbimmumps -lbimlis -lbimp4est -lbimlinalg -llis -ldmumps -lmumps_common \
--lscotcherr -lbz2 -lmpi_usempif08 -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lp4est -lsc
+-lscotcherr -lbz2 -lmpi_usempif08 -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lp4est -lsc -lamgxsh
 
 include local_settings.mk
 
@@ -27,15 +35,24 @@ all : ngpb
 %.o : %.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $<
 
-ngpb : poisson_boltzmann.o $(patsubst %.cpp, %.o, $(wildcard *.cpp))
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $? -o $@ $(LIBS)
+%.o : %.cu
+	$(NVCC) $(NVCCFLAGS) $(MPI_COMPILE_FLAGS) $(CPPFLAGS) -c $< -o $@
 
-.PHONY : clean distclean
+CUDA_SOURCES = assemble_matrix.cu amgx_solver.cu energy_cuda.cu fmm.cu gpu_topology.cu
+CUDA_OBJECTS = $(CUDA_SOURCES:.cu=.o)
+
+cuda: $(CUDA_OBJECTS)
+
+ngpb : $(patsubst %.cpp, %.o, $(wildcard *.cpp)) $(CUDA_OBJECTS)
+	$(NVCC) -dlink $(patsubst %.cpp, %.o, $(wildcard *.cpp)) $(CUDA_OBJECTS) -o device_link.o
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(patsubst %.cpp, %.o, $(wildcard *.cpp)) $(CUDA_OBJECTS) device_link.o -o $@ $(LIBS)
+
+.PHONY : clean distclean cuda
 
 clean :
 	$(RM) *.o
 
 distclean : clean
-	$(RM) ngpb
+	$(RM) ngpb device_link.o
 
 

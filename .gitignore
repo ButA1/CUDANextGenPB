@@ -12,6 +12,7 @@
 *.out
 ngpb
 *.elf
+*.sif
 
 # Build directories
 build/
@@ -62,7 +63,6 @@ __pycache__/
 
 # Local settings and sensitive files
 local_settings.mk
-local_setting/
 
 # Documentation generated files
 docs/html/
@@ -79,11 +79,31 @@ ehthumbs.db
 *.tmp
 *.bak
 *.backup
+*.log
 
 # Test outputs and temporary files
 test/*.o
 test/*.out
+*.ncu-rep
+*.zst
+*.csv
+exposed.xyz
+exposedIndices.txt
 
 # Compiler-specific directories
 .gcc_flags
 .g++_flags
+
+# LaTeX build artifacts
+thesis/*.aux
+thesis/*.bbl
+thesis/*.bcf
+thesis/*.blg
+thesis/*.fdb_latexmk
+thesis/*.fls
+thesis/*.log
+thesis/*.out
+thesis/*.pdf
+thesis/*.run.xml
+thesis/*.synctex.gz
+thesis/*.toc

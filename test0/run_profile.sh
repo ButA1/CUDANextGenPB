@@ -1,0 +1,1 @@
+/usr/local/cuda/bin/ncu -o profile --set full mpirun -n 4 /usr/local/nextgenPB/src/ngpb --prmfile options.prm

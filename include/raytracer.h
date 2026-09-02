@@ -70,6 +70,12 @@ struct
   void
   compute_ns_inters (crossings_t & ct);
 
+  void
+  ensure_ray (double x0, double x1, unsigned dir);
+
+  void
+  compute_pending_rays ();
+
   std::vector<unsigned char>
   write_map (const std::map<std::array<double, 2>, crossings_t, map_compare>& container);
 

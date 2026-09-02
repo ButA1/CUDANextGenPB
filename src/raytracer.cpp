@@ -390,7 +390,6 @@ ray_cache_t::compute_ns_inters (crossings_t & ct)
       return;
     }
 
-    std::cout << "Sending new ray in x direction for NS!" << std::endl;
     ns->setDirection (ct.dir);
     std::vector<std::pair<double,double*>> ints_norms; //intersections and normals
     ns->castAxisOrientedRay (start_ray, r_c[ct.dir], ints_norms, ct.dir, compute_normals);
@@ -418,7 +417,6 @@ ray_cache_t::compute_ns_inters (crossings_t & ct)
       return;
     }
 
-    std::cout << "Sending new ray in y direction for NS!" << std::endl;
     ns->setDirection (ct.dir);
     std::vector<std::pair<double,double*>> ints_norms; //intersections and normals
     ns->castAxisOrientedRay (start_ray, r_c[ct.dir], ints_norms, ct.dir, compute_normals);
@@ -446,7 +444,6 @@ ray_cache_t::compute_ns_inters (crossings_t & ct)
       return;
     }
 
-    std::cout << "Sending new ray in z direction for NS!" << std::endl;
     ns->setDirection (ct.dir);
     std::vector<std::pair<double,double*>> ints_norms; //intersections and normals
     ns->castAxisOrientedRay (start_ray, r_c[ct.dir], ints_norms, ct.dir, compute_normals);
@@ -464,6 +461,37 @@ ray_cache_t::compute_ns_inters (crossings_t & ct)
     ct.init = 1; //ray is now initialized
   }
 
+}
+
+
+void
+ray_cache_t::ensure_ray (double x0, double x1, unsigned dir)
+{
+  std::array<double, 2> key = {x0, x1};
+  auto it = rays[dir].find (key);
+  if (it == rays[dir].end ()) {
+    crossings_t tmp;
+    tmp.point[0] = x0;
+    tmp.point[1] = x1;
+    tmp.dir = dir;
+    tmp.init = 0;
+    rays[dir][key] = std::move (tmp);
+  }
+}
+
+
+void
+ray_cache_t::compute_pending_rays ()
+{
+  for (unsigned dir = 0; dir < 3; ++dir) {
+    for (auto & entry : rays[dir]) {
+      if (!entry.second.init) {
+        compute_ns_inters (entry.second);
+        count_new++;
+        count_new_dir[dir]++;
+      }
+    }
+  }
 }
 
 

@@ -1,6 +1,6 @@
 [input]
 filetype = pqr
-filename = 1CCM.pqr
+filename = 6VYB.pqr
 [../]
 
 [mesh]
@@ -11,11 +11,19 @@ scale   = 2.0
 [../]
 
 [model]
-bc_type = 1                                
+bc_type = 1
 molecular_dielectric_constant = 2      # Dielectric constant inside the molecule
 solvent_dielectric_constant   = 80     # Dielectric constant of the solvent (e.g., water)
 ionic_strength                = 0.145  # Ionic strength (mol/L)
 T                             = 298.15 # Temperature in Kelvin
 calc_energy    = 2
 calc_coulombic = 1
+[../]
+
+[algorithm]
+linear_solver = amgx
+energy_method       = 2
+fmm_mac             = 0.4
+fmm_multipole_order = 6
+fmm_leaf_size       = 256
 [../]

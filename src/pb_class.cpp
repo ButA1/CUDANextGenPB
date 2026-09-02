@@ -19,6 +19,8 @@
 
 #include "pb_class.h"
 #include "GetPot"
+#include "test.h"
+#include "fmm.h"
 
 #include <bim_distributed_vector.h>
 #include <quad_operators_3d.h>
@@ -968,6 +970,13 @@ poisson_boltzmann::parse_options (int argc, char **argv)
   const std::string alg_options = "algorithm/";
   linear_solver_name = g2 ( (alg_options + "linear_solver").c_str (), "lis");
   linear_solver_options = g2 ( (alg_options + "solver_options").c_str (), "-p ssor -ssor_omega 0.51 -i cgs -tol 1.e-6 -print 2 -conv_cond 2 -tol_w 0");
+  amgx_config_file = g2 ( (alg_options + "amgx_config").c_str (), "");
+  energy_method = g2 ( (alg_options + "energy_method").c_str (), 0);
+  fmm_mac = g2 ( (alg_options + "fmm_mac").c_str (), 0.4);
+  fmm_multipole_order = g2 ( (alg_options + "fmm_multipole_order").c_str (), 6);
+  fmm_leaf_size = g2 ( (alg_options + "fmm_leaf_size").c_str (), 16);
+  fmm_target_leaf_size = g2 ( (alg_options + "fmm_target_leaf_size").c_str (), 1024);
+  fmm_ionic_target_leaf_size = g2 ( (alg_options + "fmm_ionic_target_leaf_size").c_str (), 0);
 
   const std::string out_options = "output/";
   p4estfilename = g2 ( (out_options + "p4estfilename").c_str (), "poisson_boltzmann_p4est");
@@ -1940,6 +1949,155 @@ poisson_boltzmann::create_markers (ray_cache_t & ray_cache)
   }
 }
 
+
+void
+poisson_boltzmann::create_markers_fast (ray_cache_t & ray_cache)
+{
+
+  int size, rank;
+  MPI_Comm_size (mpicomm, &size);
+  MPI_Comm_rank (mpicomm, &rank);
+
+  double eps_in = 4.0*pi*e_0*e_in*kb*T*Angs/ (e*e); //adim e_in
+  double eps_out = 4.0*pi*e_0*e_out*kb*T*Angs/ (e*e); //adim e_out
+
+  /////////////////////////////////////////////////////////
+  //reactions
+  double C_0 = 1.0e3*N_av*ionic_strength; //Bulk concentration of monovalent species
+  double k2 = 2.0*C_0*Angs*Angs*e*e/ (e_0*e_out*kb*T);
+
+  this->marker.assign (this->tmsh.num_local_quadrants (), 0.0); //marker = 0 -> in
+
+  if (stern_layer_surf == 1) {
+    this->marker_k.assign (this->tmsh.num_local_quadrants (), 1.0); //marker = 1 -> out stern
+    this->reaction.assign (tmsh.num_local_quadrants (), eps_out*k2);
+  }
+
+  epsilon_nodes = std::make_unique<distributed_vector> (tmsh.num_owned_nodes (),mpicomm);
+  epsilon_nodes->get_owned_data ().assign (tmsh.num_owned_nodes (), eps_out);
+
+  reaction_nodes = std::make_unique<distributed_vector> (tmsh.num_owned_nodes (),mpicomm);
+  reaction_nodes->get_owned_data ().assign (tmsh.num_owned_nodes (), eps_out*k2);
+
+  // Perpendicular coordinate indices: for direction dir, the two perpendicular axes
+  static constexpr int perp_dirs[3][2] = {{1, 2}, {0, 2}, {0, 1}};
+
+  // ---- Pass 1: Collect all required rays without computing ----
+  ray_cache.num_req_rays[0] = 0;
+  ray_cache.num_req_rays[1] = 0;
+  ray_cache.num_req_rays[2] = 0;
+  ray_cache.rays_list[0].clear ();
+  ray_cache.rays_list[1].clear ();
+  ray_cache.rays_list[2].clear ();
+
+  for (auto quadrant = this->tmsh.begin_quadrant_sweep ();
+       quadrant != this->tmsh.end_quadrant_sweep ();
+       ++quadrant) {
+    for (int ii = 0; ii < 8; ++ii) {
+      double x = quadrant->p (0, ii);
+      double y = quadrant->p (1, ii);
+      double z = quadrant->p (2, ii);
+
+      if (! quadrant->is_hanging (ii)) {
+        // Collect rays in all 3 directions
+        std::array<double, 2> ray_x = {y, z};
+        std::array<double, 2> ray_y = {x, z};
+        std::array<double, 2> ray_z = {x, y};
+
+        if (rank == 0) {
+          ray_cache.ensure_ray (ray_x[0], ray_x[1], 0);
+          ray_cache.ensure_ray (ray_y[0], ray_y[1], 1);
+          ray_cache.ensure_ray (ray_z[0], ray_z[1], 2);
+        } else {
+          ray_cache.rays_list[0].insert (ray_x);
+          ray_cache.rays_list[1].insert (ray_y);
+          ray_cache.rays_list[2].insert (ray_z);
+        }
+      } else {
+        for (int idir = 0; idir < 3; ++idir) {
+          std::array<double, 2> ray = {
+            quadrant->p (perp_dirs[idir][0], ii),
+            quadrant->p (perp_dirs[idir][1], ii)
+          };
+
+          if (rank == 0)
+            ray_cache.ensure_ray (ray[0], ray[1], idir);
+          else
+            ray_cache.rays_list[idir].insert (ray);
+        }
+      }
+    }
+  }
+
+  // ---- Batch compute all pending rays on rank 0 ----
+  if (rank == 0)
+    ray_cache.compute_pending_rays ();
+
+  MPI_Barrier (mpicomm);
+  ray_cache.fill_cache ();
+
+  // ---- Pass 2: Classify quadrants using cached ray data ----
+  int local_num;
+
+  for (auto quadrant = this->tmsh.begin_quadrant_sweep ();
+       quadrant != this->tmsh.end_quadrant_sweep ();
+       ++quadrant) {
+    int num_int_nodes = 0;
+    int num_int_nodes_stern = 0;
+    int num_hanging[3] = {0, 0, 0};
+    double x, y, z;
+
+    for (int ii = 0; ii < 8; ++ii) {
+      local_num = quadrant->gt (ii);
+      x = quadrant->p (0, ii);
+      y = quadrant->p (1, ii);
+      z = quadrant->p (2, ii);
+
+      if (! quadrant->is_hanging (ii)) {
+        double in_z = this->is_in_ns_surf (ray_cache, x, y, z, 2);
+        if (in_z > 0.5) { //inside the molecule
+          ++num_int_nodes;
+          ++num_int_nodes_stern;
+          (*epsilon_nodes)[local_num] = eps_in;
+          (*reaction_nodes)[local_num] = 0.0;
+        }
+
+        if (stern_layer_surf == 1) {
+          if (this->is_in_ns_surf_stern (ray_cache, x, y, z, 2) > 0.5) { //inside the stern layer
+            ++num_int_nodes_stern;
+          }
+        }
+      } else {
+        for (int idir = 0; idir < 3; ++idir)
+          ++num_hanging[idir];
+      }
+    }
+
+    if (num_int_nodes == 0) { //if there's no node inside the molecule
+      this->marker[quadrant->get_forest_quad_idx ()] = 1.0; //quadrant is out
+    } else if (num_int_nodes < (8 - num_hanging[2])) { //if the non hanging nodes are not all inside
+      this->marker[quadrant->get_forest_quad_idx ()] = 1.0/2.0; //"border"
+      border_quad.push_back (quadrant->get_forest_quad_idx ());
+    }
+
+    //else: all the nodes are inside: the quadrant is inside and the marker value is 0
+    if (stern_layer_surf == 1) {
+      for (int idir = 0; idir < 3; ++idir)
+        if (num_int_nodes_stern != 0) { //if there is at least on node inside the stern layer along idir-axis
+          this->marker_k[quadrant->get_forest_quad_idx ()] = 0.0; //quadrant is in
+          this->reaction[quadrant->get_forest_quad_idx ()] = 0.0; //quadrant is in
+        }
+    }
+  }
+
+  if (size >1) {
+    bim3a_solution_with_ghosts (tmsh, *epsilon_nodes, replace_op);
+
+    if (stern_layer_surf == 0)
+      bim3a_solution_with_ghosts (tmsh, (*reaction_nodes), replace_op);
+  }
+}
+
 void
 poisson_boltzmann::create_density_map (ray_cache_t & ray_cache)
 {
@@ -2050,7 +2208,7 @@ poisson_boltzmann::create_density_map (ray_cache_t & ray_cache)
 }
 
 void
-poisson_boltzmann::assemple_system_matrix (ray_cache_t & ray_cache)
+poisson_boltzmann::assemble_system_matrix (ray_cache_t & ray_cache)
 {
   int size, rank;
   MPI_Comm_size (mpicomm, &size);
@@ -2531,7 +2689,7 @@ poisson_boltzmann::cube_fraction_intersection (tmesh_3d::quadrant_iterator& quad
   return fraction;
 }
 
-void
+bool
 poisson_boltzmann::normal_intersection (tmesh_3d::quadrant_iterator& quadrant,
                                         const ray_cache_t & ray_cache,
                                         int edge, std::array<double,3> &norm,
@@ -2557,14 +2715,19 @@ poisson_boltzmann::normal_intersection (tmesh_3d::quadrant_iterator& quadrant,
 
   frac = 0.5;
 
+  auto found = false;
+
   for (int ii =0; ii<inters.size (); ii++) {
     if (inters[ii]>= x1 && inters[ii] <=x2) {
       norm[0] = normali[0 + 3*ii];
       norm[1] = normali[1 + 3*ii];
       norm[2] = normali[2 + 3*ii];
       frac = (inters[ii] - x1)/ (x2 - x1);
+      found = true;
     }
   }
+
+  return found;
 }
 
 int
@@ -2936,6 +3099,15 @@ poisson_boltzmann::energy (ray_cache_t & ray_cache)
       std::tie (tmp_phi, tmp_eps, edg, fl_dir) = classifyCube_flux (quadrant, tmp_phi, tmp_eps);
       ntriang = getTriangles (cubeindex, triangles);
 
+      // --- Per-quadrant edge lookup table (avoids redundant normal_intersection calls) ---
+      std::array<std::array<double,3>, 12> edge_N{};
+      std::array<double, 12> edge_fract{};
+      std::array<bool, 12> has_inters{};
+
+      for (const int e : edg) {
+        has_inters[e] = normal_intersection (quadrant, ray_cache, e, edge_N[e], edge_fract[e]);
+      }
+
       // --- flussi
       for (int ip = 0; ip < edg.size (); ++ip) {
         const int edge = edg[ip];
@@ -2943,8 +3115,7 @@ poisson_boltzmann::energy (ray_cache_t & ray_cache)
         const int i1 = edge2nodes[2 * edge];
         const int i2 = edge2nodes[2 * edge + 1];
 
-        double fract = 0.0;
-        normal_intersection (quadrant, ray_cache, edge, N, fract);
+        const double fract = edge_fract[edge];
 
         V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
         V[axis] += fract * h[axis];
@@ -2969,23 +3140,31 @@ poisson_boltzmann::energy (ray_cache_t & ray_cache)
 
       // --- triangoli (componente ionica)
       for (int itri = 0; itri < ntriang; ++itri) {
+        bool discard_triangle = false;
+
         for (int jj = 0; jj < 3; ++jj) {
           const int edge = triangles[itri][jj];
           const int axis = edge_axis[edge];
           const int i1 = edge2nodes[2 * edge];
           const int i2 = edge2nodes[2 * edge + 1];
 
-          double fract = 0.0;
-          normal_intersection (quadrant, ray_cache, edge, N, fract);
+          if (!has_inters[edge])
+            // nanoshaper and marching cubes disagree
+            // discard triangle
+            discard_triangle = true;
+          const double fract = edge_fract[edge];
 
           V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
           V[axis] += fract * h[axis];
 
           vert_triangles[jj] = V;
-          norms_vert[jj] = N;
+          norms_vert[jj] = edge_N[edge];
 
           phi_sup[jj] = phi0 (tmp_eps[i1], tmp_eps[i2], tmp_phi[i1], tmp_phi[i2], fract);
         }
+
+        if (discard_triangle)
+          continue;
 
         const double area = areaTriangle (vert_triangles);
 
@@ -3206,6 +3385,15 @@ poisson_boltzmann::energy_fast (ray_cache_t & ray_cache)
       std::tie (tmp_phi, tmp_eps, edg, fl_dir) = classifyCube_flux_fast (quadrant, tmp_phi, tmp_eps);
       ntriang = getTriangles (cubeindex, triangles);
 
+      // --- Per-quadrant edge lookup table (avoids redundant normal_intersection calls) ---
+      std::array<std::array<double,3>, 12> edge_N{};
+      std::array<double, 12> edge_fract{};
+      std::array<bool, 12> has_inters{};
+
+      for (const int e : edg) {
+        has_inters[e] = normal_intersection (quadrant, ray_cache, e, edge_N[e], edge_fract[e]);
+      }
+
       // --- flussi
       for (int ip = 0; ip < edg.size (); ++ip) {
         const int edge = edg[ip];
@@ -3213,8 +3401,7 @@ poisson_boltzmann::energy_fast (ray_cache_t & ray_cache)
         const int i1 = edge2nodes[2 * edge];
         const int i2 = edge2nodes[2 * edge + 1];
 
-        double fract = 0.0;
-        normal_intersection (quadrant, ray_cache, edge, N, fract);
+        const double fract = edge_fract[edge];
 
         V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
         V[axis] += fract * h[axis];
@@ -3239,23 +3426,31 @@ poisson_boltzmann::energy_fast (ray_cache_t & ray_cache)
 
       // --- triangoli (componente ionica)
       for (int itri = 0; itri < ntriang; ++itri) {
+        bool discard_triangle = false;
+
         for (int jj = 0; jj < 3; ++jj) {
           const int edge = triangles[itri][jj];
           const int axis = edge_axis[edge];
           const int i1 = edge2nodes[2 * edge];
           const int i2 = edge2nodes[2 * edge + 1];
 
-          double fract = 0.0;
-          normal_intersection (quadrant, ray_cache, edge, N, fract);
+          if (!has_inters[edge])
+            // nanoshaper and marching cubes disagree
+            // discard triangle
+            discard_triangle = true;
+          const double fract = edge_fract[edge];
 
           V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
           V[axis] += fract * h[axis];
 
           vert_triangles[jj] = V;
-          norms_vert[jj] = N;
+          norms_vert[jj] = edge_N[edge];
 
           phi_sup[jj] = phi0 (tmp_eps[i1], tmp_eps[i2], tmp_phi[i1], tmp_phi[i2], fract);
         }
+
+        if (discard_triangle)
+          continue;
 
         const double area = areaTriangle (vert_triangles);
 
@@ -3315,6 +3510,541 @@ poisson_boltzmann::energy_fast (ray_cache_t & ray_cache)
     // << "    Error w.r.t. net charge [%]:"
     // << std::setprecision(6)
     // << ((charge_pol / (4.0 * pi) - net_charge) / net_charge * 100.0) << "\n";
+
+    std::cout << std::left << std::setw (label_width) << "  Polarization energy [kT]:"
+              << std::setprecision (precision) << energy_pol << "\n";
+
+    if (calc_energy == 2) {
+      std::cout << std::left << std::setw (label_width) << "  Direct ionic energy [kT]:"
+                << std::setprecision (precision) << energy_react << "\n";
+    }
+
+    if (calc_coulombic == 1) {
+      std::cout << std::left << std::setw (label_width) << "  Coulombic energy [kT]:"
+                << std::setprecision (precision) << coul_energy << "\n";
+    }
+
+    std::cout << std::left << std::setw (label_width) << "  Sum of electrostatic energy contributions [kT]:"
+              << std::setprecision (precision)
+              << (energy_pol + energy_react + coul_energy) << "\n";
+
+    std::cout << "===========================================================\n";
+  }
+}
+
+void
+poisson_boltzmann::energy_cuda_fast (ray_cache_t & ray_cache)
+{
+  int rank;
+  MPI_Comm_rank (mpicomm, &rank);
+
+  if (rank == 0)
+    std::cout << "\n================ [ Electrostatic Energy (CUDA) ] =================\n";
+
+  const double inv_4pi = 1.0 / (4.0 * pi);
+  const double eps0 = e_0;
+  const double eps_in = 4.0 * pi * eps0 * e_in * kb * T * Angs / (e * e);
+  const double eps_out = 4.0 * pi * eps0 * e_out * kb * T * Angs / (e * e);
+
+  const double C0 = 1.0e3 * N_av * ionic_strength;
+  const double k2 = 2.0 * C0 * Angs * Angs * e * e / (eps0 * e_out * kb * T);
+  const double k = std::sqrt (k2);
+
+  const double den_in = 1.0 / eps_in;
+  const double constant_pol = (1.0 / eps_out - 1.0 / eps_in) * inv_4pi;
+  const double constant_react = (1.0 / eps_out) * inv_4pi;
+
+  double charge_pol = 0.0;
+
+  // --- Filter charged atoms ---
+  std::vector<double> charge_atoms_tmp;
+  std::vector<std::array<double, 3>> pos_atoms_tmp;
+
+  for (size_t ii = 0; ii < charge_atoms.size(); ++ii) {
+    if (std::fabs (charge_atoms[ii]) > 1.e-5) {
+      charge_atoms_tmp.push_back (charge_atoms[ii]);
+      pos_atoms_tmp.push_back (pos_atoms[ii]);
+    }
+  }
+
+  const size_t num_atoms = charge_atoms_tmp.size();
+  std::vector<double>().swap (charge_atoms);
+  std::vector<std::array<double, 3>>().swap (pos_atoms);
+
+  // --- Pack atoms into flat arrays and upload to GPU once ---
+  std::vector<double> h_atoms(num_atoms * 3);
+  std::vector<double> h_charges(num_atoms);
+  for (size_t ia = 0; ia < num_atoms; ++ia) {
+    h_atoms[3*ia]     = pos_atoms_tmp[ia][0];
+    h_atoms[3*ia + 1] = pos_atoms_tmp[ia][1];
+    h_atoms[3*ia + 2] = pos_atoms_tmp[ia][2];
+    h_charges[ia]     = charge_atoms_tmp[ia];
+  }
+
+  double *d_atoms = nullptr, *d_charges = nullptr;
+  atoms_to_device((int)num_atoms, h_atoms.data(), h_charges.data(),
+                  &d_atoms, &d_charges);
+
+  // --- Build the FMM atom-tree once (the source tree for the FMM energy path) ---
+  fmm_tree *fmm = nullptr;
+  if (energy_method == 2)
+    fmm_build_atom_tree((int)num_atoms, d_atoms, d_charges, fmm_mac, fmm_multipole_order,
+                        fmm_leaf_size, &fmm);
+
+  // --- Coulombic energy (naive O(N^2) atom pairs; atom count is small) ---
+  // Atoms are replicated on every rank, so this sum is identical on all ranks and
+  // is deliberately NOT part of the MPI_Reduce below -- only rank 0 prints it.
+  // Compute it on rank 0 only, to avoid redundant O(N^2) work on every GPU when
+  // running multi-GPU (each rank would otherwise recompute the same value).
+  if (calc_coulombic == 1 && rank == 0) {
+    double coul_raw = coulombic_energy_cuda_dev((int)num_atoms, d_atoms, d_charges);
+    this->coul_energy = coul_raw * den_in;
+  }
+
+  // ====================================================
+  // CPU side: collect surface points V, flux, normals
+  // ====================================================
+  std::array<double,3> h_cell{0}, area_h{0};
+  std::array<double,3> V, N;
+  std::array<double,8> tmp_eps, tmp_phi;
+  std::vector<int> edg, fl_dir;
+
+  auto quadrant = this->tmsh.begin_quadrant_sweep ();
+
+  if (!border_quad.empty()) {
+    quadrant[border_quad[0]];
+    for (int d = 0; d < 3; ++d)
+      h_cell[d] = quadrant->p (d, 7) - quadrant->p (d, 0);
+    area_h = {h_cell[1]*h_cell[2]/h_cell[0]*0.25,
+              h_cell[0]*h_cell[2]/h_cell[1]*0.25,
+              h_cell[0]*h_cell[1]/h_cell[2]*0.25};
+  }
+
+  // --- Collect flux surface points ---
+  std::vector<double> h_V_pol;
+  std::vector<double> h_flux_pol;
+
+  // --- Collect triangle vertex data (ionic) ---
+  std::vector<double> h_vert_ion;
+  std::vector<double> h_norms_ion;
+  std::vector<double> h_phi_ion;
+  std::vector<double> h_area_ion;
+
+  const bool do_ionic = (calc_energy == 2 && k > 1.e-5);
+
+  for (const int ii : border_quad) {
+    quadrant[ii];
+    std::tie (tmp_phi, tmp_eps, edg, fl_dir) = classifyCube_flux_fast (quadrant, tmp_phi, tmp_eps);
+
+    // --- Per-quadrant edge lookup table (avoids redundant normal_intersection calls) ---
+    std::array<std::array<double,3>, 12> edge_N{};
+    std::array<double, 12> edge_fract{};
+    std::array<bool, 12> has_inters{};
+
+    for (const int e : edg) {
+      has_inters[e] = normal_intersection (quadrant, ray_cache, e, edge_N[e], edge_fract[e]);
+    }
+
+    // --- Flux contribution (edges crossing interface) ---
+    for (int ip = 0; ip < (int)edg.size (); ++ip) {
+      const int edge = edg[ip];
+      const int axis = edge_axis[edge];
+      const int i1 = edge2nodes[2 * edge];
+      const int i2 = edge2nodes[2 * edge + 1];
+
+      const double fract = edge_fract[edge];
+
+      V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
+      V[axis] += fract * h_cell[axis];
+
+      const double tmp_flux =
+        - (tmp_phi[i2] - tmp_phi[i1]) * wha (tmp_eps[i1], tmp_eps[i2], fract)
+        * fl_dir[ip] * area_h[axis];
+
+      charge_pol += tmp_flux;
+
+      h_V_pol.push_back(V[0]);
+      h_V_pol.push_back(V[1]);
+      h_V_pol.push_back(V[2]);
+      h_flux_pol.push_back(tmp_flux);
+    }
+
+    // --- Triangle contribution (ionic) ---
+    if (do_ionic) {
+      int cubeindex = classifyCube_fast (quadrant, eps_out);
+      int ntriang = getTriangles (cubeindex, triangles);
+
+      for (int itri = 0; itri < ntriang; ++itri) {
+        std::array<std::array<double,3>,3> tv, nv;
+        std::array<double,3> ps;
+        bool discard_triangle = false;
+
+        for (int jj = 0; jj < 3; ++jj) {
+          const int tedge = triangles[itri][jj];
+          const int taxis = edge_axis[tedge];
+          const int ti1 = edge2nodes[2 * tedge];
+          const int ti2 = edge2nodes[2 * tedge + 1];
+
+          if (!has_inters[tedge])
+            // nanoshaper and marching cubes disagree
+            // discard triangle
+            discard_triangle = true;
+          const double tfract = edge_fract[tedge];
+
+          V = {quadrant->p (0, ti1), quadrant->p (1, ti1), quadrant->p (2, ti1)};
+          V[taxis] += tfract * h_cell[taxis];
+
+          tv[jj] = V;
+          nv[jj] = edge_N[tedge];
+          ps[jj] = phi0 (tmp_eps[ti1], tmp_eps[ti2], tmp_phi[ti1], tmp_phi[ti2], tfract);
+        }
+
+        if (discard_triangle)
+          continue;
+
+        double a = areaTriangle (tv);
+        h_area_ion.push_back(a);
+
+        for (int jj = 0; jj < 3; ++jj) {
+          h_vert_ion.push_back(tv[jj][0]);
+          h_vert_ion.push_back(tv[jj][1]);
+          h_vert_ion.push_back(tv[jj][2]);
+          h_norms_ion.push_back(nv[jj][0]);
+          h_norms_ion.push_back(nv[jj][1]);
+          h_norms_ion.push_back(nv[jj][2]);
+          h_phi_ion.push_back(ps[jj]);
+        }
+      }
+    }
+  }
+
+  // ====================================================
+  // GPU: polarization first_int
+  // ====================================================
+  int num_pts = (int)h_flux_pol.size();
+  double first_int;
+  if (energy_method == 2)
+    first_int = fmm_polarization_energy(fmm, num_pts, h_V_pol.data(), h_flux_pol.data(),
+                                        fmm_target_leaf_size);
+  else
+    first_int = polarization_energy_cuda_dev(num_pts, h_V_pol.data(), h_flux_pol.data(),
+                                             (int)num_atoms, d_atoms, d_charges);
+
+  this->energy_pol = 0.5 * constant_pol * first_int;
+
+  // ====================================================
+  // GPU: ionic second_int (only if calc_energy==2 && k>eps)
+  // ====================================================
+  if (do_ionic) {
+    int num_tri_verts = (int)h_phi_ion.size();
+    double second_int;
+    if (energy_method == 2)
+      // Ionic gets its own target leaf size: it differentiates the local expansion, so it loses
+      // accuracy faster than polarization as the target box grows. 0 -> fall back to the shared
+      // fmm_target_leaf_size.
+      second_int = fmm_ionic_energy(fmm, num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
+                                    h_phi_ion.data(), h_area_ion.data(), inv_4pi,
+                                    fmm_ionic_target_leaf_size ? fmm_ionic_target_leaf_size
+                                                               : fmm_target_leaf_size);
+    else
+      second_int = ionic_energy_cuda_dev(num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
+                                         h_phi_ion.data(), h_area_ion.data(),
+                                         (int)num_atoms, d_atoms, d_charges, inv_4pi);
+    this->energy_react = 0.5 * (second_int - first_int * constant_react);
+  }
+
+  // --- Free the tree and shared device atoms ---
+  if (fmm) fmm_free_tree(fmm);
+  atoms_free_device(d_atoms, d_charges);
+
+  // ====================================================
+  // MPI reduction
+  // ====================================================
+  auto reduce_double = [&] (double &x) {
+    MPI_Reduce (rank == 0 ? MPI_IN_PLACE : &x, &x, 1, MPI_DOUBLE, MPI_SUM, 0, mpicomm);
+  };
+
+  reduce_double (charge_pol);
+  reduce_double (energy_pol);
+  reduce_double (energy_react);
+
+  if (rank == 0) {
+    constexpr int label_width = 50;
+    constexpr int precision = 16;
+
+    std::cout << std::left << std::setw (label_width) << "  Net charge [e]:"
+              << std::setprecision (precision) << net_charge << "\n";
+
+    std::cout << std::left << std::setw (label_width) << "  Flux charge [e]:"
+              << std::setprecision (precision) << charge_pol / (4.0 * pi) << "\n";
+
+    std::cout << std::left << std::setw (label_width) << "  Polarization energy [kT]:"
+              << std::setprecision (precision) << energy_pol << "\n";
+
+    if (calc_energy == 2) {
+      std::cout << std::left << std::setw (label_width) << "  Direct ionic energy [kT]:"
+                << std::setprecision (precision) << energy_react << "\n";
+    }
+
+    if (calc_coulombic == 1) {
+      std::cout << std::left << std::setw (label_width) << "  Coulombic energy [kT]:"
+                << std::setprecision (precision) << coul_energy << "\n";
+    }
+
+    std::cout << std::left << std::setw (label_width) << "  Sum of electrostatic energy contributions [kT]:"
+              << std::setprecision (precision)
+              << (energy_pol + energy_react + coul_energy) << "\n";
+
+    std::cout << "===========================================================\n";
+  }
+}
+
+void
+poisson_boltzmann::energy_cuda (ray_cache_t & ray_cache)
+{
+  int rank;
+  MPI_Comm_rank (mpicomm, &rank);
+
+  if (rank == 0)
+    std::cout << "\n================ [ Electrostatic Energy (CUDA) ] =================\n";
+
+  const double inv_4pi = 1.0 / (4.0 * pi);
+  const double eps0 = e_0;
+  const double eps_in = 4.0 * pi * eps0 * e_in * kb * T * Angs / (e * e);
+  const double eps_out = 4.0 * pi * eps0 * e_out * kb * T * Angs / (e * e);
+
+  const double C0 = 1.0e3 * N_av * ionic_strength;
+  const double k2 = 2.0 * C0 * Angs * Angs * e * e / (eps0 * e_out * kb * T);
+  const double k = std::sqrt (k2);
+
+  const double den_in = 1.0 / eps_in;
+  const double constant_pol = (1.0 / eps_out - 1.0 / eps_in) * inv_4pi;
+  const double constant_react = (1.0 / eps_out) * inv_4pi;
+
+  double charge_pol = 0.0;
+
+  // --- Filter charged atoms ---
+  std::vector<double> charge_atoms_tmp;
+  std::vector<std::array<double, 3>> pos_atoms_tmp;
+
+  for (size_t ii = 0; ii < charge_atoms.size(); ++ii) {
+    if (std::fabs (charge_atoms[ii]) > 1.e-5) {
+      charge_atoms_tmp.push_back (charge_atoms[ii]);
+      pos_atoms_tmp.push_back (pos_atoms[ii]);
+    }
+  }
+
+  const size_t num_atoms = charge_atoms_tmp.size();
+  std::vector<double>().swap (charge_atoms);
+  std::vector<std::array<double, 3>>().swap (pos_atoms);
+
+  // --- Pack atoms into flat arrays and upload to GPU once ---
+  std::vector<double> h_atoms(num_atoms * 3);
+  std::vector<double> h_charges(num_atoms);
+  for (size_t ia = 0; ia < num_atoms; ++ia) {
+    h_atoms[3*ia]     = pos_atoms_tmp[ia][0];
+    h_atoms[3*ia + 1] = pos_atoms_tmp[ia][1];
+    h_atoms[3*ia + 2] = pos_atoms_tmp[ia][2];
+    h_charges[ia]     = charge_atoms_tmp[ia];
+  }
+
+  double *d_atoms = nullptr, *d_charges = nullptr;
+  atoms_to_device((int)num_atoms, h_atoms.data(), h_charges.data(),
+                  &d_atoms, &d_charges);
+
+  // --- Build the FMM atom-tree once (the source tree for the FMM energy path) ---
+  fmm_tree *fmm = nullptr;
+  if (energy_method == 2)
+    fmm_build_atom_tree((int)num_atoms, d_atoms, d_charges, fmm_mac, fmm_multipole_order,
+                        fmm_leaf_size, &fmm);
+
+  // --- Coulombic energy (naive O(N^2) atom pairs; atom count is small) ---
+  // Atoms are replicated on every rank, so this sum is identical on all ranks and
+  // is deliberately NOT part of the MPI_Reduce below -- only rank 0 prints it.
+  // Compute it on rank 0 only, to avoid redundant O(N^2) work on every GPU when
+  // running multi-GPU (each rank would otherwise recompute the same value).
+  if (calc_coulombic == 1 && rank == 0) {
+    double coul_raw = coulombic_energy_cuda_dev((int)num_atoms, d_atoms, d_charges);
+    this->coul_energy = coul_raw * den_in;
+  }
+
+  // ====================================================
+  // CPU side: collect surface points V, flux, normals
+  // ====================================================
+  std::array<double,3> h_cell{0}, area_h{0};
+  std::array<double,3> V, N;
+  std::array<double,8> tmp_eps, tmp_phi;
+  std::vector<int> edg, fl_dir;
+
+  auto quadrant = this->tmsh.begin_quadrant_sweep ();
+
+  // --- Collect flux surface points ---
+  std::vector<double> h_V_pol;
+  std::vector<double> h_flux_pol;
+
+  // --- Collect triangle vertex data (ionic) ---
+  std::vector<double> h_vert_ion;
+  std::vector<double> h_norms_ion;
+  std::vector<double> h_phi_ion;
+  std::vector<double> h_area_ion;
+
+  const bool do_ionic = (calc_energy == 2 && k > 1.e-5);
+
+  for (const int ii : border_quad) {
+    quadrant[ii];
+
+    // Refined mesh: cell size varies per quadrant, so recompute h_cell/area_h here
+    // (unlike energy_cuda_fast, which hoists them once for a uniform grid).
+    for (int d = 0; d < 3; ++d)
+      h_cell[d] = quadrant->p (d, 7) - quadrant->p (d, 0);
+    area_h = {h_cell[1]*h_cell[2]/h_cell[0]*0.25,
+              h_cell[0]*h_cell[2]/h_cell[1]*0.25,
+              h_cell[0]*h_cell[1]/h_cell[2]*0.25};
+
+    std::tie (tmp_phi, tmp_eps, edg, fl_dir) = classifyCube_flux (quadrant, tmp_phi, tmp_eps);
+
+    // --- Per-quadrant edge lookup table (avoids redundant normal_intersection calls) ---
+    std::array<std::array<double,3>, 12> edge_N{};
+    std::array<double, 12> edge_fract{};
+    std::array<bool, 12> has_inters{};
+
+    for (const int e : edg) {
+      has_inters[e] = normal_intersection (quadrant, ray_cache, e, edge_N[e], edge_fract[e]);
+    }
+
+    // --- Flux contribution (edges crossing interface) ---
+    for (int ip = 0; ip < (int)edg.size (); ++ip) {
+      const int edge = edg[ip];
+      const int axis = edge_axis[edge];
+      const int i1 = edge2nodes[2 * edge];
+      const int i2 = edge2nodes[2 * edge + 1];
+
+      const double fract = edge_fract[edge];
+
+      V = {quadrant->p (0, i1), quadrant->p (1, i1), quadrant->p (2, i1)};
+      V[axis] += fract * h_cell[axis];
+
+      const double tmp_flux =
+        - (tmp_phi[i2] - tmp_phi[i1]) * wha (tmp_eps[i1], tmp_eps[i2], fract)
+        * fl_dir[ip] * area_h[axis];
+
+      charge_pol += tmp_flux;
+
+      h_V_pol.push_back(V[0]);
+      h_V_pol.push_back(V[1]);
+      h_V_pol.push_back(V[2]);
+      h_flux_pol.push_back(tmp_flux);
+    }
+
+    // --- Triangle contribution (ionic) ---
+    if (do_ionic) {
+      int cubeindex = classifyCube (quadrant, eps_out);
+      int ntriang = getTriangles (cubeindex, triangles);
+
+      for (int itri = 0; itri < ntriang; ++itri) {
+        std::array<std::array<double,3>,3> tv, nv;
+        std::array<double,3> ps;
+        bool discard_triangle = false;
+
+        for (int jj = 0; jj < 3; ++jj) {
+          const int tedge = triangles[itri][jj];
+          const int taxis = edge_axis[tedge];
+          const int ti1 = edge2nodes[2 * tedge];
+          const int ti2 = edge2nodes[2 * tedge + 1];
+
+          if (!has_inters[tedge])
+            // nanoshaper and marching cubes disagree
+            // discard triangle
+            discard_triangle = true;
+          const double tfract = edge_fract[tedge];
+
+          V = {quadrant->p (0, ti1), quadrant->p (1, ti1), quadrant->p (2, ti1)};
+          V[taxis] += tfract * h_cell[taxis];
+
+          tv[jj] = V;
+          nv[jj] = edge_N[tedge];
+          ps[jj] = phi0 (tmp_eps[ti1], tmp_eps[ti2], tmp_phi[ti1], tmp_phi[ti2], tfract);
+        }
+
+        if (discard_triangle)
+          continue;
+
+        double a = areaTriangle (tv);
+        h_area_ion.push_back(a);
+
+        for (int jj = 0; jj < 3; ++jj) {
+          h_vert_ion.push_back(tv[jj][0]);
+          h_vert_ion.push_back(tv[jj][1]);
+          h_vert_ion.push_back(tv[jj][2]);
+          h_norms_ion.push_back(nv[jj][0]);
+          h_norms_ion.push_back(nv[jj][1]);
+          h_norms_ion.push_back(nv[jj][2]);
+          h_phi_ion.push_back(ps[jj]);
+        }
+      }
+    }
+  }
+
+  // ====================================================
+  // GPU: polarization first_int
+  // ====================================================
+  int num_pts = (int)h_flux_pol.size();
+  double first_int;
+  if (energy_method == 2)
+    first_int = fmm_polarization_energy(fmm, num_pts, h_V_pol.data(), h_flux_pol.data(),
+                                        fmm_target_leaf_size);
+  else
+    first_int = polarization_energy_cuda_dev(num_pts, h_V_pol.data(), h_flux_pol.data(),
+                                             (int)num_atoms, d_atoms, d_charges);
+
+  this->energy_pol = 0.5 * constant_pol * first_int;
+
+  // ====================================================
+  // GPU: ionic second_int (only if calc_energy==2 && k>eps)
+  // ====================================================
+  if (do_ionic) {
+    int num_tri_verts = (int)h_phi_ion.size();
+    double second_int;
+    if (energy_method == 2)
+      // Ionic gets its own target leaf size: it differentiates the local expansion, so it loses
+      // accuracy faster than polarization as the target box grows. 0 -> fall back to the shared
+      // fmm_target_leaf_size.
+      second_int = fmm_ionic_energy(fmm, num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
+                                    h_phi_ion.data(), h_area_ion.data(), inv_4pi,
+                                    fmm_ionic_target_leaf_size ? fmm_ionic_target_leaf_size
+                                                               : fmm_target_leaf_size);
+    else
+      second_int = ionic_energy_cuda_dev(num_tri_verts, h_vert_ion.data(), h_norms_ion.data(),
+                                         h_phi_ion.data(), h_area_ion.data(),
+                                         (int)num_atoms, d_atoms, d_charges, inv_4pi);
+
+    this->energy_react = 0.5 * (second_int - first_int * constant_react);
+  }
+
+  // --- Free the tree and shared device atoms ---
+  if (fmm) fmm_free_tree(fmm);
+  atoms_free_device(d_atoms, d_charges);
+
+  // ====================================================
+  // MPI reduction
+  // ====================================================
+  auto reduce_double = [&] (double &x) {
+    MPI_Reduce (rank == 0 ? MPI_IN_PLACE : &x, &x, 1, MPI_DOUBLE, MPI_SUM, 0, mpicomm);
+  };
+
+  reduce_double (charge_pol);
+  reduce_double (energy_pol);
+  reduce_double (energy_react);
+
+  if (rank == 0) {
+    constexpr int label_width = 50;
+    constexpr int precision = 16;
+
+    std::cout << std::left << std::setw (label_width) << "  Net charge [e]:"
+              << std::setprecision (precision) << net_charge << "\n";
+
+    std::cout << std::left << std::setw (label_width) << "  Flux charge [e]:"
+              << std::setprecision (precision) << charge_pol / (4.0 * pi) << "\n";
 
     std::cout << std::left << std::setw (label_width) << "  Polarization energy [kT]:"
               << std::setprecision (precision) << energy_pol << "\n";

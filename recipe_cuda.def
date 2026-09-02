@@ -1,0 +1,137 @@
+BootStrap: docker
+# CUDA 12.8 toolkit on Ubuntu 24.04 (noble): octave 8.4.0 matches the local build,
+# toolkit <= every TU Berlin GPU node's driver (all >= 12.8). Driver itself is NOT in
+# the image -- it is bind-mounted at runtime via `apptainer run/exec --nv`.
+# VERIFY the exact tag exists on Docker Hub (nvidia/cuda tags); 12.6.x-devel-ubuntu24.04
+# is a fallback if 12.8.0 is unavailable.
+From: nvidia/cuda:12.8.0-devel-ubuntu24.04
+
+%labels
+    Maintainer alexanderbut97@gmail.com
+    Description "NextGenPB GPU fork (CUDA/AMGX) for the TU Berlin HPC -- local fork + modified bimpp"
+
+# --- Inject LOCAL sources (NOT upstream). Adjust host paths if they move. ---
+# left = host path, right = path inside the container.
+# Only src/+include/ are copied for nextgenPB -- NOT the whole repo (test1/
+# profiles/.git alone are ~36GB and blow the build's peak disk usage; the
+# build only reads src/local_settings.mk and headers under include/).
+%files
+    /usr/local/nextgenPB/src                          /usr/local/nextgenPB/src
+    /usr/local/nextgenPB/include                      /usr/local/nextgenPB/include
+    /usr/local/nextgenPB/addons                       /usr/local/nextgenPB/addons
+    /home/leirex/Documents/bimpp                      /opt/bimpp-src
+    /home/leirex/Documents/AMGX                       /opt/amgx-src
+
+%environment
+    export PATH="/usr/local/nextgenPB/src:/usr/local/cuda/bin:$PATH"
+    export LD_LIBRARY_PATH="/opt/bimpp/lib:/opt/lis/lib:/opt/nanoshaper/build_lib:/opt/octave_file_io/lib:/opt/amgx/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+    export OMP_NUM_THREADS=1   # prevent thread oversubscription against MPI ranks
+    export DISPLAY=""
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Generic, portable host code -- the GPU arch is handled separately for nvcc.
+    export CFLAGS="-O2 -mtune=generic"
+    export CXXFLAGS="$CFLAGS"
+    export FCFLAGS="$CFLAGS"
+
+    echo "=== System dependencies (matches Dockerfile_ubuntu) ==="
+    apt-get update && apt-get upgrade -y
+    apt-get install -y \
+        build-essential gfortran cmake make python3 texinfo nano \
+        gawk procps wget openssh-client diffutils git rsync zip unzip bzip2 \
+        patch xz-utils perl libboost-all-dev zlib1g-dev libjson-c-dev \
+        openmpi-bin libopenmpi-dev \
+        libjansson-dev libgmp-dev libmpfr-dev libssl-dev libblas-dev liblapack-dev \
+        libopenblas-dev autoconf automake libtool libqhull-dev \
+        libarpack2-dev octave octave-dev libscotch-dev libbz2-dev glpk-utils bison \
+        libtbb-dev libmumps-dev libcgal-dev libp4est-dev
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+    echo "=== NanoShaper (surface library) -> /opt/nanoshaper ==="
+    cd /opt && \
+        git clone https://gitlab.iit.it/SDecherchi/nanoshaper.git && \
+        cd nanoshaper && \
+        cp CMakeLists_so.txt CMakeLists.txt && \
+        mkdir -p build_lib && cd build_lib && \
+        cmake .. -DCMAKE_BUILD_TYPE="Release" && \
+        make -j$(nproc)
+
+    echo "=== LIS 2.1.6 -> /opt/lis ==="
+    cd /opt && \
+        wget https://www.ssisc.org/lis/dl/lis-2.1.6.zip && \
+        unzip lis-2.1.6.zip && cd lis-2.1.6 && \
+        chmod 755 configure config/install-sh && \
+        ./configure --prefix="/opt/lis" --enable-mpi --enable-shared --disable-static && \
+        make -j$(nproc) && make install && \
+        cd /opt && rm -rf lis-2.1.6 lis-2.1.6.zip
+
+    echo "=== octave_file_io 1.0.91 -> /opt/octave_file_io ==="
+    cd /opt && \
+        wget https://github.com/carlodefalco/octave_file_io/archive/refs/tags/v1.0.91.tar.gz && \
+        tar -xf v1.0.91.tar.gz && rm -f v1.0.91.tar.gz && \
+        cd octave_file_io-1.0.91 && \
+        ./autogen.sh && mkdir build && cd build && \
+        ../configure --prefix="/opt/octave_file_io" \
+                     LDFLAGS="-L/usr/lib/x86_64-linux-gnu/octave/8.4.0/ -Wl,-rpath,/usr/lib/x86_64-linux-gnu/octave/8.4.0/" \
+                     --with-octave-home=/usr/bin \
+                     CC=mpicc CXX=mpicxx && \
+        make -j$(nproc) && make install && \
+        cd /opt && rm -rf octave_file_io-1.0.91
+
+    echo "=== AMGX (LOCAL source) -> /opt/amgx, multi-arch 60;70;80 ==="
+    # CUDA_ARCH here is what fixed the sm_86-only build: A100=80, V100=70, P100=60.
+    cd /opt/amgx-src && rm -rf build && mkdir build && cd build && \
+        cmake .. -DCMAKE_BUILD_TYPE=Release \
+                 -DCMAKE_CUDA_ARCHITECTURES="60;70;80" \
+                 -DCMAKE_INSTALL_PREFIX=/opt/amgx && \
+        make -j$(nproc) && make install
+    # Some AMGX trees install only the static/shared lib without headers; ensure both.
+    [ -f /opt/amgx/include/amgx_c.h ] || cp -r /opt/amgx-src/include/* /opt/amgx/include/ 2>/dev/null || true
+    [ -f /opt/amgx/lib/libamgxsh.so ] || { mkdir -p /opt/amgx/lib; cp /opt/amgx-src/build/libamgxsh.so /opt/amgx/lib/ 2>/dev/null || true; }
+
+    echo "=== bimpp (LOCAL source w/ flat_map) -> /opt/bimpp, --disable-3d-interpolation ==="
+    cd /opt/bimpp-src && rm -rf build && ./autogen.sh && mkdir build && cd build && \
+        ../configure --prefix=/opt/bimpp/ \
+                     --disable-3d-interpolation \
+                     CPPFLAGS="-I/usr/include -I/usr/include/octave-8.4.0/octave/8.4.0 -DOMPI_SKIP_MPICXX -DHAVE_OCTAVE_44 -DBIM_TIMING" \
+                     LDFLAGS="-L/usr/lib/x86_64-linux-gnu -L/lib -L/lib64 -L/usr/lib/x86_64-linux-gnu/octave/8.4.0/ -Wl,-rpath,/usr/lib/x86_64-linux-gnu/octave/8.4.0/" \
+                     --with-blas-lapack="-lopenblas" \
+                     --with-octave_file_io-home=/opt/octave_file_io \
+                     --with-octave-home=/usr/bin \
+                     --with-p4est-home=/usr/lib/x86_64-linux-gnu \
+                     --with-lis-home=/opt/lis \
+                     --with-mumps-home=/usr/lib/x86_64-linux-gnu \
+                     F77=mpif90 CXX=mpicxx MPICC=mpicc CC=mpicc \
+                     --with-mumps-extra-libs="-L/usr/lib -L/usr/lib/x86_64-linux-gnu -lscotch -lmpi -lmpi_usempif08 -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lopenblas -lgfortran" && \
+        make -j$(nproc) && make install
+
+    echo "=== NextGenPB (LOCAL fork already placed at /usr/local/nextgenPB) ==="
+    cd /usr/local/nextgenPB/src
+    # Reuse the known-good local_settings.mk that %files brought in; only the CUDA
+    # toolkit path differs from the dev box (13.1 -> the container's 12.8 at /usr/local/cuda).
+    sed -i 's|cuda-13.1|cuda|g' local_settings.mk
+    # Multi-arch fatbin for nvcc: replace -arch=native with explicit gencodes
+    # (60 P100, 70 V100, 80 A100; + sm_80 PTX so a future newer GPU can JIT).
+    # -Wno-deprecated-gpu-targets silences the (harmless) sm_60/sm_70 deprecation
+    # warnings from the CUDA 12.x toolkit. Pascal/Volta still compile fine here;
+    # they would only be *removed* under a CUDA 13.x toolkit -- which is exactly why
+    # this image stays on 12.8 (it must keep building sm_60/sm_70 for the P100/V100 queues).
+    sed -i 's|^NVCCFLAGS=.*|NVCCFLAGS= -Wno-deprecated-gpu-targets -gencode arch=compute_60,code=sm_60 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_80,code=compute_80|' Makefile
+    # The `nvcc -dlink` step has no arch flag -> device-links only one arch and breaks
+    # the fatbin. Make it carry the same gencodes.
+    sed -i 's|-dlink |-dlink $(NVCCFLAGS) |' Makefile
+    make distclean all
+
+    # Trim image
+    rm -rf /opt/nanoshaper/{example,src_client,test} 2>/dev/null || true
+    rm -rf /usr/local/nextgenPB/docs /usr/local/nextgenPB/data /opt/bimpp-src /opt/amgx-src 2>/dev/null || true
+
+%runscript
+    exec ngpb "$@"
+
+# Usage on the cluster (single node, 1 GPU + N CPU ranks for assembly):
+#   apptainer exec --nv ngpb.sif mpirun -n $SLURM_NTASKS ngpb --prmfile options.prm
+# Run mpirun INSIDE the container (its own OpenMPI) -- robust for single node, no host MPI interop needed.

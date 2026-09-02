@@ -176,4 +176,26 @@ solver_options = -p\ ssor\ -ssor_omega\ 0.51\ -i\ cgs\ -tol\ 1.e-6\ -print\ 2\ -
 # Alternative solver setup (commented out):
 # solver_options = -i\ cg\ -p\ ilu\ -ilu_fill\ [0]\ -tol\ 1.e-6\ -print\ 2\ -conv_cond\ 2\ -tol_w\ 0
 
+# AMGX solver config (only used when linear_solver = amgx):
+# Path to an AMGX config file (native key=value or JSON format). Applies to both
+# the single-GPU and multi-GPU distributed paths. If unset or the file cannot be
+# loaded, a built-in PCG + BLOCK_JACOBI config is used.
+# amgx_config = /path/to/amgx_config.json
+
+# Energy evaluation backend:
+#   0 = CPU       (reference; no GPU required)
+#   1 = naive GPU (brute-force O(N*M) pairwise kernel)
+#   2 = FMM       (GPU Fast Multipole Method; fastest for large surfaces)
+energy_method = 0
+
+# FMM parameters (only used when energy_method = 2):
+# fmm_mac             : multipole acceptance criterion / opening angle
+#                       (accept a cell pair when size/distance < fmm_mac;
+#                        smaller = more accurate but slower)
+# fmm_multipole_order : multipole truncation order p (1..10; higher = more accurate)
+# fmm_leaf_size       : max atoms/points per terminal cluster (direct P2P cutoff)
+fmm_mac             = 0.4
+fmm_multipole_order = 6
+fmm_leaf_size       = 32
+
 [../]
