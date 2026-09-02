@@ -1,0 +1,15 @@
+\chapter*{Abstract}
+
+NextGenPB is a FEM-based linear Poisson-Boltzmann-Equation solver focused on computational efficiency, which is geared towards high-performance-computing, but did not yet utilize the GPUs to enhance performance even more.
+In this thesis I used various techniques to accelerate it using Nvidia's CUDA API.
+The focus laid on the solve of the linear equation, as well as the energy calculation.
+A few additional host-side optimizations decreased the overall time even further, as well as improving memory efficiency.
+
+For the linear equation I used Nvidia's AMGX linear solver library with great effect.
+I created two configurations, one focused on memory efficiency, and the other on speed, which massively outperformed LIS.
+I found that AMGX scales well across multiple GPUs on a single node but not across multiple nodes, where the communication overhead nullified or even worsened the performance.
+
+For the energy calculation I created a naive implementation and a fast multipole method.
+While the naive implementation already brought a large speedup, fast multipole method offered even greater speedup for compute-bound problems, all while maintaining the original accuracy of NextGenPB.
+However for non-compute-bound problems, the fast multipole method loses its advantage.
+

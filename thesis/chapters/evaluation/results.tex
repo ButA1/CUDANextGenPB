@@ -294,7 +294,9 @@ Nevertheless, the gap reappears on H1N1, where FMM once again shows a massive sp
 The three results really demonstrate how FMM pays an upfront cost, that gets pays off massively once the problem becomes compute-bound.
 I have to point out that I didn't manage to capture the CPU time for H1N1, which ran out of time within its 12-hour slot, of which the other stages only used 49 minutes.
 Even a conservative estimate of 11 hours would mean the naive kernels --- having taken 52 minutes --- are at least 12.5x faster, which really showcases how well GPUs can boost performance through sheer strength.
-Conversely, I had to compare accuracy of the FMM with the naive kernel.
+Given that the speedup of the naive kernel for 1VSZ and 6YVB on the node A100 was 321x and 286x, I would estimate that the CPU implementation could have taken multiple weeks to finish.
+To be fair, the low rank count of just 8, which I had to pick due to memory constraints, would have definitely hurt the CPU performance as well.
+Due to the lack of a CPU reference, I had to compare accuracy of the FMM with the naive kernel.
 Given that the naive kernel is the exact math, not an approximation, this should be perfectly fine comparison.
 
 \input{figures/energy_methods_cluster}

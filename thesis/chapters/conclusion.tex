@@ -39,15 +39,17 @@ This depended on the choice of preconditioner, as the degradation occurred with 
 \section{Energy Calculation}
 \label{sec:conclusion-energy-calculation}
 
-The naive kernel brought a massive speedup over the original CPU implementation of the energy calculation.
-When it is not held back by the FP64 performance of the hardware, it managed to outperform the much more sophisticated FMM.
+The naive kernel brought a massive speedup over the original CPU implementation of the energy calculation, ranging from 7.7x up to 24.6x using an RTX 3080.
+The speedup increased even further to around 300x on an A100.
+When it is not held back by the FP64 performance of the hardware, it managed to outperform the much more sophisticated FMM
 Such was the case for 1CCM on the RTX 3080, and even 1VSZ on the A100, though these took less than a second in both cases.
-Nevertheless, once the compute bound set in on the FMM brought massive performance gains.
-For 6VYB running on the RTX 3080 it decreased the time 7.5x over the naive kernel, while decreasing the time for H1N1 capsid by 13x.
-It simultaneously honors the baseline accuracy that NextGenPB inherently provides.
+Nevertheless, once the compute-bound set in on the FMM brought massive performance gains.
+For 6VYB running on the RTX 3080 it decreased the time by 7.5x compared to the naive kernel, and 127x compared to the CPU. 
+It also managed a 13x time reduction for H1N1 capsid running four H200 GPUs, all while honoring the baseline accuracy that NextGenPB inherently provides.
 This makes a mixed precision approach obsolete, which would compromise the accuracy target.
 
 Both the naive kernels and FMM scale monotonically on more nodes and GPUs, since they are unaffected by communication latency and bandwidth.
+One positive side effect the optimizations brought is that NextGenPB can now be used on fewer nodes to compute the PBE for medium sized and even large molecules, coincidentally reducing queue times.
 
 One important discovery was the separation of the tree leaf size, as number and density of source- and target particles in case of NextGenPB was wildly different.
 Before, I used a single leaf size for both trees, which resulted in very different geometric leaf sizes.

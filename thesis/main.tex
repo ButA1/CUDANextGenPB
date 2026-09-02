@@ -2,7 +2,7 @@
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage[english]{babel}
+\usepackage[main=english,ngerman]{babel}
 \usepackage{graphicx}
 \usepackage{tikz}
 \usetikzlibrary{matrix,positioning,decorations.pathreplacing,arrows.meta,fit}
@@ -95,9 +95,14 @@
 \addbibresource{references.bib}
 
 % ---- Title page fields: edit these ----
-\newcommand{\thesistitle}{Your Thesis Title Here}
-\newcommand{\thesisauthor}{Your Name}
+\newcommand{\thesistitle}{Accelerating NextGenPB using CUDA}
+\newcommand{\thesisauthor}{Alexander But}
+\newcommand{\thesisprogram}{Computer Engineering}
+\newcommand{\thesismatriculation}{372396}
 \newcommand{\thesisdegree}{Master of Science}
+\newcommand{\thesisreviewerone}{Prof. Dr. Michel Steuwer}
+\newcommand{\thesisreviewertwo}{Prof. Dr. Maria Andrea Mroginski}
+\newcommand{\thesisadvisor}{Prof. Dr. Michel Steuwer}
 \newcommand{\thesisdate}{\today}
 % ----------------------------------------
 
@@ -109,33 +114,53 @@
 \begin{titlepage}
     \centering
 
-    % --- TU logo placeholder ---
-    % Replace this framed box with:
-    %   \includegraphics[width=4cm]{tu_logo}
-    % once you have the actual logo file (e.g. tu_logo.pdf/.png)
-    % placed in this same directory.
-    \fbox{\parbox[c][4cm][c]{4cm}{\centering\itshape TU logo\\placeholder}}
+    \includegraphics[width=5cm]{tu_logo}
 
     \vspace{1.5cm}
     {\large Technische Universität Berlin\par}
     \vspace{0.5cm}
-    {\large Faculty Name\par}
-    \vspace{2cm}
+    {\large Compilers and Programming Languages\par}
+    \vspace{1.5cm}
 
     {\Huge\bfseries \thesistitle\par}
-    \vspace{2cm}
-
-    {\Large \thesisauthor\par}
-    \vspace{1cm}
+    \vspace{1.2cm}
 
     {\large Thesis submitted in partial fulfillment of the requirements\\
     for the degree of \thesisdegree\par}
-    \vspace{2cm}
+    \vspace{1.2cm}
 
+    {\Large \thesisauthor\par}
+    \vspace{0.3cm}
+    {\large Degree Program: \thesisprogram\par}
+    {\large Matriculation Number: \thesismatriculation\par}
+    \vspace{1.2cm}
+
+    {\large\bfseries Reviewers\par}
+    \vspace{0.2cm}
+    {\large \thesisreviewerone\par}
+    {\large \thesisreviewertwo\par}
+    \vspace{0.8cm}
+
+    {\large\bfseries Advisor\par}
+    \vspace{0.2cm}
+    {\large \thesisadvisor\par}
+    \vspace{0.8cm}
+
+    {\large\bfseries Submission Date\par}
+    \vspace{0.2cm}
     {\large \thesisdate\par}
 
     \vfill
 \end{titlepage}
+
+% ============================================================
+% FRONT MATTER
+% ============================================================
+\input{chapters/declaration.tex}
+
+\input{chapters/abstract_en.tex}
+
+\input{chapters/abstract_de.tex}
 
 % ============================================================
 % TABLE OF CONTENTS (regenerates automatically on each compile)
