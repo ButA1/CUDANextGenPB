@@ -131,3 +131,4 @@ test*/bench_meta.json
 test*/*.mixed_backup
 test*/bench_logs/
 test*/options.prm.bench_backup
+thesis/figures/signature.png

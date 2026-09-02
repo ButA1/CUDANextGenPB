@@ -4,8 +4,25 @@ Hereby I declare that I wrote this thesis myself with the help of no more than t
 
 \vspace{3cm}
 
+% Set these to the actual signing place and submission date before the final build.
+\newcommand{\signplace}{Berlin}
+\newcommand{\signdate}{\today}
+
+% Drawn/scanned signature, dropped in as figures/signature.png. Wrapped in
+% \IfFileExists so an unsigned draft still compiles with a blank rule instead
+% of dying on a missing file.
+\newcommand{\signatureimage}{%
+    \IfFileExists{figures/signature.png}
+        {\includegraphics[height=1.4cm]{figures/signature.png}}
+        {}%
+}
+
 \noindent
 \begin{tabular}{@{}p{6cm}@{\hspace{2cm}}p{6cm}@{}}
+    % Zero declared depth on both boxes so the signature sits on the rule
+    % below rather than pushing it down.
+    \raisebox{2pt}[1.4cm][0pt]{\signplace, \signdate} &
+    \raisebox{-4pt}[1.4cm][0pt]{\signatureimage} \\
     \hrulefill & \hrulefill \\
     Place, Date & \thesisauthor
 \end{tabular}
