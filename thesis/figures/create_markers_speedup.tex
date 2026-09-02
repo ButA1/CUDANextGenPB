@@ -45,14 +45,14 @@
     },
 ]
   \addplot+[
-    ybar, fill=cmbefore, draw=cmbefore!70!black, line width=0.4pt,
+    ybar, bar shift=0pt, fill=cmbefore, draw=cmbefore!70!black, line width=0.4pt,
     error bars/.cd, y dir=both, y explicit,
   ] table[row sep=\\, x=x, y=y, y error plus=ep, y error minus=em] {
     x y ep em \\
     0 55.4791 1.1148 0.1899 \\
   };
   \addplot+[
-    ybar, fill=cmafter, draw=cmafter!70!black, line width=0.4pt,
+    ybar, bar shift=0pt, fill=cmafter, draw=cmafter!70!black, line width=0.4pt,
     error bars/.cd, y dir=both, y explicit,
   ] table[row sep=\\, x=x, y=y, y error plus=ep, y error minus=em] {
     x y ep em \\

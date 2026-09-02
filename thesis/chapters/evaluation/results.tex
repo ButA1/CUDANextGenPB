@@ -240,6 +240,7 @@ I will refrain from calling this a general trend, but rather fluctuations attrib
 \input{figures/platform_shift_6vyb.tex}
 \input{figures/platform_shift_6vyb_table.tex}
 \input{figures/platform_shift_1vsz.tex}
+\input{figures/platform_shift_1vsz_table.tex}
 
 Despite the multitude of variables, the general direction for searching optima is clear, and considering the accuracy target, the mission now became a search for the fastest configuration that still satisfies it.
 I converged towards a local optimum through successive sweeps of the best configuration.
@@ -285,7 +286,8 @@ The naive kernel also brought a massive speedup over the CPU path as well.
 
 I also ran 6VYB, 1VSZ, as well as H1N1 on the cluster, which can be seen in Figure~\ref{fig:energy-methods-cluster} and Table~\ref{tab:energy-methods-cluster}.
 6VYB and 1VSZ were run on a single A100 node, while H1N1 was run on two H200 nodes, that have two GPUs each.
-Note that each CPU run was taken from the cluster CPU. %TODO maybe I should just replace those with the local CPU times
+Note that each CPU run was measured on the cluster CPU.
+Also, due to time constraints and long queue times, the FMM were not using the most optimal configurations. %TODO what were those? did I have a config that beat native?
 Now running on a workstation GPU, the naive kernel are not FP64 bound anymore, and the gap between it and FMM, which existed on the local machine, basically disappears.
 1VSZ is now slightly faster using the naive kernels, while 6VYB is slightly faster using FMM, and this was before the leaf-count split, still running on the old $P = 10, \theta = 0.4, n_{leaf} 256$ configuration.
 Nevertheless, the gap reappears on H1N1, where FMM once again shows a massive speedup over the naive kernel.
@@ -298,10 +300,10 @@ Given that the naive kernel is the exact math, not an approximation, this should
 \input{figures/energy_methods_cluster}
 \input{figures/energy_methods_cluster_table}
 
-Lastly I want to compare how FMM and the naive kernels scale across the topologies using Figure~\ref{fig:energy_scaling_6vyb} and Table~\ref{tab:energy_scaling_6vyb}.
+Next I want to compare how FMM and the naive kernels scale across the topologies using Figure~\ref{fig:energy_scaling_6vyb} and Table~\ref{tab:energy_scaling_6vyb}.
 Going from the RTX 3080 to its bigger sibling, the A100, we see a huge performance increase for the naive kernel, really accentuating the lack of FP64 units on the former.
 The improvement for FMM is much smaller, but it also gives an idea of how much it reduces the compute intensity of the N-Body calculation.
-% TODO these are wall clocks for the full stage, that sucks! The workstation CPU is way slower.
+Note that I am comparing the best local FMM parameter configuration for 6YVB, while the configuration for the cluster has a $n_{leaf,src}$ of 32 instead of 16, which performs better on the A100.
 Unlike AMGX, neither FMM nor the naive kernels need to communicate during the computation.
 Therefore there the two-node setup scales normally. 
 In case of FMM, it is scales even better than the one dual GPU node.
@@ -430,3 +432,12 @@ In case of FMM, it is scales even better than the one dual GPU node.
 %  A100 bars collapse into stubs. figures/energy_methods is log for the same
 %  reason.
 % ------------------------------------------------------------------------
+
+\subsection{Total Time}
+\label{evaluation-results-total-time}
+
+Lastly I want to showcase the speedup to the total time of the entire NGPB pipeline running on the local system.
+The CPU baseline was measures including the host-side optimizations.
+The setting for the CUDA-enabled steps where picked from the best configurations of the previous results for the local system.
+That means all optimized runs used AMGX with the tuned configuration.
+For 1CCM I used the naive kernel, while for 6VYB and 1VSZ I used the best measured configurations found in \ref{sec:evaluation-results-fmm-parameters}.

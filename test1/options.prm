@@ -22,7 +22,7 @@ calc_coulombic = 1
 
 [algorithm]
 linear_solver       = lis
-energy_method       = 2
+energy_method       = 0
 fmm_mac             = 0.3
 fmm_multipole_order = 9
 fmm_leaf_size       = 8
