@@ -2,7 +2,7 @@
 \begin{table}[!htb]
 \centering
 \footnotesize
-\caption[Linear solver comparison]{\textbf{Linear solver comparison.} Median. \emph{stage} is the whole \solverMetric{}, split into the part AMGX spends on the GPU (its own \emph{setup} and \emph{solve} timers) and the \emph{host} remainder -- assembly, host--device transfer and the surrounding CPU work, which no faster accelerator touches and which can dominate the total. \emph{rel.} is the stage time relative to the fastest configuration for that molecule. LIS never touches the GPU, so its whole stage is host time.\solverMachine{}\solverCaveats{} The residuals differ by orders of magnitude, so the times are not like-for-like.}
+\caption[Linear solver comparison]{\textbf{Linear solver comparison.} Median over \solverRepeatssolverbench{} runs. \emph{stage} is the whole \solverMetricsolverbench{}, split into the part AMGX spends on the GPU (its own \emph{setup} and \emph{solve} timers) and the \emph{host} remainder -- assembly, host--device transfer and the surrounding CPU work, which no faster accelerator touches and which can dominate the total. \emph{rel.} is the stage time relative to the fastest configuration for that molecule. LIS never touches the GPU, so its whole stage is host time.\solverMachinesolverbench{}\solverCaveatssolverbench{} The residuals differ by orders of magnitude, so the times are not like-for-like.}
 \label{tab:solver-bench}
 \begin{tabular}{llrrrrrrl}
 \toprule
@@ -21,9 +21,6 @@ molecule & configuration & iters & setup & solve & host [s] & stage [s] & rel. &
 1vsz & LIS & 168 & -- & -- & 51.2443 & 51.2443 & 14.52$\times$ & $8.1\times10^{-7}$ \\
  & AMGX (default) & 523 & 0.0038 & 3.5288 & 2.1780 & 5.7106 & 1.62$\times$ & $2.7\times10^{-8}$ \\
  & AMGX (tuned) & 51 & 0.1882 & 1.1297 & 2.2106 & 3.5284 & 1.00$\times$ & $2.1\times10^{-8}$ \\
-\midrule
-H1N1 & LIS & 169 & -- & -- & 518.3410 & 518.3410 & 12.30$\times$ & $3.5\times10^{-7}$ \\
- & AMGX (tuned) & 31 & 5.5863 & 3.5901 & 32.9625 & 42.1390 & 1.00$\times$ & $4.9\times10^{-7}$ \\
 \bottomrule
 \end{tabular}
 \end{table}

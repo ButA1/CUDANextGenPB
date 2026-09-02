@@ -493,6 +493,7 @@ Create markers checks whether a ray is present in the ray cache using \snakecase
 As rank 0 owns the NanoShaper instance, it is the only rank that can cast rays.
 The other ranks request new rays from rank 0 by putting them in a rays list.
 This is done during each iteration while classifying the quadrants of the domain at the same time.
+
 It is faster to collect all the possible new rays first and then cast them in a bundle and distribute them to the individual ranks, and then classify them afterwards.
 In a first pass, I collected all the necessary rays using a new helper function \snakecase{ensure_ray}, that still checks the ray cache for their presence but does not compute it yet, if it is absent.
 Other ranks still insert their ray requests into the rays list, as was the case before.

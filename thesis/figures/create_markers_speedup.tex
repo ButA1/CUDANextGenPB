@@ -70,6 +70,6 @@
 \end{axis}
 \end{tikzpicture}
 
-\caption[\texttt{create\_markers} speedup from bulk ray collection]{\textbf{\snakecase{create\_markers} vs.\ \snakecase{create\_markers\_fast} wall time, 6VYB (test1).} Median over 3 runs, whiskers spanning fastest to slowest; the label above each bar is that median in seconds, with the speedup relative to \snakecase{create\_markers} in parentheses. \snakecase{create\_markers\_fast} collects all needed rays first with \snakecase{ensure\_ray}, then casts and distributes them in one bulk pass before classification (Section~\ref{sec:implementation-host-side-create-markers}). Measured on the local system (Table~\ref{tab:test-systems}).}
+\caption[\texttt{create\_markers} speedup from bulk ray collection]{\textbf{\snakecase{create\_markers} vs.\ \snakecase{create\_markers\_fast} wall time, 6VYB (test1).} Median over 3 runs, whiskers spanning fastest to slowest; the label above each bar is that median in seconds, with the speedup relative to \snakecase{create\_markers} in parentheses. Measured on the local system (Table~\ref{tab:test-systems}).}
 \label{fig:create-markers-speedup}
 \end{figure}

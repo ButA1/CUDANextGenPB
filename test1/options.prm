@@ -21,10 +21,11 @@ calc_coulombic = 1
 [../]
 
 [algorithm]
-linear_solver       = lis
-energy_method       = 0
-fmm_mac             = 0.3
-fmm_multipole_order = 9
-fmm_leaf_size       = 8
+linear_solver       = amgx
+amgx_config         = /usr/local/nextgenPB/data/amgx_pcgf_amg_block_jacobi.json
+energy_method       = 2
+fmm_mac             = 0.4
+fmm_multipole_order = 11
+fmm_leaf_size       = 16
 fmm_target_leaf_size = 1024
 [../]

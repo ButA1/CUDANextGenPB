@@ -1,7 +1,8 @@
 \section{Results}
 \label{sec:evaluation-results}
 
-In this section I first touch on the improvements to the host-side optimizations to establish the speedup, which both the baseline and the CUDA optimization benefit from.
+In this section I first touch on the improvements to the host-side optimizations to establish their speedup, which both the baseline and the CUDA optimization benefit from.
+After that I will establish the baseline, since I got slightly different results for the analytical tests, even without modifications.
 Next I will show the comparison between LIS and AMGX, as well as the tuned configuration for the latter, on both the local machine and the cluster.
 The energy calculation results are a lot more intricate, particularly due to my FMM implementation having different parameters.
 It also lead to the discovery, that due to NGPB evaluating the molecular atoms against the surface, having a shared leaf size for both trees was actually detrimental.
@@ -11,18 +12,30 @@ It also lead to the discovery, that due to NGPB evaluating the molecular atoms a
 
 \input{figures/create_markers_speedup}
 
+I created an optimized version of \snakecase{create_markers} called \snakecase{create_markers_fast} according to the implementation described in \ref{sec:implementation-host-side-create-markers}.
+This has nothing to do with the NGPB's convention of suffixing functions, which assume an unrefined grid wht \snakecase{_fast}.
+This method supports both, and simply stemmed from my early misunderstanding of the convention.
+
 For 6VYB, \snakecase{create_markers} took almost a full minute on the local machine.
-\snakecase{create_markers_fast} reduced that time to roughly 33 seconds, while not affecting accuracy (Figure~\ref{fig:create-markers-speedup}).
+\snakecase{create_markers_fast} reduced that time to roughly 33 seconds, while not affecting accuracy as shown in Figure~\ref{fig:create-markers-speedup}.
+This shows that despite using two separate loops, computing the the ray casts and distributing them to the other ranks if much quicker than doing it on every loop.
 
 \subsection{BIMPP}
 \label{sec:evaluation-results-bimpp}
+
+I forked the official BIMPP repository to do my implementations, and built and installed on my local system.
+I also shipped my local build with the Singularity container instead of the official one.
+Using git I could quickly switch between the official version and my own if needed.
 
 \subsubsection{sparse\_matrix\_template}
 
 % ------------------------------------------------------------------------
 %  NOTE (Claude): figure + numbers only, per the other results subsections.
 %
-%  Heaptrack, 6VYB, rank 1, both captures on the AMGX solver, local system,
+%  Heaptrack, 6VYB, rank 1, both captures on the LIS solver (verified by
+%  filtering each profile for lis_/amgx_compute_electric_potential -- the
+%  earlier "AMGX" label was carried over from the superseded files' names and
+%  was wrong), local system,
 %  before/after swapping bimpp's sparse_matrix_template storage from
 %  std::vector<std::map<int,double>> to boost::container::flat_map
 %  (see [[project_bimpp_memory]] in memory):
@@ -63,48 +76,58 @@ For 6VYB, \snakecase{create_markers} took almost a full minute on the local mach
 % ------------------------------------------------------------------------
 
 Figure~\ref{fig:bimpp-memory-fix} shows the reduction of the memory consumption on rank 1 for 6VYB (test1).
-As expected, the move from \snakecase{std::map} to \snakecase{boost::container::flat\_map} lead more than 2x reduction of the host memory usage during \snakecase{assemble\_system\_matrix}, which is the most memory intensive step of the entire NGPB pipeline.
+The move from \snakecase{std::map} to \snakecase{boost::container::flat\_map} lead to a 2.14x reduction of the host memory usage during \snakecase{assemble\_system\_matrix}, which was better than the predicted 2x reduction.
+Upon closer inspection, the swap shrinks the per-entry storage \textit{and} the outer vector of row handles, independently.
+Being the most memory intensive step in the entire NGPB pipeline, it had a great effect on the total memory consumption as well, reducing it by 1.5x.
 The remaining memory utilization of around 2.02GB, coming mostly from the p8est mesh, is unchanged.
-This change had no impact on accuracy, however it has slightly positive impact on the stage time of \snakecase{assemble\_system\_matrix}, going from an average of 22 seconds to 20.
+The totals are Heaptrack's peak heap memory consumption over the whole run, while the numbers for \snakecase{assemble\_system\_matrix} are the sum its allocations. 
+This change had no impact on accuracy, however it has slightly positive impact on the stage time of \snakecase{assemble\_system\_matrix}, going from roughly 22 seconds to 20.
+
+I have to clarify that this did not fix BIMPP's general issue of storing the entire global row of a distributed sparse matrix on every rank.
+However, that would have required major architectural changes to BIMPP.
+The swap was a non-intrusive band-aid-fix.
 
 \input{figures/bimpp_memory_fix.tex}
 
 \subsubsection{bim3a\_solution\_with\_ghosts}
 
-My optimization \snakecase{bim3a_solution_with_ghosts} reduced the time taken for 6YVB from 10 seconds to 60 milliseconds.
-Being used at the end of every solver, and twice inside \snakecase{create_density_map}, this had an overall very positive effect on the total time for the full NGPB pipeline.
-It shaved off roughly 30 seconds, with \snakecase{create_density_map} alone shrinking from taking 24 seconds to just 2.5 seconds.
+My optimized \snakecase{bim3a_solution_with_ghosts} reduced the time taken for 6YVB from 10 seconds to just 60 milliseconds, which is an extreme speedup of almost 170x.
+This moves it from being a significant contributor of the overall time to basically negligible.
+Being used at the end of every solver, and twice inside \snakecase{create_density_map}, this removed roughly 30 from the overall total time for the full NGPB pipeline, \snakecase{create_density_map} alone shortening from 24 seconds to just 2.5 seconds.
 This change also had no impact on accuracy.
+The only thing this costs is that the function is less agnostic to p4est, which means nothing in a library that otherwise solely relies on it.
 
 \subsection{Baseline}
+\label{evaluation-results-baseline}
 
-
-% TODO pick either perfil 2 to be the same more than twice of perfil 1
-I got slightly different results for the two analytical tests than the original paper.
-Some relative errors slightly lower for me than in the paper, while others slightly higher.
+I got slightly different results for the two analytical tests than the NGPB paper \cite{diflorio2025nextgenpb}.
+Some relative errors slightly are lower for me, while others slightly higher.
 The order or magnitude stayed the same across the board.
 The differences are shown in Table~\ref{tab:baseline-accuracy}.
-I intent to use the lowest error in each case as the reference.
 Interestingly, the triangulation-fix had no impact on these test.
 The relative errors were exactly identical.
 
 \input{figures/baseline_accuracy_table}
 
 Although AMGX was set to a lower residual, it did not increase accuracy.
-In fact is worsened the polarization error for the Kirkwood sphere test slightly when compared to the LIS result, but it is still way better than the result from the paper.
-AMGX did genuinely reach a lower residual (1.195268e-09) than LIS (5.921088e-07).
-For FMM I used the accuracy values of LIS.
+In fact is worsened the polarization error for the Kirkwood sphere test slightly when compared to the LIS result, which is still way better than the result from the paper.
+AMGX did genuinely reach a lower residual (1.195268e-09) than LIS (5.921088e-07), suggesting this is not a limitation of the software, but rather limitation of the mathematical method.
+It also might explain why the authors of NGPB had LIS set to a residual of 1e-6: at this value the accuracy already bottoms out.
+I set my personal result with LIS as the accuracy requirement for FMM.
 For AMGX I accepted the slight loss, as it is clearly very small.
 
 \subsection{Linear Equation Solver}
 \label{sec:evaluation-results-lin-eq-solver}
 
-Figure~\ref{fig:solver-bench} shows the relative speedup achieved by AMGX for all molecules.
+Figure~\ref{fig:solver-bench} compares the total stage time of all linear solver for all molecules.
 Despite being set to a much smaller residual, the default configuration for AMGX manages to beat LIS at every sample size on the local system.
 For 1VSZ and 6VYB, the speedup was 10x, while for 1CCM it was much smaller.
 The tuned AMGX configuration runs faster than the default one, also at every sample size.
+This only tells half of the story: Table~\ref{tab:solver-bench} breaks the stage time down into the host time and AMGX's actual solve time.
+As LIS runs entirely on the CPU, its entire time attributed to the host.
+This shows that the CPU time for AMGX path, made up of the data gathering and transfer, is significant.
 
-One interesting observation I made is that despite having more than 4x the atoms, 1VSZ's solve was a bit quicker than 6VYB's across the board.
+An interesting observation I made is that despite having more than 4x the atoms, 1VSZ's solve was a bit quicker than 6VYB's across the board.
 Upon inspection the number of quadrants and nodes for each molecule, 6VYB's grid had 28008707 nodes and 28294120 quadrants, while 1VSZ had 15879325 nodes and 16073576 quadrants.
 The number nodes equate to the dimension of the solution vector of the linear equation, which explains why 1VSZ's solve time is quicker.
 This implies that the number of atoms is not the only factor that predicts the size of the linear system.
@@ -136,6 +159,27 @@ This demonstrates that having very cheap iterations can still make up for the ha
 
 \input{figures/solver_bench.tex}
 \input{figures/solver_bench_table.tex}
+
+% TODO (prose): write the cluster-comparison paragraph, mirroring the
+% local one above and the energy-calculation local/cluster split in
+% \ref{sec:evaluation-results-energy-calculation}. Figures~\ref{fig:solver-bench-cluster}
+% and Table~\ref{tab:solver-bench-cluster} cover the same sweep A (LIS /
+% AMGX default / AMGX tuned) run on the cluster: 6VYB and 1VSZ on a single
+% A100 node at 16 ranks (test5/leafsweep_6VYB, test6/leafsweep_1VSZ), H1N1
+% on an H200 node at 8 ranks (test7) with only LIS and AMGX (tuned) captured
+% (no default-AMGX run exists for H1N1) -- called out automatically in
+% \solverCaveatssolverbenchcluster.
+% Numbers for reference: the LIS/AMGX(tuned) gap shrinks on the cluster --
+% 6VYB goes from 14.88x locally to 8.47x, 1VSZ from 14.52x to 6.99x, versus
+% H1N1's 12.30x. Table~\ref{tab:solver-bench-cluster}'s host-time column shows
+% why: AMGX's own setup+solve time roughly halves on the A100 (the GPU itself
+% is faster), but the host remainder is flat or slightly higher than locally
+% despite going from 4 to 16 ranks -- the cluster's weaker per-core CPU offsets
+% the extra parallelism there. LIS's stage time (all host, and the only sweep
+% A configuration whose host time IS the whole distributed solve) still drops
+% by ~2x on 16 ranks, which is what shrinks the gap.
+\input{figures/solver_bench_cluster.tex}
+\input{figures/solver_bench_cluster_table.tex}
 
 I then compared the AMGX solve time for 6VYB for four different topologies: the local system, a one cluster node with a single A100 GPU, one with dual A100 GPUs and two nodes with one A100 each, shown in Figure~\ref{fig:amgx_scaling_6vyb} and Table~\ref{tab:amgx_scaling_6vyb}.
 I omitted the runtime for LIS on the A100 cluster node, since it ran much slower due to their old CPUs.

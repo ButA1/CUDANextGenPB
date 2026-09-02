@@ -1,7 +1,8 @@
 % ------------------------------------------------------------------------
 %  sparse_matrix_template memory fix: std::map -> boost::container::flat_map.
 %  Hand-authored from the 2026-09-01 matched pair (rank 1, 6VYB, 4 MPI ranks,
-%  AMGX): test1/profiles/ngpb.rank1.zst (std::map, captured 17:38 against a
+%  LIS -- verified in both captures, not taken from the filenames):
+%  test1/profiles/ngpb.rank1.zst (std::map, captured 17:38 against a
 %  reinstalled base bimpp) and the cook of the 13:43 capture (flat_map).
 %  Same config, VERIFIED -- not assumed. The container-independent mesh proxies
 %  are identical digit for digit across the pair:
@@ -78,6 +79,6 @@
 \end{axis}
 \end{tikzpicture}
 
-\caption[Sparse matrix memory fix]{\textbf{Effect of the \texttt{sparse\_matrix\_template} fix on peak host memory, 6VYB, rank 1.} The process-wide peak heap consumption against the peak attributable to \snakecase{assemble\_system\_matrix} (Section~\ref{sec:evaluation-experimental-setup-comparing-memory-utilization}). The totals are heaptrack's peak heap memory consumption over the whole run; the assembly figures sum its allocation sites. Both captures use the AMGX solver, measured on the local system (Table~\ref{tab:test-systems}).}
+\caption[Sparse matrix memory fix]{\textbf{Effect of the \texttt{sparse\_matrix\_template} fix on peak host memory, 6VYB, rank 1.} The process-wide peak heap consumption against the peak attributable to \snakecase{assemble\_system\_matrix} (Section~\ref{sec:evaluation-experimental-setup-comparing-memory-utilization}). Both captures use the LIS solver, measured on the local system (Table~\ref{tab:test-systems}).}
 \label{fig:bimpp-memory-fix}
 \end{figure}
