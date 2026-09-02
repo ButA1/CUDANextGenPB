@@ -1,0 +1,16 @@
+# Total pipeline time (the "total" line of the NGPB run report), collected by
+# hand from local runs and kept here because these runs postdate the
+# bench_sweep.py CSVs in test0/ test1/ test2/ -- there is no bench_runs.csv to
+# regenerate them from. Times are MILLISECONDS, as the run report prints them.
+#
+# baseline  = LIS + the stock CPU energy path (energy_method = 0)
+# optimized = AMGX with the tuned config (amgx_pcgf_amg_block_jacobi.json)
+#             + the best local energy method for that molecule
+# All rows: local system, 4 MPI ranks.
+molecule,config,run1_ms,run2_ms,run3_ms
+1CCM,baseline,1462.712,1432.274,1401.344
+1CCM,optimized,1190.727,1174.663,1155.071
+6VYB,baseline,584499.612,579588.641,579266.099
+6VYB,optimized,72972.816,72413.665,73135.148
+1VSZ,baseline,212107.749,209863.317,211046.344
+1VSZ,optimized,39205.264,38783.131,39053.386

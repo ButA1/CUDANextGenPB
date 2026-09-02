@@ -44,7 +44,7 @@
     legend style={draw=none, font=\footnotesize, column sep=0.6em},
 ]
 
-\nextgroupplot[xlabel={$n_{leaf,src}$}, xtick={8,16,32,64}, xticklabels={8,16,32,64}, ymin=0.958292, ymax=1.56305, legend columns=3, legend to name=platlegendsrcplatformshiftvsz]
+\nextgroupplot[xlabel={$n_{leaf,src}$}, xtick={8,16,32,64}, xticklabels={8,16,32,64}, ymin=0.958292, ymax=1.56305, legend columns=1, legend to name=platlegendsrcplatformshiftvsz]
   \addplot[color=platA, mark=*, mark size=1.3pt, line width=0.9pt]
     table[x=x, y=tnorm, discard if not={sid}{0}] {figures/data/platform_shift_1vsz_src.dat};
   \addlegendentry{RTX 3080, 4 ranks (tgt 512)}
@@ -57,7 +57,7 @@
   \addplot[only marks, mark=o, mark size=3.6pt, line width=0.9pt,
            color=black!75, forget plot] coordinates {(16,1) (32,1) (32,1)};
 
-\nextgroupplot[xlabel={$n_{leaf,tgt}$}, xtick={128,256,512,1024,2048,4096}, xticklabels={128,256,512,1024,2048,4096}, ymin=0.909977, ymax=2.21532, legend columns=3, legend to name=platlegendtgtplatformshiftvsz]
+\nextgroupplot[xlabel={$n_{leaf,tgt}$}, xtick={128,256,512,1024,2048,4096}, xticklabels={128,256,512,1024,2048,4096}, ymin=0.909977, ymax=2.21532, legend columns=1, legend to name=platlegendtgtplatformshiftvsz]
   \addplot[color=platA, mark=*, mark size=1.3pt, line width=0.9pt]
     table[x=x, y=tnorm, discard if not={sid}{0}] {figures/data/platform_shift_1vsz_tgt.dat};
   \addlegendentry{RTX 3080, 4 ranks (src 16)}
@@ -74,10 +74,17 @@
 \end{tikzpicture}
 
 \vspace{0.4ex}
+\begin{minipage}[t]{7.4cm}
+\centering
+{\scriptsize\emph{source leaf axis}}\\[0.2ex]
 \ref{platlegendsrcplatformshiftvsz}
-
-\vspace{0.2ex}
+\end{minipage}%
+\hspace*{1.5cm}%
+\begin{minipage}[t]{7.4cm}
+\centering
+{\scriptsize\emph{target leaf axis}}\\[0.2ex]
 \ref{platlegendtgtplatformshiftvsz}
+\end{minipage}
 
 \caption[Which platform change moves which leaf axis]{\textbf{The two leaf axes
     on \platMoleculeplatformshiftvsz{} (\platNatomsplatformshiftvsz{} atoms) under a change of GPU and a change

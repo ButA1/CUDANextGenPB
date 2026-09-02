@@ -1,0 +1,4 @@
+molecule baseline baseline_em baseline_ep baseline_lbl optimized optimized_em optimized_ep optimized_lbl
+1CCM 1.43227 0.03093 0.030438 1.43 1.17466 0.019592 0.016064 1.17
+6VYB 579.589 0.322542 4.91097 580 72.9728 0.559151 0.162332 73.0
+1VSZ 211.046 1.18303 1.06141 211 39.0534 0.270255 0.151878 39.1

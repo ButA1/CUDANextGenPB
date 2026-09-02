@@ -626,12 +626,10 @@ DNFMARKS
 \end{tikzpicture}
 
 \caption[Energy stage cost by method]{\textbf{Cost of the energy stage on
-    \energyMolecules{}.} Median wall time of the \texttt{Compute energy} stage
-    over \energyRepeats{} runs on a logarithmic axis, whiskers spanning fastest
-    to slowest; the number above each bar is that median in seconds. The bars
-    are the stock CPU path (\texttt{energy\_method\,=\,0}), the naive $O(NM)$
-    GPU sum (\texttt{\,=\,1}) and the FMM (\texttt{\,=\,2}), on the same
-    discretisation.\energyFmmConfig\energyMachine\energyCaveats}
+    \energyMolecules{}.} Median wall time of the energy calculation stage on a
+    logarithmic axis; the number above each bar is that median in seconds. The
+    bars are the stock CPU path, the naive $O(NM)$ GPU sum and the
+    FMM, on the same discretisation.\energyMachine\energyCaveats}
 \label{fig:REFLABEL}
 \end{figure}
 """
@@ -766,13 +764,13 @@ def write_table(path, datasets, dnf_limit_s):
         # the figure cannot show. Set inside the table so it does not leak.
         "\\setlength{\\tabcolsep}{5pt}",
         "\\caption[Energy stage cost by method]{\\textbf{Cost and accuracy of "
-        "the energy stage by method.} Median over \\energyRepeats{} runs; "
+        "the energy stage by method.} Median; "
         "\\emph{spread} is half the fastest-to-slowest range as a percentage "
         "of that median. \\emph{vs.\\ CPU} and \\emph{vs.\\ naive} are the "
         "speed-ups over those two paths. The relative errors are against "
         "\\energyReference{}, and are the quantities the FMM parameter sweep "
         "(Section~\\ref{sec:evaluation-results-energy-calculation}) was ranked "
-        "on.\\energyFmmConfig\\energyMachine\\energyCaveats}",
+        "on.\\energyMachine\\energyCaveats}",
         "\\label{tab:REFLABEL}",
         "\\begin{tabular}{llrrrrrrr}",
         "\\toprule",

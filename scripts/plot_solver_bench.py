@@ -528,13 +528,9 @@ def write_table(path, datasets, metric, out_tex):
         "\\caption[Linear solver comparison]{\\textbf{Linear solver comparison.} "
         "Median over \\solverRepeats{} runs. \\emph{stage} is the whole "
         "\\solverMetric{}, split into the part AMGX spends on the GPU (its own "
-        "\\emph{setup} and \\emph{solve} timers) and the \\emph{host} remainder "
-        "-- assembly, host--device transfer and the surrounding CPU work, which "
-        "no faster accelerator touches and which can dominate the total. "
+        "\\emph{setup} and \\emph{solve} timers) and the \\emph{host} remainder. "
         "\\emph{rel.} is the stage time relative to the fastest configuration "
-        "for that molecule. LIS never touches the GPU, so its whole stage is "
-        "host time.\\solverMachine{}\\solverCaveats{} The residuals differ by "
-        "orders of magnitude, so the times are not like-for-like.}",
+        "for that molecule.\\solverMachine{}\\solverCaveats{}}",
         "\\label{tab:REFLABEL}",
         "\\begin{tabular}{llrrrrrrl}",
         "\\toprule",

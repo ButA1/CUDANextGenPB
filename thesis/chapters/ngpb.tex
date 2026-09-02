@@ -105,6 +105,16 @@ It can be roughly summarized into the following stages:
     \item Solving the linear equation
     \item Energy calculation
 \end{enumerate}
+Their time complexity can be seen in Figure~\ref{fig:original-profiling}.
+The two most time consuming parts for large numbers of atoms are clearly the linear equation solve, and the energy calculation.
+The energy calculation also exhibits a non-linear growth.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/original_profiling_atoms.png}
+    \caption[Original NGPB per-stage profiling]{Wall-clock time of each pipeline stage against the number of atoms, as profiled by the original NGPB authors on the CPU-only implementation. Title and axis labels translated from the original Italian; data and legend unchanged.}
+    \label{fig:original-profiling}
+\end{figure}
 
 \subsection{Reading Inputs}
 \label{sec:nextgenpb-submodules-input}

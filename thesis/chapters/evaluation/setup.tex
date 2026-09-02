@@ -94,6 +94,8 @@ The other two flags \texttt{-mtune=native} and \texttt{-march=native} are more b
 
 The main two metrics used for evaluation were the execution time and accuracy of the results, while memory usage served a secondary role. 
 I created a handful of test cases using different PQR models as seen in Table~\ref{tab:test-molecules}.
+Since 1CCM took only a few seconds on the local machine, I did not use it on the cluster, as the speedup would have been too hard to determine there.
+Conversely I could not run H1N1 locally, as it needed hundreds of gigabytes of RAM.
 
 The test cases generally fell into two categories: analytical test cases and comparative test cases.
 The analytical test cases were used to verify the correctness of the results with respect to the known analytical results taken from the NGPB paper \cite{diflorio2025nextgenpb}. 

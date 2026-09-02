@@ -169,6 +169,26 @@ This dropped the total time by another 25\%.
 On the CPU side: 
 Since the polarization and ionic kernels both need the same charge and atom arrays as the Coulomb kernel, I've reused their device pointers, but the speedup of that was miniscule.
 
+The roofline models for the polarization and ionic kernels running 6VYB (Figure~\ref{fig:roofline-naive-kernels}) was basically already maxed out.
+\begin{figure}[!htb]
+\centering
+\begin{subfigure}[b]{0.47\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/roofline_naive_polarization.png}
+    \caption{Polarization kernel}
+    \label{fig:roofline-naive-polarization}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.47\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/roofline_naive_ionic.png}
+    \caption{Ionic kernel}
+    \label{fig:roofline-naive-ionic}
+\end{subfigure}
+\caption[Roofline models of the naive polarization and ionic kernels]{Nsight Compute double-precision roofline charts for the naive kernels on 6VYB, RTX 3080. The three points per chart are the kernel's achieved performance measured against the L1, L2 and DRAM roofline ceilings. \textbf{Left:} polarization kernel. \textbf{Right:} ionic kernel.}
+\label{fig:roofline-naive-kernels}
+\end{figure}
+
 % TODO pseudo code could be nice, but its also really trivial
 % prof hasn't complained, I guess it is just trivial enough
 

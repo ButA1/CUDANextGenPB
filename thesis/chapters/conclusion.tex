@@ -23,7 +23,8 @@ On a system with a single GPU, AMGX has presented itself as the perfect fix for 
 It outperformed LIS especially at larger problem sizes, yielding up to a 10x performance uplift.
 I found that my (sub-)gather approach was much more memory efficient that the methods described in the admittedly very outdated AMGX Reference.
 It allowed larger molecules like 6VYB to fit in the 10GB of VRAM of an RTX 3080.
-However, this mechanism is done on the host side, and in case of a slow CPU, it may offset the performance gain of a faster GPU.
+However, this mechanism is done on the host side, which took longer than the actual solve on the cluster.
+How much of that host time was genuinely due to the gathering remained unclear.
 
 I developed two configurations. 
 One was tuned for memory efficiency using preconditioned CG with Block-Jacobi preconditioning, which despite needing a lot of iterations, still managed to be quite fast.

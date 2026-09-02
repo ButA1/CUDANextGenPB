@@ -1,3 +1,16 @@
 \chapter{Introduction}
 \label{sec:introduction}
 
+The Poisson-Boltzmann-Equation is a very frequently used non-linear partial differential equation for electrostatic modeling in soft matter physics, biophysics, and colloidal science (1) (2). 
+It enables modeling of molecular level interactions by calculating the electrostatic potential of molecules in electrolytic solutions. 
+Being a nonlinear equation, it is challenging, and also computationally expensive to solve with high degree of accuracy. 
+As is often the case with nonlinear problems, linearized versions of the PBE are preferred in order to simplify calculations, despite their limited application range. 
+However, even those linearized versions are still quite complex and computationally expensive, especially for large problems. 
+
+Next Generation Poisson Bolzmann (NGPB) (3) is a newly developed linear PBE, adaptive-grid, finite-element-method-based solution tool, which aims to reduce computational costs, while keeping the accuracy of the result high. 
+It provides accuracy comparable to MIBPB (3), at greater speed than DelPhi (4), enabling researchers to calculate problems at unprecedented scale while maintaining a high degree of accuracy. 
+It lends itself well for high-performance-architectures (HPA), which is already partially realized through the Message Pipeline Interface (MPI), which enables parallelism on Central Processing Units (CPUs) and CPU clusters. 
+On the other hand, Graphics Processing Units (GPUs) have long since been used for massively parallel computations, outside the domain of computer graphics. 
+It is reasonable to assume that, in the case of NGPB, utilizing HPAs with greater amounts of cores, such as GPUs could yield even greater speeds, enabling researchers to compute even greater problem sizes.
+
+Nvidia dominates the high-performance-architecture space with their proprietary CUDA API.

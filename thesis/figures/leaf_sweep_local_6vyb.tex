@@ -50,7 +50,7 @@
     legend style={draw=none, font=\footnotesize, column sep=0.6em},
 ]
 
-\nextgroupplot[xlabel={$n_{\mathrm{leaf,\,src}}$}, xtick={8,16,32,64}, xticklabels={8,16,32,64}, legend to name=leafsweeplegendsrcleafsweeplocalvyb]
+\nextgroupplot[xlabel={$n_{\mathrm{leaf,\,src}}$}, xtick={8,16,32,64}, xticklabels={8,16,32,64}, legend columns=2, legend to name=leafsweeplegendsrcleafsweeplocalvyb]
 
   \addplot[color=leafA, mark=*, mark size=1.3pt, line width=0.9pt ]
     table[x=sleaf, y=time, discard if not={tleaf}{128}] {figures/data/leaf_sweep_local_6vyb.dat};
@@ -71,7 +71,7 @@
     table[x=sleaf, y=time, discard if not={tleaf}{4096}] {figures/data/leaf_sweep_local_6vyb.dat};
   \addlegendentry{$n_{\mathrm{leaf,tgt}} = 4096$}
 
-\nextgroupplot[xlabel={$n_{\mathrm{leaf,\,tgt}}$}, xtick={128,256,512,1024,2048,4096}, xticklabels={128,256,512,1024,2048,4096}, legend to name=leafsweeplegendtgtleafsweeplocalvyb]
+\nextgroupplot[xlabel={$n_{\mathrm{leaf,\,tgt}}$}, xtick={128,256,512,1024,2048,4096}, xticklabels={128,256,512,1024,2048,4096}, legend columns=2, legend to name=leafsweeplegendtgtleafsweeplocalvyb]
 
   \addplot[color=leafA, mark=*, mark size=1.3pt, line width=0.9pt ]
     table[x=tleaf, y=time, discard if not={sleaf}{8}] {figures/data/leaf_sweep_local_6vyb.dat};
@@ -90,10 +90,17 @@
 \end{tikzpicture}
 
 \vspace{0.4ex}
+\begin{minipage}[t]{7.4cm}
+\centering
+{\scriptsize\emph{vs.\ source leaf}}\\[0.2ex]
 \ref{leafsweeplegendsrcleafsweeplocalvyb}
-
-\vspace{0.2ex}
+\end{minipage}%
+\hspace*{1.5cm}%
+\begin{minipage}[t]{7.4cm}
+\centering
+{\scriptsize\emph{vs.\ target leaf}}\\[0.2ex]
 \ref{leafsweeplegendtgtleafsweeplocalvyb}
+\end{minipage}
 
 \caption[FMM leaf sizes swept independently]{\textbf{The two FMM tree leaf sizes
     on \leafMoleculeleafsweeplocalvyb{} (\leafNatomsleafsweeplocalvyb{} atoms), swept independently at

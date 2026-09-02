@@ -87,6 +87,9 @@ test/*.out
 *.ncu-rep
 *.zst
 *.csv
+# ...except the hand-collected input to figures/total_time, which is not a
+# bench_sweep.py output and is the only copy of those runs.
+!thesis/figures/data/total_time_runs.csv
 exposed.xyz
 exposedIndices.txt
 *.err

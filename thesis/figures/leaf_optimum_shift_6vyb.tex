@@ -48,7 +48,7 @@
     legend style={draw=none, font=\footnotesize, column sep=0.6em},
 ]
 
-\nextgroupplot[ylabel={energy calculation [s]}, ymin=0.657697, ymax=4.17554, legend columns=6, legend to name=shiftlegendpleafoptimumshiftvyb]
+\nextgroupplot[ylabel={energy calculation [s]}, ymin=0.657697, ymax=4.17554, legend columns=2, legend to name=shiftlegendpleafoptimumshiftvyb]
   \addplot[color=shiftA, mark=*, mark size=1.3pt, line width=0.9pt]
     table[x=sleaf, y=time, discard if not={p}{6}] {figures/data/leaf_optimum_shift_6vyb_p.dat};
   \addlegendentry{$P = 6$}
@@ -70,7 +70,7 @@
   \addplot[only marks, mark=o, mark size=3.6pt, line width=0.9pt,
            color=black!75, forget plot] coordinates {(4,0.900307) (4,1.1764) (8,1.53928) (8,1.9613) (16,2.42884) (16,2.89975)};
 
-\nextgroupplot[ylabel={time / line minimum}, ymin=0.969288, ymax=1.41461, legend columns=4, legend to name=shiftlegendthetaleafoptimumshiftvyb]
+\nextgroupplot[ylabel={time / line minimum}, ymin=0.969288, ymax=1.41461, legend columns=2, legend to name=shiftlegendthetaleafoptimumshiftvyb]
   \addplot[color=shiftA, mark=*, mark size=1.3pt, line width=0.9pt]
     table[x=sleaf, y=tnorm, discard if not={mac10}{3}] {figures/data/leaf_optimum_shift_6vyb_theta.dat};
   \addlegendentry{$\theta = 0.3$}
@@ -90,10 +90,17 @@
 \end{tikzpicture}
 
 \vspace{0.4ex}
+\begin{minipage}[t]{7.4cm}
+\centering
+{\scriptsize\emph{vs.\ $P$}}\\[0.2ex]
 \ref{shiftlegendpleafoptimumshiftvyb}
-
-\vspace{0.2ex}
+\end{minipage}%
+\hspace*{1.5cm}%
+\begin{minipage}[t]{7.4cm}
+\centering
+{\scriptsize\emph{vs.\ $\theta$}}\\[0.2ex]
 \ref{shiftlegendthetaleafoptimumshiftvyb}
+\end{minipage}
 
 \caption[Source-leaf sweeps against $P$ and $\theta$]{\textbf{The source leaf
     size on \shiftMoleculeleafoptimumshiftvyb{} (\shiftNatomsleafoptimumshiftvyb{} atoms), swept against $P$ and
