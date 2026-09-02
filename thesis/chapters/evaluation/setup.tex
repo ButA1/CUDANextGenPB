@@ -133,6 +133,7 @@ Mesh settings were mostly kept at the given values, though I already pointed out
 Naturally, the versions of the dependencies had to be kept static. I settled on using NanoShaper version 1.5 taken from the master branch instead of 0.8, as version 1.5 features much greater performance, without affecting accuracy.
 Since the optimizations to BIMPP benefit both the original code and the CUDA-accelerated versions without affecting the accuracy, I will accept them into the baseline.
 The versions of the remaining dependencies were kept according to the Dockerfile within the NGPB repository.
+To greatly accelerate the capture of data, I extensively used AI generated scripts, which collected an plotted data automatically.
 
 \subsection{Comparing performance}
 \label{sec:evaluation-experimental-setup-comparing-speed}
@@ -216,4 +217,3 @@ The other is naturally part of the \texttt{ncu} profile.
 
 Outside of the cuDSS experiment, VRAM utilization was basically dwarfed by the RAM usage, especially during the energy calculation. 
 It was seen more as a correctness criterion: ``Did it fit into VRAM at all?'', especially on my local system with only 10GB.
-
