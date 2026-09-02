@@ -18,7 +18,7 @@ size directly.
     left panel   x = source leaf at a fixed target leaf
     right panel  x = target leaf at a fixed source leaf
 
-Each line is normalised to its own minimum, because the three configurations
+Each line is normalized to its own minimum, because the three configurations
 differ by up to 3.5x in absolute time and the subject here is the SHAPE -- where
 each curve bottoms out, not how high it sits.
 
@@ -162,7 +162,7 @@ PANELS
 \caption[Which platform change moves which leaf axis]{\textbf{The two leaf axes
     on \platMolecule{} (\platNatoms{} atoms) under a change of GPU and a change
     of rank count, at $\theta = \platMac{}$ and $P = \platOrder{}$.}
-    \platRepeats{}-repeat medians, each line normalised to its own minimum so
+    \platRepeats{}-repeat medians, each line normalized to its own minimum so
     the shapes stay comparable; open circles mark the minima. \emph{Left:} the
     source leaf axis. \emph{Right:} the target leaf axis. Each line is sliced
     through its own configuration's grid-wide optimum, given in the legend,

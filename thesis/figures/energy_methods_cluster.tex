@@ -80,7 +80,7 @@
     error bars/.cd, y dir=both, y explicit,
   ] table[x=molecule, y=naive, y error minus=naive_em, y error plus=naive_ep,
           meta=naive_lbl] {figures/data/energy_methods_cluster.dat};
-  \addlegendentry{naive GPU $O(NM)$}
+  \addlegendentry{naive GPU $\mathcal{O}(NM)$}
   \addplot+[
     ybar, bar shift=14.0pt, fill=energyfmm, draw=energyfmm!70!black, line width=0.4pt,
     nodes near coords, point meta=explicit symbolic,

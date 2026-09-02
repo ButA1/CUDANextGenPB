@@ -12,7 +12,7 @@ prediction is what the left panel tests.
 
     left panel   x = source leaf, one line per multipole order p
                  the minimum of each line walks RIGHT as p grows
-    right panel  x = source leaf, one line per theta, each normalised to its own
+    right panel  x = source leaf, one line per theta, each normalized to its own
                  minimum, so the shape can be compared across a 4x range in
                  absolute time. Theta changes how SHARP the optimum is; it barely
                  moves WHERE it is.
@@ -168,7 +168,7 @@ PANELS
     against $\theta$, with $n_{leaf,tgt} = \shiftTgt{}$.} \shiftRepeats{}-repeat
     medians; open circles mark each line's minimum. \emph{Left:} one line per
     multipole order, at $\theta = \shiftMac{}$. \emph{Right:} one line per
-    $\theta$, at $P = \shiftOrder{}$, each normalised to its own minimum so the
+    $\theta$, at $P = \shiftOrder{}$, each normalized to its own minimum so the
     shapes stay comparable.\shiftMachine}
 \label{fig:TAG}
 \end{figure}

@@ -318,7 +318,7 @@ ENTRY"""
 LEGEND_EXTRA = r"""  \addlegendimage{fmmfront, line width=1.6pt}
   \addlegendentry{Pareto front}
   \addlegendimage{black!55, dashed, line width=0.8pt}
-  \addlegendentry{naive $O(N^2)$}
+  \addlegendentry{naive $\mathcal{O}(N^2)$}
 """
 
 LEGEND_KIRKWOOD = r"""  \addlegendimage{black!45, densely dotted, line width=1.0pt}

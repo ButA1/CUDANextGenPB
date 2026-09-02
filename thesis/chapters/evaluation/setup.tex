@@ -193,7 +193,7 @@ The analytical reference values, seen in Table~\ref{tab:ngpb-analytical-values},
 The combination of my modifications to NGPB and its subsystems must not increase those magnitudes for all analytical test cases, meaning the magnitude of their error contributions must be at the same order or lower. 
 On the other hand, error magnitudes smaller than or equal to $10^{-16}$ are considered FP64 machine-level noise, so aiming for those is not necessary, giving me some wiggle room between $10^{-10}$ and $10^{-16}$ for possible approximations.
 
-Comparing the accuracy between the linear solvers should be unnecessary, since in theory all linear solvers aim to converge towards a set residual or accuracy value, which is completely independent of the solver or preconditioning.
+Comparing the accuracy between the linear solvers should be unnecessary, since in theory all linear solvers aim to converge toward a set residual or accuracy value, which is completely independent of the solver or preconditioning.
 However in practice, I noticed that LIS was somehow achieving higher accuracy than AMGX despite the same target accuracy of $10^{-6}$.
 Upon closer inspection, LIS oversteps its target and achieves a residual of $10^{-8}$, while AMGX quits right after reaching it.
 To rule out any degradation of the Kirkwood test result through AMGX, I pinned its accuracy to $10^{-10}$.

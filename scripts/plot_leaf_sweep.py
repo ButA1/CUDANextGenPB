@@ -293,10 +293,10 @@ def main():
     molecule = args.molecule or os.path.splitext(info["molecule"])[0] or "?"
     nrep = int(statistics.median(d["n"] for d in points))
     if naive_t is not None:
-        naive_note = (" The dashed line is the naive $O(N^2)$ GPU path at "
+        naive_note = (" The dashed line is the naive $\\mathcal{O}(N^2)$ GPU path at "
                       "%.3g\\,s." % naive_t)
     elif info["naive_t"] is not None:
-        naive_note = (" Every configuration shown beats the naive $O(N^2)$ GPU "
+        naive_note = (" Every configuration shown beats the naive $\\mathcal{O}(N^2)$ GPU "
                       "path, which takes %.3g\\,s and is off the scale of this "
                       "figure." % info["naive_t"])
     else:

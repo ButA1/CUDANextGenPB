@@ -5,18 +5,18 @@ In this section I first touch on the improvements to the host-side optimizations
 After that I will establish the baseline, since I got slightly different results for the analytical tests, even without modifications.
 Next I will show the comparison between LIS and AMGX, as well as the tuned configuration for the latter, on both the local machine and the cluster.
 The energy calculation results are a lot more intricate, particularly due to my FMM implementation having different parameters.
-It also lead to the discovery, that due to NGPB evaluating the molecular atoms against the surface, having a shared leaf size for both trees was actually detrimental.
+It also led to the discovery that, due to NGPB evaluating the molecular atoms against the surface, having a shared leaf size for both trees was actually detrimental.
 
 \subsection{Create Markers}
 \label{sec:evaluation-results-create-markers}
 
 I created an optimized version of \snakecase{create_markers} called \snakecase{create_markers_fast} according to the implementation described in \ref{sec:implementation-host-side-create-markers}.
-This has nothing to do with the NGPB's convention of suffixing functions, which assume an unrefined grid wht \snakecase{_fast}.
+This has nothing to do with NGPB's convention of suffixing functions, which assume an unrefined grid, with \snakecase{_fast}.
 This method supports both, and simply stemmed from my early misunderstanding of the convention.
 
 For 6VYB, \snakecase{create_markers} took almost a full minute on the local machine.
 \snakecase{create_markers_fast} reduced that time to roughly 33 seconds, while not affecting accuracy as shown in Figure~\ref{fig:create-markers-speedup}.
-This shows that despite using two separate loops, computing the the ray casts and distributing them to the other ranks if much quicker than doing it on every loop.
+This shows that despite using two separate loops, computing the ray casts and distributing them to the other ranks is much quicker than doing it on every loop.
 
 \input{figures/create_markers_speedup}
 \FloatBarrier
@@ -24,19 +24,19 @@ This shows that despite using two separate loops, computing the the ray casts an
 \subsection{BIMPP}
 \label{sec:evaluation-results-bimpp}
 
-I forked the official BIMPP repository to do my implementations, and built and installed on my local system.
+I forked the official BIMPP repository to do my implementations, and built and installed it on my local system.
 I also shipped my local build with the Singularity container instead of the official one.
 Using git I could quickly switch between the official version and my own if needed.
 
 \subsubsection{sparse\_matrix\_template}
 
 Figure~\ref{fig:bimpp-memory-fix} shows the reduction of the memory consumption on rank 1 for 6VYB (test1).
-The move from \snakecase{std::map} to \snakecase{boost::container::flat\_map} lead to a 2.14x reduction of the host memory usage during \snakecase{assemble\_system\_matrix}, which was better than the predicted 2x reduction.
+The move from \snakecase{std::map} to \snakecase{boost::container::flat\_map} led to a 2.14x reduction of the host memory usage during \snakecase{assemble\_system\_matrix}, which was better than the predicted 2x reduction.
 Upon closer inspection, the swap shrinks the per-entry storage \textit{and} the outer vector of row handles, independently.
 Being the most memory intensive step in the entire NGPB pipeline, it had a great effect on the total memory consumption as well, reducing it by 1.5x.
 The remaining memory utilization of around 2.02GB, coming mostly from the p8est mesh, is unchanged.
-The totals are Heaptrack's peak heap memory consumption over the whole run, while the numbers for \snakecase{assemble\_system\_matrix} are the sum its allocations. 
-This change had no impact on accuracy, however it has slightly positive impact on the stage time of \snakecase{assemble\_system\_matrix}, going from roughly 22 seconds to 20.
+The totals are Heaptrack's peak heap memory consumption over the whole run, while the numbers for \snakecase{assemble\_system\_matrix} are the sum of its allocations.
+This change had no impact on accuracy; however, it had a slightly positive impact on the stage time of \snakecase{assemble\_system\_matrix}, going from roughly 22 seconds to 20.
 
 I have to clarify that this did not fix BIMPP's general issue of storing the entire global row of a distributed sparse matrix on every rank.
 However, that would have required major architectural changes to BIMPP.
@@ -46,9 +46,9 @@ The swap was a non-intrusive band-aid-fix.
 
 \subsubsection{bim3a\_solution\_with\_ghosts}
 
-My optimized \snakecase{bim3a_solution_with_ghosts} reduced the time taken for 6YVB from 10 seconds to just 60 milliseconds, which is an extreme speedup of almost 170x.
+My optimized \snakecase{bim3a_solution_with_ghosts} reduced the time taken for 6VYB from 10 seconds to just 60 milliseconds, which is an extreme speedup of almost 170x.
 This moves it from being a significant contributor of the overall time to basically negligible.
-Being used at the end of every solver, and twice inside \snakecase{create_density_map}, this removed roughly 30 from the overall total time for the full NGPB pipeline, \snakecase{create_density_map} alone shortening from 24 seconds to just 2.5 seconds.
+Since it is used at the end of every solver, and twice inside \snakecase{create_density_map}, this removed roughly 30 seconds from the overall total time for the full NGPB pipeline, with \snakecase{create_density_map} alone shortening from 24 seconds to just 2.5 seconds.
 This change also had no impact on accuracy.
 The only thing this costs is that the function is less agnostic to p4est, which means nothing in a library that otherwise solely relies on it.
 
@@ -58,15 +58,15 @@ The only thing this costs is that the function is less agnostic to p4est, which 
 \label{evaluation-results-baseline}
 
 I got slightly different results for the two analytical tests than the NGPB paper \cite{diflorio2025nextgenpb}.
-Some relative errors slightly are lower for me, while others slightly higher.
-The order or magnitude stayed the same across the board.
+Some relative errors are slightly lower for me, while others are slightly higher.
+The order of magnitude stayed the same across the board.
 The differences are shown in Table~\ref{tab:baseline-accuracy}.
-Interestingly, the triangulation-fix had no impact on these test.
+Interestingly, the triangulation-fix had no impact on these tests.
 The relative errors were exactly identical.
 
 Although AMGX was set to a lower residual, it did not increase accuracy.
-In fact is worsened the polarization error for the Kirkwood sphere test slightly when compared to the LIS result, which is still way better than the result from the paper.
-AMGX did genuinely reach a lower residual (1.195268e-09) than LIS (5.921088e-07), suggesting this is not a limitation of the software, but rather limitation of the mathematical method.
+In fact, it worsened the polarization error for the Kirkwood sphere test slightly when compared to the LIS result, which is still better than the result from the paper.
+AMGX did genuinely reach a lower residual (1.195268e-09) than LIS (5.921088e-07), suggesting this is not a limitation of the software, but rather a limitation of the mathematical method.
 It also might explain why the authors of NGPB had LIS set to a residual of 1e-6: at this value the accuracy already bottoms out.
 I set my personal result with LIS as the accuracy requirement for FMM.
 For AMGX I accepted the slight loss, as it is clearly very small.
@@ -79,29 +79,29 @@ For AMGX I accepted the slight loss, as it is clearly very small.
 
 \subsubsection{Local System}
 
-Figure~\ref{fig:solver-bench} compares the total stage time of the LIS and AMGX path for 1CCM, 6VYB and 1VSZ running on the local system.
+Figure~\ref{fig:solver-bench} compares the total stage time of the LIS and AMGX paths for 1CCM, 6VYB and 1VSZ running on the local system.
 Despite being set to a much smaller residual, the default configuration for AMGX manages to beat LIS at every sample size on the local system.
 For 1VSZ and 6VYB, the speedup was 10x, while for 1CCM it was much smaller.
 The tuned AMGX configuration runs faster than the default one, also at every sample size.
 This only tells half of the story: Table~\ref{tab:solver-bench} breaks the stage time down into the host time and AMGX's actual solve time.
-As LIS runs entirely on the CPU, its entire time attributed to the host.
-This shows that the CPU time for AMGX path, made up of the data gathering and transfer, is significant.
+As LIS runs entirely on the CPU, its entire time is attributed to the host.
+This shows that the CPU time for the AMGX path, made up of the data gathering and transfer, is significant.
 
 \input{figures/solver_bench}
 \input{figures/solver_bench_table}
 
 An interesting observation I made is that despite having more than 4x the atoms, 1VSZ's solve was a bit quicker than 6VYB's across the board.
-Upon inspection the number of quadrants and nodes for each molecule, 6VYB's grid had 28008707 nodes and 28294120 quadrants, while 1VSZ had 15879325 nodes and 16073576 quadrants.
-The number nodes equate to the dimension of the solution vector of the linear equation, which explains why 1VSZ's solve time is quicker.
+Upon inspecting the number of quadrants and nodes for each molecule, 6VYB's grid had 28008707 nodes and 28294120 quadrants, while 1VSZ had 15879325 nodes and 16073576 quadrants.
+The number of nodes equates to the dimension of the solution vector of the linear equation, which explains why 1VSZ's solve time is quicker.
 This implies that the number of atoms is not the only factor that predicts the size of the linear system.
 I suspect the geometric complexity plays a role here, since 6VYB's shape is quite irregular, and 1VSZ's shape is icosahedral.
 Figure~\ref{fig:molecule-shapes} shows the shapes of both molecules.
 
 \input{figures/molecule_shapes}
 
-The number of iterations are shown on top of the columns, as well as in the Table~\ref{tab:solver-bench}. 
-Even though the default ``CG-Jacobi-Block'' needs consistently a lot more iterations than both LIS and the tuned configuration (in cases of 6VYB and 1VSZ 10x as many than tuned), it was still much quicker than LIS, and only marginally slower than the tuned configuration.
-This demonstrates that having very cheap iterations can compensate their amount.
+The number of iterations is shown on top of the columns, as well as in Table~\ref{tab:solver-bench}.
+Even though the default ``CG-Jacobi-Block'' consistently needs a lot more iterations than both LIS and the tuned configuration (in cases of 6VYB and 1VSZ 10x as many as the tuned configuration), it was still much quicker than LIS, and only marginally slower than the tuned configuration.
+This demonstrates that having very cheap iterations can compensate for their number.
 
 \subsubsection{Cluster}
 
@@ -110,12 +110,12 @@ Figure~\ref{fig:solver-bench-cluster} shows the stage runtimes for 6VYB, 1VSZ an
 The former ran on a single A100 node, while H1N1 ran on the quad H200 node.
 The trend does not change from the local machine, with the tuned AMGX configuration still taking the crown.
 The timing breakdown can be seen in Table~\ref{tab:solver-bench-cluster}.
-Surprisingly the ``slower'' A100-node's CPU managed to run LIS faster the local CPU, probably due to running with 16 ranks instead of 4.
+Surprisingly the ``slower'' A100-node's CPU managed to run LIS faster than the local CPU, probably due to running with 16 ranks instead of 4.
 On the other hand, the host time on the AMGX path was around 500 milliseconds longer.
 This might suggest that a higher rank count makes the host work more expensive, but this is not the case as I will demonstrate shortly.
 Looking at the H1N1 timings, the number of ranks does not seem to be the only factor contributing to the host time, as the stage spent almost 33 of the 42 seconds on the host.
 The actual solve time meanwhile was just 3.6 seconds, with a 5.6 second setup time.
-I unfortunately do not enough data to determine whether this is due my rank-gathering or if it is due to something else.
+I unfortunately do not have enough data to determine whether this is due to my rank-gathering or to something else.
 Nevertheless this would have warranted a follow-up investigation.
 
 \input{figures/solver_bench_cluster}
@@ -123,20 +123,20 @@ Nevertheless this would have warranted a follow-up investigation.
 
 \subsubsection{Scaling Across Topologies}
 
-I then compared the AMGX solve time for 6VYB for four different topologies: the local system, a one cluster node with a single A100 GPU, one with dual A100 GPUs and two nodes with one A100 each, shown in Figure~\ref{fig:amgx_scaling_6vyb}.
+I then compared the AMGX solve time for 6VYB for four different topologies: the local system, one cluster node with a single A100 GPU, one with dual A100 GPUs and two nodes with one A100 each, shown in Figure~\ref{fig:amgx_scaling_6vyb}.
 The goal was to see how well AMGX scales across multiple nodes, and GPUs.
 To compare the single cluster node to the local system, I also included 4-rank runs on the cluster to match the local runs.
 Comparing the local system to a single cluster node with one A100 GPU launched with 4 ranks, the actual solve time decreased by over 2x.
 Despite this the overall stage time in case of the tuned AMGX configuration increased.
 This is again, due to the weak cluster CPU, which slows down the host portion of the linear solve from 3.8 seconds to 5.45 seconds, as can be seen in the timing breakdown in Table~\ref{tab:amgx_scaling_6vyb}.
-Increasing the number of ranks to 16 reduces the host time, disproving that a higher rank count make the host time more expensive.
+Increasing the number of ranks to 16 reduces the host time, disproving that a higher rank count makes the host time more expensive.
 Instead it suggests that a significant contributor to the host time might not be the gathering after all.
 
-The Figure~\ref{fig:amgx_scaling_6vyb} also shows that AMGX scales much better across multiple GPUs per node, but not on multiple nodes.
+Figure~\ref{fig:amgx_scaling_6vyb} also shows that AMGX scales much better across multiple GPUs per node, but not on multiple nodes.
 The tuned configuration performed significantly worse on two nodes than it did on a single node.
-This is very likely due to communication overhead, which is much lower on a single node with multiple GPUs as I showed in \ref{tab:test-systems}.
-There the tuned AMGX performed much better than the single GPU node.
-Surprisingly, the default configuration did not suffer as much, although it was barely any faster than one single GPU node.
+This is very likely due to communication overhead, which is much lower on a single node with multiple GPUs, as the latency measurements in Table~\ref{tab:mpi-latency-table} show.
+On the dual-GPU node the tuned AMGX performed much better than on the single-GPU node.
+Surprisingly, the default configuration did not suffer as much, although it was barely any faster than on a single-GPU node.
 This suggests that AMG preconditioning is more communication-intensive than even a multitude of cheap iterations.
 Despite this, the pure solve time of the tuned AMGX config was still faster on two nodes than the default configuration, as was the full stage time.
 
@@ -148,15 +148,15 @@ Despite this, the pure solve time of the tuned AMGX config was still faster on t
 \label{sec:evaluation-results-fmm-parameters}
 
 The FMM has multiple parameters, which I needed to balance against each other to find the optimum, those being the order of the multipole expansion $P$, the MAC parameter $\theta$ and the number of particles inside one leaf $n_{leaf}$.
-I made four sweeps of $P$ and $\theta$ for values between 6 to 10 and 0.2 to 0.8 for 6VYB and 1VSZ on my local machine.
+I made four sweeps of $P$ and $\theta$ for values from 6 to 10 and 0.2 to 0.8 for 6VYB and 1VSZ on my local machine.
 FMM was slower than the naive kernel for 1CCM, no matter which configuration I used, which is why I did not consider it for the parameter choice.
 This molecule consists of only 642 atoms, at which point the overhead of FMM is simply too expensive.
 
 \subsubsection{Multipole Order and MAC}
 
-I've plotted their speed against their relative error compared to the naive $O(N^2)$ GPU sum over the same inputs, taken from an average of 3 runs, which can be seen in Figure~\ref{fig:fmm_presplit_6vyb} and \ref{fig:fmm_presplit_1vsz}.
+I have plotted their speed against their relative error compared to the naive $\mathcal{O}(N^2)$ GPU sum over the same inputs, taken from an average of 3 runs, which can be seen in Figures~\ref{fig:fmm_presplit_6vyb} and \ref{fig:fmm_presplit_1vsz}.
 In those figures and in every later sweep figure, color is the multipole order $P$ and the points along each line are the MAC parameter $\theta$, rising from $0.2$ at the accurate end to $0.8$.
-Grey marks the Pareto front over the whole sweep, and the dashed vertical line the naive path's own time.
+Gray marks the Pareto front over the whole sweep, and the dashed vertical line the naive path's own time.
 
 % ------------------------------------------------------------------------
 %
@@ -177,35 +177,35 @@ Grey marks the Pareto front over the whole sweep, and the dashed vertical line t
 
 \subsubsection{Splitting the Leaf Size}
 
-Since it was my goal to achieve a relative error of the polarization energy equal or lower to the Kirkwood sphere result in \ref{evaluation-results-baseline}, I chose the two fastes configuration that reached this goal: $P = 9$, $\theta = 0.3$, $n_{leaf} = 64$ and $P = 10$, $\theta = 0.4$, $n_{leaf} = 256$.
-Profiling both configurations using \snakecase{ncu} revealed that each configurations are quick for very different reasons.
+Since it was my goal to achieve a relative error of the polarization energy equal to or lower than the Kirkwood sphere result in \ref{evaluation-results-baseline}, I chose the two fastest configurations that reached this goal: $P = 9$, $\theta = 0.3$, $n_{leaf} = 64$ and $P = 10$, $\theta = 0.4$, $n_{leaf} = 256$.
+Profiling both configurations using \snakecase{ncu} revealed that the two configurations are quick for very different reasons.
 The \snakecase{l2p_p2p_kernel} ran much quicker with $P = 9$, $\theta = 0.3$, $n_{leaf} = 64$ while \snakecase{m2l_accumulate_kernel} was much quicker with $P = 10$, $\theta = 0.4$, $n_{leaf} = 256$.
 The underlying reason is that the source tree containing the molecule atoms and the target tree containing the surface points have wildly different sizes.
-At a grid of scale of 2, the surface points far outnumber the atoms in the molecule, and they are also much denser.
+At a grid scale of 2, the surface points far outnumber the atoms in the molecule, and they are also much denser.
 Clustering both trees with the same leaf count causes wildly different geometric leaf sizes.
-M2L cost tracks with the number of total box-pair computed by the DTT, which was dominated by the number of box nodes of the much denser target tree.
+M2L cost tracks with the total number of box pairs computed by the DTT, which was dominated by the number of box nodes of the much denser target tree.
 Increasing the number of particles per leaf reduced that number, making M2L faster.
 However, raising the number of particles per leaf also increased the radii used in the MAC test (see Figure~\ref{fig:fmm-mac}).
 This meant it would fail more often, inflating the number of direct P2P interactions.
-Considering two best settings sat a $n_{leaf}$ of 64 and 256, but not 128 showed that this relationship was a U-shaped curve, with no optimum in between.
+That the two best settings sat at an $n_{leaf}$ of 64 and 256, but not 128, showed that this relationship was an inverted U-shaped curve, with no optimum in between.
 The solution was to split $n_{leaf}$ into source tree leaf counts $n_{leaf,src}$ and target tree leaf counts $n_{leaf,tgt}$.
 This allowed me to reduce $n_{leaf,src}$ while increasing $n_{leaf,tgt}$.
-Setting them to 64 and 256 respectively at $P = 10$, $\theta = 0.4$ slashed the time taken by FMM in half!
+Setting them to 64 and 256 respectively at $P = 10$, $\theta = 0.4$ cut the time taken by FMM in half.
 
 \subsubsection{Leaf-Size Optima}
 
 Next I tried to find the optima for both values.
-As seen in Figures~\ref{fig:leaf_sweep_6vyb} and \ref{fig:leaf_sweep_1vsz} the optimal values of $n_{leaf,src}$ and $n_{leaf,tgt}$ diverged into different directions.
-It also shows that they differ for both molecules, which is probably due to their different shapes, leading to different particle distributions.
+As seen in Figures~\ref{fig:leaf_sweep_6vyb} and \ref{fig:leaf_sweep_1vsz} the optimal values of $n_{leaf,src}$ and $n_{leaf,tgt}$ diverged in different directions.
+It also shows that they differ between the two molecules, which is probably due to their different shapes, leading to different particle distributions.
 
 \input{figures/leaf_sweep_6vyb}
 \input{figures/leaf_sweep_1vsz}
 
-I initially assumed that the ideal leaf counts would be exactly where the geometric leaf sizes of both trees would are equal, but further testing demonstrated that the optima shifted with different $P$ and $\theta$.
+I initially assumed that the ideal leaf counts would be exactly where the geometric leaf sizes of both trees would be equal, but further testing demonstrated that the optima shifted with different $P$ and $\theta$.
 This can be explained by the cost of P2P and M2L not being equal.
-The balance shifts towards P2P when the cost of M2L increases through rasing of $P$.
-I demonstrated this effect for 6VYB in the left diagram of the Figure~\ref{fig:leaf_optimum_shift_6vyb}, where the optimal $n_{leaf,src}$ rises monotonically with the order of $P$ (4, 4, 8, 8, 16, 16 for $P$ 6..11).
-Meanwhile $\theta$ has a much weaker secondary effect, flattening the the curve as it increases but not relocating the optimum.
+The balance shifts toward P2P when the cost of M2L increases through raising $P$.
+I demonstrated this effect for 6VYB in the left diagram of Figure~\ref{fig:leaf_optimum_shift_6vyb}, where the optimal $n_{leaf,src}$ rises monotonically with the order of $P$ (4, 4, 8, 8, 16, 16 for $P$ 6..11).
+Meanwhile $\theta$ has a much weaker secondary effect, flattening the curve as it increases but not relocating the optimum.
 Over $\theta = 0.3$ to $0.6$ the optimum does not move at all.
 
 \input{figures/leaf_optimum_shift_6vyb}
@@ -213,21 +213,21 @@ Over $\theta = 0.3$ to $0.6$ the optimum does not move at all.
 
 \subsubsection{Platform and Rank Shift}
 
-This also means that this balances is shifted once again on the cluster, where the cost of P2P is greatly reduced, thanks to higher FP64 performance.
-The left diagrams of Figures~\ref{fig:platform_shift_1vsz} and \ref{fig:platform_shift_6vyb} both show this effect though an increase in optimal $n_{leaf,src}$, which increases the number of P2P calculations through the two mechanism that explained above.
-On top of it all, the number of ranks also influence the balance.
-Each rank holds an exact copy of the source tree, but their target tree only is built from the particles of the domain region owned by the rank.
+This also means that this balance is shifted once again on the cluster, where the cost of P2P is greatly reduced, thanks to higher FP64 performance.
+The left diagrams of Figures~\ref{fig:platform_shift_1vsz} and \ref{fig:platform_shift_6vyb} both show this effect through an increase in optimal $n_{leaf,src}$, which increases the number of P2P calculations through the two mechanisms explained above.
+On top of it all, the number of ranks also influences the balance.
+Each rank holds an exact copy of the source tree, but its target tree is built only from the particles of the domain region owned by the rank.
 Even though regions are not equally populated, this still roughly equates to the number of particles being divided by the number of ranks, acting like a multiplier on the $n_{leaf,tgt}$.
 This can be clearly seen in the right diagram of Figure~\ref{fig:platform_shift_6vyb}, showing a decrease in the optimal $n_{leaf,tgt}$.
 
 \input{figures/platform_shift_6vyb}
 \input{figures/platform_shift_6vyb_table}
 
-Though the same cannot be objectively said about 1VSZ, it is clear from the curve that the A100-16 rank curve is almost flat between 512 and 1024, while the A100-4 rank curve has much more clear minima.
+Though the same cannot be objectively said about 1VSZ, it is clear from the curve that the A100 16-rank curve is almost flat between 512 and 1024, while the A100 4-rank curve has much clearer minima.
 
 In terms of accuracy: the rank 4 results from the A100 and the RTX 3080 are within a $10^{-12}$ relative error.
-An increase in ranks had the tendency to decrease the median error slightly, but this was only observed across 62\%-67\% of all runs.
-I will refrain from calling this a general trend, but rather fluctuations attributed to the observations made in \ref{sec:evaluation-experimental-setup-mpi-ranks}.
+An increase in ranks tended to decrease the median error slightly, but this was only observed across 62\%-67\% of all runs.
+I will refrain from calling this a general trend; I would rather attribute it to fluctuations, in line with the observations made in \ref{sec:evaluation-experimental-setup-mpi-ranks}.
 
 \input{figures/platform_shift_1vsz}
 \input{figures/platform_shift_1vsz_table}
@@ -235,27 +235,27 @@ I will refrain from calling this a general trend, but rather fluctuations attrib
 \subsubsection{Convergence in P}
 
 Despite the multitude of variables, the general direction for searching optima is clear, and considering the accuracy target, the mission now became a search for the fastest configuration that still satisfies it.
-I converged towards a local optimum through successive sweeps of the best configuration.
+I converged toward a local optimum through successive sweeps of the best configuration.
 
 One discovery I made while searching was that accuracy did not always monotonically increase with $P$.
-As an example: for 1VSZ and $\theta = 0.3$, $n_{leaf,src} = 16$, $n_{leaf,tgt} = 512$ the relative error increase from 4.1e-11 to 6.8e-10, going from $P = 7$ to $P = 8$.
+As an example: for 1VSZ and $\theta = 0.3$, $n_{leaf,src} = 16$, $n_{leaf,tgt} = 512$ the relative error increased from 4.1e-11 to 6.8e-10, going from $P = 7$ to $P = 8$.
 This necessitated the sweep across all $P$ every time I converged on a new optimum.
 Nevertheless it is not unexpected.
-The Cheng-Greengard-Rokhlin give an upper bound on a multipole converted to a local expansion with Theorem 2.4 of \cite{cheng1999fastadaptive}, and it roughly decays with $(\text{seperation ratio})^{(P+1)}$ scaled by the sum of the absolute charges.
-However three things made decide against striving towards it:
-Firstly, the atoms are carrying both negative and positive charges, meaning their net charge may be much lower than the sum of their absolutes.
+Cheng, Greengard and Rokhlin give an upper bound on a multipole converted to a local expansion with Theorem 2.4 of \cite{cheng1999fastadaptive}, and it roughly decays with $(\text{separation ratio})^{(P+1)}$ scaled by the sum of the absolute charges.
+However, three things made me decide against striving toward it:
+First, the atoms are carrying both negative and positive charges, meaning their net charge may be much lower than the sum of their absolutes.
 This is something Salmon \& Warren also state in \cite{salmon1994skeletons} \textit{``...the monopole contribution of a cell may be vanishingly small due to charge cancellation...''}.
-Second, this boundary makes no judgement on speed, just accuracy, and Salmon \& Warren have also shown that a few percent of accuracy may cost about 30 times as much in computation speed.
-Lastly, it does not mean that the error for a singular result will be exactly on that boundary, or that it will also decrease monotonically with $P$.
+Second, this bound makes no judgment on speed, just accuracy, and Salmon \& Warren have also shown that a few percent of accuracy may cost about 30 times as much in computation speed.
+Lastly, it does not mean that the error for a single result will be exactly on that bound, or that it will also decrease monotonically with $P$.
 At this point I need to clarify that Salmon \& Warren are not opposed to theoretical bounds.
 % TODO decide whether to include the θ/(2−θ) rate
 
 \subsubsection{Final Configurations}
 
 For my local machine the measured best configurations for 6VYB and 1VSZ can be seen in Table~\ref{tab:fmm_ptheta_6vyb-pareto} and \ref{tab:fmm_ptheta_1vsz-pareto}.
-For the stated accuracy goal of a potential energy relative error of less than 1.5e-10, the most efficient config for 6VYB was $P=11$, $\theta=0.4$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 1024$.
-For 1VSZ the most efficient config was $P=7$, $\theta=0.3$, $n_{leaf,src} = 16$ $n_{leaf,tgt} = 512$.
-I was unable to find a configuration for 1CCM that beat native, so I settled for the best one from a sweep of 140 configurations, which was $P=6$, $\theta=0.5$, $n_{leaf} = 256$.
+For the stated accuracy goal of a potential energy relative error of less than 1.5e-10, the most efficient config for 6VYB was $P=11$, $\theta=0.4$, $n_{leaf,src} = 16$, $n_{leaf,tgt} = 1024$.
+For 1VSZ the most efficient config was $P=7$, $\theta=0.3$, $n_{leaf,src} = 16$, $n_{leaf,tgt} = 512$.
+I was unable to find a configuration for 1CCM that beat naive, so I settled for the best one from a sweep of 140 configurations, which was $P=6$, $\theta=0.5$, $n_{leaf} = 256$.
 Note that the leaf sizes for it are still fused, as split leaf configurations were not faster in this case.
 
 % ------------------------------------------------------------------------
@@ -286,9 +286,9 @@ Note that the leaf sizes for it are still fused, as split leaf configurations we
 The computation time for the energy calculations on the local machine for 1CCM, 1VSZ and 6VYB can be seen in Figure~\ref{fig:energy-methods}, as well as Table~\ref{tab:energy-methods}.
 I used the best configuration I had found for each molecule in \ref{sec:evaluation-results-fmm-parameters}.
 As already pointed out in that section, no FMM configuration managed to beat the naive kernel for 1CCM.
-This shows that despite having a time complexity of \(\mathcal{O}(N)\), FMM has a clear offset cost, making it slower than a naive approach for smaller problems, which are not compute bound.
-Aside from the 1CCM, FMM managed to bring a 4.7x-7.5x speedup over the naive kernel, let alone the CPU path, compared to which it manage a speedup of 117x-127x.
-The naive kernel also brought a massive speedup over the CPU path as well, ranging from 7.7x for 1CCM to 24.6x for 1VSZ.
+This shows that despite having a time complexity of \(\mathcal{O}(N)\), FMM has a clear offset cost, making it slower than a naive approach for smaller problems, which are not compute-bound.
+Aside from 1CCM, FMM managed to bring a 4.7x-7.5x speedup over the naive kernel, let alone the CPU path, compared to which it managed a speedup of 117x-127x.
+The naive kernel also brought a massive speedup over the CPU path, ranging from 7.7x for 1CCM to 24.6x for 1VSZ.
 
 % ------------------------------------------------------------------------
 %
@@ -307,23 +307,23 @@ The naive kernel also brought a massive speedup over the CPU path as well, rangi
 
 Analogous to the linear solver comparison, I ran 6VYB, 1VSZ, as well as H1N1 on the cluster, which can be seen in Figure~\ref{fig:energy-methods-cluster}.
 6VYB and 1VSZ were run on a single A100 node.
-The LIS and naive kernel figures for H1N1 were recorded on a single node with 4 H200 GPUs, while the FMM was run on two H200 nodes, that have two GPUs each.
-This was due to my single node FMM run being contaminated somehow.
+The LIS and naive kernel figures for H1N1 were recorded on a single node with 4 H200 GPUs, while the FMM was run on two H200 nodes, each with two GPUs.
+This was due to my single-node FMM run being contaminated somehow.
 Also, due to time constraints and long queue times, the FMM runs were not using the most optimal configurations.
 For 6VYB and 1VSZ, I used a configuration of $P = 9, \theta = 0.3, n_{leaf,src} = 16, n_{leaf,tgt} = 1024$, while for H1N1 I used $P = 10, \theta = 0.4, n_{leaf} = 256$.
-Now running on a workstation GPU, the naive kernels are not FP64 bound anymore, resulting in insane gains of 286x and 321x for 6VYB and 1VSZ respectively, as seen in Table~\ref{tab:energy-methods-cluster}.
-This really showcases how well GPUs can boost performance through sheer strength.
+Now running on a workstation GPU, the naive kernels are not FP64 bound anymore, resulting in ludicrous gains of 286x and 321x for 6VYB and 1VSZ respectively, as seen in Table~\ref{tab:energy-methods-cluster}.
+This really showcases how well GPUs can boost performance through brute force.
 The gap between the naive kernels and FMM, which existed on the local machine, basically disappears.
 1VSZ is now slightly faster using the naive kernels, while 6VYB is slightly faster using FMM.
 
 Nevertheless, the gap reappears on H1N1, where FMM once again shows a massive speedup over the naive kernel, despite it using an old pre-split leaf-count configuration.
-The three results demonstrate again how FMM pays an upfront cost, that pays off massively once the problem becomes compute-bound.
-I have to point out that I didn't manage to capture the CPU time for H1N1, which ran out of time within its 12-hour slot, of which the other stages only used 49 minutes.
+The three results demonstrate again how FMM pays an upfront cost that pays off massively once the problem becomes compute-bound.
+I have to point out that I did not manage to capture the CPU time for H1N1, which ran out of time within its 12-hour slot, of which the other stages only used 49 minutes.
 Even a conservative estimate of 11 hours would mean the naive kernels --- having taken 52 minutes --- are at least 12.5x faster.
-Given that the speedup of the naive kernel for 1VSZ and 6YVB on the node A100 was roughly around 300x, I could have been that the CPU implementation would have taken multiple weeks to finish.
+Given that the speedup of the naive kernel for 1VSZ and 6VYB on the A100 node was roughly around 300x, it is plausible that the CPU implementation would have taken multiple weeks to finish.
 To be fair, the low rank count of just 8, which I had to pick due to memory constraints, would have definitely hurt the CPU performance as well.
-Due to the lack of a CPU reference, I had to compare accuracy of the FMM with the naive kernel.
-Given that the naive kernel is the exact math, not an approximation, this should be perfectly fine comparison, which can be seen in Table~\ref{tab:energy-methods-cluster}.
+Due to the lack of a CPU reference, I had to compare the accuracy of FMM with the naive kernel.
+Given that the naive kernel is the exact math, not an approximation, this should be a perfectly fine comparison, which can be seen in Table~\ref{tab:energy-methods-cluster}.
 
 % ------------------------------------------------------------------------
 %
@@ -348,10 +348,10 @@ Given that the naive kernel is the exact math, not an approximation, this should
 Next I want to compare how FMM and the naive kernels scale across the topologies using Figure~\ref{fig:energy_scaling_6vyb} and Table~\ref{tab:energy_scaling_6vyb}.
 Going from the RTX 3080 to its bigger sibling, the A100, we see a huge performance increase for the naive kernel, really accentuating the lack of FP64 units on the former.
 The improvement for FMM is much smaller, but it also gives an idea of how much it reduces the compute intensity of the N-Body calculation.
-Note that I am comparing the best local FMM parameter configuration for 6YVB, while the configuration for the cluster has a $n_{leaf,src}$ of 32 instead of 16, which performs better on the A100.
+Note that I am comparing the best local FMM parameter configuration for 6VYB, while the configuration for the cluster has a $n_{leaf,src}$ of 32 instead of 16, which performs better on the A100.
 Unlike AMGX, neither FMM nor the naive kernels need to communicate during the computation.
-Therefore there the two-node setup scales normally. 
-In case of FMM, it is scales even better than the one dual GPU node.
+Therefore the two-node setup scales normally.
+In the case of FMM, it scales even better than the single dual-GPU node.
 
 % ------------------------------------------------------------------------
 %
@@ -375,14 +375,14 @@ In case of FMM, it is scales even better than the one dual GPU node.
 
 Lastly I want to showcase the speedup to the total time of the entire NGPB pipeline running on the local system.
 The CPU baseline was measured using LIS and the CPU energy calculation, and also included the host-side optimizations.
-The setting for the CUDA-enabled steps where picked from the best configurations of the previous results for the local system.
+The settings for the CUDA-enabled steps were picked from the best configurations of the previous results for the local system.
 That means all optimized runs used AMGX with the tuned configuration.
 For 1CCM I used the naive kernel, while for 6VYB and 1VSZ I used the best measured configurations found in \ref{sec:evaluation-results-fmm-parameters}.
 
 This comparison really highlights how impactful my optimizations were for 6VYB and 1VSZ.
-6VYB's total went from almost 10 minutes to roughly 1,2 minutes, a speedup of 7.94x.
+6VYB's total went from almost 10 minutes to roughly 1.2 minutes, a speedup of 7.94x.
 Unfortunately, the speedup for 1CCM is barely noticeable, despite using the much quicker naive kernels.
-This result shows that the more complex the molecule, the bigger the pay-off becomes.
+This result shows that the more complex the molecule, the greater the payoff becomes.
 
 % ------------------------------------------------------------------------
 %

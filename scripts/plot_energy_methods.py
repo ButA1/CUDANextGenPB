@@ -55,7 +55,7 @@ import fmm_csv
 # and "naive versus FMM" second. Same three colours as the solver figure.
 METHODS = [
     ("cpu",   "0", "CPU",                "energycpu",   "D95F02"),
-    ("naive", "1", "naive GPU $O(NM)$",  "energynaive", "9DC3E0"),
+    ("naive", "1", r"naive GPU $\mathcal{O}(NM)$",  "energynaive", "9DC3E0"),
     ("fmm",   "2", "FMM",                "energyfmm",   "2C5F8D"),
 ]
 METHOD_KEYS = [m[0] for m in METHODS]

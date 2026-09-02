@@ -182,7 +182,7 @@ Table~\ref{tab:test-molecules} shows the molecules used in this thesis.
 
 \subsubsection{PDB and mmCIF files}
 
-PDB is a legacy file format used by the protein data bank, a data base that catalogues proteins, which gives them their characteristic ID.
+PDB is a legacy file format used by the protein data bank, a data base that catalogs proteins, which gives them their characteristic ID.
 They only contain the atomic coordinates, as well as residue and chain information.
 They're missing the partial charges and atomic radii, and require additional SIZ and CRG files for radii and charges to work inside NGPB.
 Alternatively, they can be converted to PQR using \snakecase{pdb2pqr} from the APBS toolset.
@@ -246,7 +246,7 @@ Rank 0 then distributes those rays to the corresponding ranks using \snakecase{f
 \subsection{Matrix Assembly}
 \label{sec:nextgenpb-submodules-matrix-assembly}
 
-In this step NGPB constructs the matrix operator and right-hand-side (RHS) of the LPBE. 
+In this step NGPB constructs the matrix operator and RHS of the LPBE. 
 This is done using \subsubsection{assemble\_system\_matrix} and \snakecase{create\_density\_map} respectively.
 
 \subsubsection{create\_density\_map}

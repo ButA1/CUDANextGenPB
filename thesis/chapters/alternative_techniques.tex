@@ -18,7 +18,7 @@ Although most FEM solvers avoid N-Body calculations entirely, NGPB has this prob
 On the one hand, many approximation techniques have been developed, which are all roughly based on the following idea:
 Kernels generally have an inverse dependency on distance.
 The further the distance between the bodies, the less individual interactions matter.
-These techniques range from being very simple, like the Cut-Off method, to fairly complex like Barnes Hut (BH) or Fast Multipole Method (FMM).
+These techniques range from being very simple, like the Cut-Off method, to fairly complex like Barnes-Hut (BH) or the FMM.
 
 On the other hand, the nature of the kernels means that N-Body problems are perfect for highly-parallel architectures, primarily GPUs.
 This works so well, in fact, that naively running kernels in parallel often beats intricate optimizations.
@@ -36,7 +36,7 @@ This fact relies on the system being very large, which is hardly ever the case.
 \label{sec:optimization-techniques-nbody-bh}
 
 If a cluster of bodies is far enough away from a target body, the cluster could be summarized as a single body that interacts with the target.
-This is the core idea behind Barnes-Hut (BH).
+This is the core idea behind Barnes-Hut.
 First the domain is organized into a tree.
 It walks through the tree of body clusters for all bodies. For each cluster, it decides whether it is far enough away to calculate the interaction using its summary instead of every individual interaction of every body within it.
 Originally, these summaries were approximated with simple sums of all the bodies in the cluster concentrated at their center of gravity.
@@ -69,7 +69,7 @@ f(\mathbf{r}) \approx \sum_{l=0}^{P} M_l(\mathbf{r})
 \label{eq:generic-multipole-expansion}
 \end{equation}
 Generally speaking, the number of terms in this sum correlates with the order $P$ of the expansion.
-The higher the order, the more the expansion converges towards the original function, becoming exact if the order is infinite.
+The higher the order, the more the expansion converges toward the original function, becoming exact if the order is infinite.
 An interesting observation is that the 0-th order term $M_0(\mathbf{r})$ is equal to the sum of the bodies, meaning that the original BH technically used a 0-order-expansion.
 
 There are many ways to formulate multipole expansions, each with their own upsides and downsides.
@@ -106,7 +106,7 @@ A spherical harmonic expansion for the Coulomb potential, as well as the screene
 \subsection{Fast Multipole Method}
 \label{sec:optimization-techniques-nbody-fmm}
 
-Introduced in 1987 by Leslie Greengard and Vladimir Rokhlin \cite{greengard1987fmm}, the Fast Multipole Method (FMM) takes the idea of Barnes-Hut and expands on it.
+Introduced in 1987 by Leslie Greengard and Vladimir Rokhlin \cite{greengard1987fmm}, the FMM takes the idea of Barnes-Hut and expands on it.
 Instead of evaluating the cluster multipole expansion against a single target body (as M2P does), it now also summarizes the targets into clusters as well, called the local expansion.
 This eliminates the need to traverse the tree for every body.
 Thus FMM does not iterate over each particle, but rather iterates over each leaf cluster, and computes their multipole expansion using the P2M operator.
@@ -124,7 +124,7 @@ The M2L operator iterates over all multipole expansion moments for every moment 
 For Cartesian Taylor with a space complexity of \(\mathcal{O}(p^3)\), this means the M2L would have the arithmetic complexity of \(\mathcal{O}(p^6)\), while spherical harmonics only end up with \(\mathcal{O}(p^4)\).
 Moreover, this complexity can be further reduced to \(\mathcal{O}(p^3)\) through rotational operators.
 Whether two clusters are considered well separated is purely based on whether they are touching, and which tree level they are on, rather than their geometry.
-This approach had already been applied multiple times to the BEM to solve for the electrostatic potential of biomolecular systems \cite{bharadwaj1995fmbem, cheng1999fastadaptive}.
+This approach had already been applied multiple times to the BEM to solve for the electrostatic potential of biomolecular systems \cite{bharadwaj1995fmbem, cheng1999fastadaptive, wilson2022tabipb2, yokota2011fmbem}.
 
 \subsubsection{Dual Tree Traverse}
 \label{sec:optimization-techniques-nbody-fmm-dtt}
@@ -190,7 +190,7 @@ For non-negative values this layout is monotonic: comparing the bit patterns as 
 Two non-negative doubles reinterpreted as signed integers therefore sort exactly like the doubles, and a native integer \texttt{atomicMin} already does the right thing.
 Negative values set the sign bit, which has two consequences.
 Among themselves they sort in reverse, since a larger magnitude means a larger bit pattern, and reinterpreted as unsigned integers they all outrank every non-negative value.
-Both effects are cancelled at once by switching to the opposite operation on the unsigned type, so a single branch on the sign of the incoming value is all that is needed.
+Both effects are canceled at once by switching to the opposite operation on the unsigned type, so a single branch on the sign of the incoming value is all that is needed.
 Either branch computes the correct result regardless of the sign of the value currently held at the address, which means that threads contributing values of mixed sign still reduce correctly.
 
 \subsection{Templating}

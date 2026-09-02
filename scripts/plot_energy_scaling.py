@@ -64,7 +64,7 @@ ENERGY_MACROS = ["energyScalingMolecule", "energyScalingRef",
 # energy_method column value -> (key, panel title, colour macro, table heading).
 METHODS = {
     "2": ("fmm", "FMM", "escalefmm", "FMM"),
-    "1": ("naive", r"naive $O(NM)$", "escalenaive", r"naive GPU $O(NM)$"),
+    "1": ("naive", r"naive $\mathcal{O}(NM)$", "escalenaive", r"naive GPU $\mathcal{O}(NM)$"),
     "0": ("cpu", "CPU", None, "CPU"),
 }
 PANEL_ORDER = ["fmm", "naive"]

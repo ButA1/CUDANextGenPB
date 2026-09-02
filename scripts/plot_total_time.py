@@ -46,7 +46,7 @@ CONFIGS = [
 # the earlier sections, not a fresh sweep, so they are recorded rather than
 # derived -- the source CSV carries times only.
 BEST_CONFIG = {
-    "1CCM": "the naive $O(NM)$ kernel",
+    "1CCM": "the naive $\\mathcal{O}(NM)$ kernel",
     "6VYB": "the FMM at $P = 11$, $\\theta = 0.4$, "
             "$n_{leaf,src} = 16$, $n_{leaf,tgt} = 1024$",
     "1VSZ": "the FMM at $P = 7$, $\\theta = 0.3$, "

@@ -489,7 +489,7 @@ Figure~\ref{fig:gpu-topology} shows this hierarchy for an example job with 2 nod
 \subsubsection{AMGX}
 
 Similarly to the single-node, single-GPU case, each group sub-gathers their partition of the matrix to their corresponding GPU.
-This time it is done through \snakecase{AMGX_matrix_upload_distributed}, since the entire system is solved on all GPUs; thus they need to communicate their changes to the non-locals amongst each other.
+This time it is done through \snakecase{AMGX_matrix_upload_distributed}, since the entire system is solved on all GPUs; thus they need to communicate their changes to the non-locals with each other.
 To know which group or GPU holds which part of the data, a \snakecase{partition_offsets} is computed and passed to AMGX.
 Every group leader also sets their \snakecase{device_id} through \snakecase{AMGX_resources_create}.
 

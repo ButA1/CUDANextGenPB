@@ -1,20 +1,42 @@
 \chapter{Introduction}
 \label{sec:introduction}
 
-The Poisson-Boltzmann-Equation is a very frequently used non-linear partial differential equation for electrostatic modeling in soft matter physics, biophysics, and colloidal science (1) (2). 
-It enables modeling of molecular level interactions by calculating the electrostatic potential of molecules in electrolytic solutions. 
-Being a nonlinear equation, it is challenging, and also computationally expensive to solve with high degree of accuracy. 
+The Poisson-Boltzmann equation (PBE) is a very frequently used nonlinear partial differential equation for electrostatic modeling in soft matter physics, biophysics, and colloidal science \cite{besley2023electrostatictheory, yang2023evergreen}. 
+It enables modeling of molecular-level interactions by calculating the electrostatic potential of molecules in electrolytic solutions. 
+Being a nonlinear equation, it is challenging and also computationally expensive to solve with a high degree of accuracy. 
 As is often the case with nonlinear problems, linearized versions of the PBE are preferred in order to simplify calculations, despite their limited application range. 
 However, even those linearized versions are still quite complex and computationally expensive, especially for large problems. 
 
-Next Generation Poisson Bolzmann (NGPB) (3) is a newly developed linear PBE, adaptive-grid, finite-element-method-based solution tool, which aims to reduce computational costs, while keeping the accuracy of the result high. 
-It provides accuracy comparable to MIBPB (3), at greater speed than DelPhi (4), enabling researchers to calculate problems at unprecedented scale while maintaining a high degree of accuracy. 
-It lends itself well for high-performance-architectures (HPA), which is already partially realized through the Message Pipeline Interface (MPI), which enables parallelism on Central Processing Units (CPUs) and CPU clusters. 
-On the other hand, Graphics Processing Units (GPUs) have long since been used for massively parallel computations, outside the domain of computer graphics. 
-NGPB does not feature any GPU support yet, missing out on large performance gains, enabling researchers to compute even greater problem sizes, and existing problem sizes at much lower time cost.
+Next Generation Poisson Boltzmann (NGPB) \cite{diflorio2025nextgenpb} is a newly developed linear PBE, adaptive-grid, finite-element-method-based solution tool, which aims to reduce computational costs, while keeping the accuracy of the result high. 
+It provides accuracy comparable to MIBPB \cite{chen2011mibpb}, at greater speed than DelPhi \cite{li2012delphi}, enabling researchers to solve problems at unprecedented scale while maintaining a high degree of accuracy. 
+It lends itself well to high-performance architectures, a potential already partially realized through the Message Passing Interface (MPI), which enables parallelism on Central Processing Units (CPUs) and CPU clusters. 
+On the other hand, Graphics Processing Units (GPUs) have long been used for massively parallel computations, outside the domain of computer graphics. 
+NGPB does not feature any GPU support yet, missing out on large performance gains that would enable researchers to compute even greater problem sizes, and existing problem sizes at much lower time cost.
 
-Particularly the linear solve and the energy calculation, which consist of numerous particle interactions are great candidates for GPU acceleration.
-Boundary element methods have already been optimized this way to great effect \cite{}.
+Particularly the linear solve and the energy calculation, which are the two most time-intensive steps of NGPB, are great candidates for GPU acceleration.
+Boundary element methods have already been optimized this way to great effect \cite{wilson2022tabipb2,yokota2011fmbem}.
+Though the optimization of pairwise interactions is uncommon among finite-element-based solvers, NGPB's approach presents a unique opportunity.
 
-Nvidia dominated the high-performance-architecture space since the introduction of their proprietary CUDA API.
-Its enjoys a rich ecosystem of libraries, like the AMGX linear solver library, which looks like the perfect ready-made fit for NGPB.
+Nvidia has dominated the high-performance architecture space since the introduction of its proprietary CUDA API.
+It allows for the programming of custom kernels to run on Nvidia GPUs.
+This way, the energy computation, which consists of numerous but simple particle interactions, could be easily ported to the GPU.
+However, a more sophisticated approach for this type of problem exists in the form of the fast multipole method (FMM), reducing the time complexity of many-body interactions.
+CUDA also enjoys a rich ecosystem of libraries, like the AMGX linear solver library, which is a ready-made fit for NGPB.
+
+In this thesis I make the following contributions:
+\begin{itemize}
+    \item I integrate Nvidia's AMGX library for the linear solve, providing two configurations, one tuned for memory efficiency and one for speed, achieving speedups of up to 10x over NGPB's existing LIS-based solver.
+    \item I implement naive CUDA kernels for the energy calculation, achieving speedups of up to 24.6x on an RTX 3080 and 321x on an A100 over the CPU implementation.
+    \item I implement an FMM, based on a dual-tree traversal and spherical harmonics, further increasing the energy-calculation speedup to 117x for compute-bound problems, while maintaining NGPB's original accuracy.
+    \item I characterize the scaling behavior of both optimizations across multiple GPUs and nodes, finding that they scale well on a single node, but that communication overhead can negate the benefits across multiple nodes for the linear solve.
+    \item I make a number of host-side optimizations to NGPB's dependency BIMPP, improving both memory efficiency and speed.
+    \item Together, these optimizations make it possible to compute the electrostatic potential of the entire H1N1 capsid on a single node in under an hour.
+\end{itemize}
+
+This thesis consists of a background chapter, explaining the PBE and its linearization, MPI, and CUDA.
+It also gives an introduction into linear solvers.
+Next comes a chapter showcasing NGPB's structure and its computational flow.
+After that comes a demonstration of various possible optimization techniques for NGPB's computational bottlenecks, as well as some general CUDA optimizations that I utilized.
+Then comes the implementation chapter with details about AMGX integration, the implementation of the naive kernel and FMM, as well as some host-side optimizations.
+The following evaluation chapter explains the experimental setup, followed by the results, segmented by the individual components.
+Finally, the conclusion chapter gives a summary and outlook for possible future work.
